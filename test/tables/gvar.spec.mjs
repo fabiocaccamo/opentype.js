@@ -274,6 +274,8 @@ describe('tables/gvar.mjs', function() {
             [750, 1672], [637.36, 1566]
         ];
         const glyph = font.glyphs.get(3);
+        // isComposite is set when the glyph is parsed
+        glyph.path;
         assert.equal(glyph.isComposite, true);
         const points = font.variation.getTransform(glyph, { opsz: 32, wght: 900 }).points;
         assert.equal(points.length, expectedPoints.length);
