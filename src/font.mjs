@@ -390,8 +390,9 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
     for (let i = 0; i < glyphs.length; i += 1) {
         const glyph = glyphs[i];
         callback.call(this, glyph, x, y, fontSize, options);
-        if (glyph.advanceWidth) {
-            x += glyph.advanceWidth * fontScale;
+        const advanceWidth = glyph.getAdvanceWidth(this, options.variation);
+        if (advanceWidth) {
+            x += advanceWidth * fontScale;
         }
 
         if (options.kerning && i < glyphs.length - 1) {

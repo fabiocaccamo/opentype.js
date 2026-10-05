@@ -403,15 +403,54 @@ export class VariationProcessor {
             }
         }
 
+        // the varied metrics go on the transformed glyph only: the source glyph
+        // is shared and must keep its default metrics
         if(this.font.tables.hvar) {
-            glyph._advanceWidth = typeof glyph._advanceWidth !== 'undefined' ? glyph._advanceWidth: glyph.advanceWidth;
-            glyph.advanceWidth = transformedGlyph.advanceWidth = Math.round(glyph._advanceWidth + this.getVariableAdjustment(transformedGlyph.index, 'hvar', 'advanceWidth', coords));
-            
-            glyph._leftSideBearing = typeof glyph._leftSideBearing !== 'undefined' ? glyph._leftSideBearing: glyph.leftSideBearing;
-            glyph.leftSideBearing = transformedGlyph.leftSideBearing = Math.round(glyph._leftSideBearing + this.getVariableAdjustment(transformedGlyph.index, 'hvar', 'lsb', coords));
+            if (transformedGlyph === glyph) {
+                transformedGlyph = new Glyph(Object.assign({}, glyph));
+            }
+            transformedGlyph.advanceWidth = this.getAdvanceWidth(glyph, coords);
+            transformedGlyph.leftSideBearing = this.getLeftSideBearing(glyph, coords);
         }
 
         return transformedGlyph;
+    }
+
+    /**
+     * Returns the advance width of a glyph at the given variation coordinates,
+     * without modifying the glyph.
+     * @param {Glyph|number} glyph - Glyph or glyph index.
+     * @param {Object} [coords] - Variation coordinates, the current variation if omitted.
+     * @returns {number} Advance width in font units.
+     */
+    getAdvanceWidth(glyph, coords) {
+        if(Number.isInteger(glyph)) {
+            glyph = this.font.glyphs.get(glyph);
+        }
+        if(!this.font.tables.hvar) {
+            return glyph.advanceWidth;
+        }
+        return Math.round(glyph.advanceWidth + this.getVariableAdjustment(glyph.index, 'hvar', 'advanceWidth', coords));
+    }
+
+    /**
+     * Returns the left side bearing of a glyph at the given variation coordinates,
+     * without modifying the glyph.
+     * @param {Glyph|number} glyph - Glyph or glyph index.
+     * @param {Object} [coords] - Variation coordinates, the current variation if omitted.
+     * @returns {number} Left side bearing in font units.
+     */
+    getLeftSideBearing(glyph, coords) {
+        if(Number.isInteger(glyph)) {
+            glyph = this.font.glyphs.get(glyph);
+        }
+        // the implicit glyph id mapping only applies to advance widths: without
+        // an LSB mapping HVAR carries no left side bearing variations
+        const hvar = this.font.tables.hvar;
+        if(!hvar || !hvar.lsb || !hvar.lsb.map || !hvar.lsb.map.length) {
+            return glyph.leftSideBearing;
+        }
+        return Math.round(glyph.leftSideBearing + this.getVariableAdjustment(glyph.index, 'hvar', 'lsb', coords));
     }
 
     getCvarTransform(coords) {
