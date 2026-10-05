@@ -209,7 +209,7 @@ describe('tables/cff.mjs', function () {
         assert.equal(topDict._fdArray[0]._privateDict, undefined);
         const commands = font.charToGlyph('A').getPath(0, 0, 1000).commands;
         assert.deepEqual(commands.map(command => [command.type, command.x, command.y]), [
-            ['M', 100, 0], ['L', 500, 0], ['L', 500, -700], ['L', 100, -700]
+            ['M', 100, 0], ['L', 500, 0], ['L', 500, -700], ['L', 100, -700], ['Z', undefined, undefined]
         ]);
     });
 
