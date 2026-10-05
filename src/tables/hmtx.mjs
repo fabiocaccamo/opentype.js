@@ -9,9 +9,12 @@ function parseHmtxTableAll(data, start, numMetrics, numGlyphs, glyphs) {
     let leftSideBearing;
     const p = new parse.Parser(data, start);
     for (let i = 0; i < numGlyphs; i += 1) {
-        // If the font is monospaced, only one entry is needed. This last entry applies to all subsequent glyphs.
+        // The glyphs after the last longHorMetric reuse its advance width, but each one
+        // has its own left side bearing in the leftSideBearings array that follows.
         if (i < numMetrics) {
             advanceWidth = p.parseUShort();
+            leftSideBearing = p.parseShort();
+        } else {
             leftSideBearing = p.parseShort();
         }
 
@@ -28,9 +31,12 @@ function parseHmtxTableOnLowMemory(font, data, start, numMetrics, numGlyphs) {
     let leftSideBearing;
     const p = new parse.Parser(data, start);
     for (let i = 0; i < numGlyphs; i += 1) {
-        // If the font is monospaced, only one entry is needed. This last entry applies to all subsequent glyphs.
+        // The glyphs after the last longHorMetric reuse its advance width, but each one
+        // has its own left side bearing in the leftSideBearings array that follows.
         if (i < numMetrics) {
             advanceWidth = p.parseUShort();
+            leftSideBearing = p.parseShort();
+        } else {
             leftSideBearing = p.parseShort();
         }
 
