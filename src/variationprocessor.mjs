@@ -152,16 +152,18 @@ export class VariationProcessor {
         let iterable = ['x', 'y'];
         for (let i = 0; i < iterable.length; i++) {
             let k = iterable[i];
-            if (glyphPoints[ref1][k] > glyphPoints[ref2][k]) {
-                var p = ref1;
-                ref1 = ref2;
-                ref2 = p;
+            // swap per axis: swapping ref1/ref2 in place would leak the x order into y
+            let r1 = ref1;
+            let r2 = ref2;
+            if (glyphPoints[r1][k] > glyphPoints[r2][k]) {
+                r1 = ref2;
+                r2 = ref1;
             }
 
-            let in1 = glyphPoints[ref1][k];
-            let in2 = glyphPoints[ref2][k];
-            let out1 = points[ref1][k];
-            let out2 = points[ref2][k];
+            let in1 = glyphPoints[r1][k];
+            let in2 = glyphPoints[r2][k];
+            let out1 = points[r1][k];
+            let out2 = points[r2][k];
 
             // If the reference points have the same coordinate but different
             // delta, inferred delta is zero.  Otherwise interpolate.
@@ -330,7 +332,10 @@ export class VariationProcessor {
             } else {
                 let interpolatedPoints;
                 if(flavor === 'gvar') {
-                    interpolatedPoints = transformedPoints.map(copyPoint);
+                    // IUP works on the default (unvaried) outline: using the points
+                    // already moved by previous tuples gives wrong weights with
+                    // multiple active tuples
+                    interpolatedPoints = points.map(copyPoint);
                 } else if (flavor === 'cvar') {
                     interpolatedPoints = transformedPoints;
                 }
@@ -350,11 +355,11 @@ export class VariationProcessor {
                 }
 
                 if(flavor === 'gvar') {
-                    this.interpolatePoints(interpolatedPoints, transformedPoints, deltaMap);
-    
+                    this.interpolatePoints(interpolatedPoints, points, deltaMap);
+
                     for (let i = 0; i < points.length; i++) {
-                        let deltaX = interpolatedPoints[i].x - transformedPoints[i].x;
-                        let deltaY = interpolatedPoints[i].y - transformedPoints[i].y;
+                        let deltaX = interpolatedPoints[i].x - points[i].x;
+                        let deltaY = interpolatedPoints[i].y - points[i].y;
     
                         transformedPoints[i].x = Math.round(transformedPoints[i].x + deltaX);
                         transformedPoints[i].y = Math.round(transformedPoints[i].y + deltaY);
