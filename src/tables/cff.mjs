@@ -658,8 +658,10 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
         subrs = fdDict._subrs;
         subrsBias = fdDict._subrsBias;
         if ( version > 1 ) {
-            vstore = cffTable.topDict._vstore.itemVariationStore;
-            vsindex = fdDict._privateDict.vsindex;
+            // static CFF2 fonts may omit the VariationStore and have an empty
+            // Private DICT: both are only needed by the blend/vsindex operators
+            vstore = cffTable.topDict._vstore ? cffTable.topDict._vstore.itemVariationStore : [];
+            vsindex = fdDict._privateDict ? fdDict._privateDict.vsindex : 0;
         } else {
             defaultWidthX = fdDict._defaultWidthX;
             nominalWidthX = fdDict._nominalWidthX;

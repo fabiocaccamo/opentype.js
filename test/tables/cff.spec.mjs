@@ -187,6 +187,17 @@ describe('tables/cff.mjs', function () {
         });
     });
 
+    it('can draw glyphs of a static CFF2 font without VariationStore and with an empty Private DICT', function() {
+        const font = loadSync('./test/fonts/TestCFF2-Static.otf');
+        const topDict = font.tables.cff2.topDict;
+        assert.equal(topDict._vstore, undefined);
+        assert.equal(topDict._fdArray[0]._privateDict, undefined);
+        const commands = font.charToGlyph('A').getPath(0, 0, 1000).commands;
+        assert.deepEqual(commands.map(command => [command.type, command.x, command.y]), [
+            ['M', 100, 0], ['L', 500, 0], ['L', 500, -700], ['L', 100, -700]
+        ]);
+    });
+
     it('correctly transforms CFF2 variable font glyphs using blend operations', function() {
         const font = loadSync('./test/fonts/TestRVRN-CFF2.otf');
         const untransformedPoints = [
