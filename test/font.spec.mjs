@@ -181,6 +181,26 @@ describe('font.mjs', function() {
             assert.equal(tables.tableName, 'sfnt');
         });
     });
+
+    describe('getKerningValue', function() {
+        it('accepts glyph objects with index 0', function() {
+            font.kerningPairs = { '0,1': -50 };
+            assert.equal(font.getKerningValue(font.glyphs.get(0), font.glyphs.get(1)), -50);
+            assert.equal(font.getKerningValue(0, 1), -50);
+        });
+
+        it('applies the variation deltas of GPOS kerning (VariationIndex in GDEF)', function() {
+            const variableFont = loadSync('./test/fonts/Changa-VariableFont_wght.ttf');
+            const left = variableFont.charToGlyph('A');
+            const right = variableFont.charToGlyph('V');
+            // expected values from fontTools.varLib.instancer
+            assert.equal(variableFont.getKerningValue(left, right, { wght: 200 }), -17);
+            assert.equal(variableFont.getKerningValue(left, right, { wght: 500 }), -23);
+            assert.equal(variableFont.getKerningValue(left, right, { wght: 800 }), -30);
+            variableFont.variation.set({ wght: 800 });
+            assert.equal(variableFont.getKerningValue(left, right), -30);
+        });
+    });
 });
 
 describe('glyphset.mjs', function() {

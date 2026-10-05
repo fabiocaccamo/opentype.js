@@ -318,16 +318,18 @@ Font.prototype.glyphIndexToName = function(gid) {
  * between glyphs.
  * For GPOS kerning, this method uses the default script and language, which covers
  * most use cases. To have greater control, use font.position.getKerningValue .
- * @param  {opentype.Glyph} leftGlyph
- * @param  {opentype.Glyph} rightGlyph
+ * @param  {opentype.Glyph|number} leftGlyph
+ * @param  {opentype.Glyph|number} rightGlyph
+ * @param  {Object} [variation] - variation coordinates for GPOS kerning, the current font variation if omitted
  * @return {Number}
  */
-Font.prototype.getKerningValue = function(leftGlyph, rightGlyph) {
-    leftGlyph = leftGlyph.index || leftGlyph;
-    rightGlyph = rightGlyph.index || rightGlyph;
+Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variation) {
+    // glyph objects or indexes (index 0 is valid, so no `glyph.index || glyph`)
+    leftGlyph = typeof leftGlyph === 'object' ? leftGlyph.index : leftGlyph;
+    rightGlyph = typeof rightGlyph === 'object' ? rightGlyph.index : rightGlyph;
     const gposKerning = this.position.defaultKerningTables;
     if (gposKerning) {
-        return this.position.getKerningValue(gposKerning, leftGlyph, rightGlyph);
+        return this.position.getKerningValue(gposKerning, leftGlyph, rightGlyph, variation);
     }
     // "kern" table
     return this.kerningPairs[leftGlyph + ',' + rightGlyph] || 0;
@@ -398,8 +400,8 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
             // We should apply position adjustment lookups in a more generic way.
             // Here we only use the xAdvance value.
             const kerningValue = kerningLookups ?
-                this.position.getKerningValue(kerningLookups, glyph.index, glyphs[i + 1].index) :
-                this.getKerningValue(glyph, glyphs[i + 1]);
+                this.position.getKerningValue(kerningLookups, glyph.index, glyphs[i + 1].index, options.variation) :
+                this.getKerningValue(glyph, glyphs[i + 1], options.variation);
             x += kerningValue * fontScale;
         }
 
