@@ -22,6 +22,8 @@ describe('tables/fvar.mjs', function() {
                 minValue: 100,
                 defaultValue: 400,
                 maxValue: 900,
+                flags: 0,
+                hidden: false,
                 axisNameID: 257,
                 name: {en: 'Weight', ja: 'ウエイト'}
             },
@@ -30,6 +32,8 @@ describe('tables/fvar.mjs', function() {
                 minValue: 50,
                 defaultValue: 100,
                 maxValue: 200,
+                flags: 0,
+                hidden: false,
                 axisNameID: 258,
                 name: {en: 'Width', ja: '幅'}
             }
@@ -63,6 +67,17 @@ describe('tables/fvar.mjs', function() {
 
     it('can parse a font variations table', function() {
         assert.deepEqual(table, fvar.parse(unhex(data), 0, names));
+    });
+
+    it('parses and writes the HIDDEN_AXIS flag', function() {
+        // same table with the flags of the wdth axis set to HIDDEN_AXIS (0x0001)
+        const hiddenAxisData = data.replace(
+            '77 64 74 68 00 32 00 00 00 64 00 00 00 C8 00 00 00 00 01 02',
+            '77 64 74 68 00 32 00 00 00 64 00 00 00 C8 00 00 00 01 01 02'
+        );
+        const parsed = fvar.parse(unhex(hiddenAxisData), 0, names);
+        assert.deepEqual(parsed.axes.map(axis => [axis.tag, axis.flags, axis.hidden]), [['wght', 0, false], ['wdth', 1, true]]);
+        assert.equal(hex(fvar.make(parsed, names).encode()), hiddenAxisData);
     });
 
     it('parses nameIDs 2 and 17 and postScriptNameID 6 correctly', function() {

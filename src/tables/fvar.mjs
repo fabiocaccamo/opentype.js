@@ -12,10 +12,13 @@ function makeFvarAxis(n, axis) {
         {name: 'minValue_' + n, type: 'FIXED', value: axis.minValue << 16},
         {name: 'defaultValue_' + n, type: 'FIXED', value: axis.defaultValue << 16},
         {name: 'maxValue_' + n, type: 'FIXED', value: axis.maxValue << 16},
-        {name: 'flags_' + n, type: 'USHORT', value: 0},
+        {name: 'flags_' + n, type: 'USHORT', value: axis.flags || 0},
         {name: 'nameID_' + n, type: 'USHORT', value: axis.axisNameID}
     ];
 }
+
+// fvar axis flags: https://learn.microsoft.com/en-us/typography/opentype/spec/fvar#variationaxisrecord
+const HIDDEN_AXIS = 0x0001;
 
 function parseFvarAxis(data, start, names) {
     const axis = {};
@@ -24,7 +27,9 @@ function parseFvarAxis(data, start, names) {
     axis.minValue = p.parseFixed();
     axis.defaultValue = p.parseFixed();
     axis.maxValue = p.parseFixed();
-    p.skip('uShort', 1);  // reserved for flags; no values defined
+    axis.flags = p.parseUShort();
+    // the axis should not be exposed in user interfaces
+    axis.hidden = (axis.flags & HIDDEN_AXIS) !== 0;
     const axisNameID = p.parseUShort();
     axis.axisNameID = axisNameID;
     axis.name = getNameByID(names, axisNameID);
