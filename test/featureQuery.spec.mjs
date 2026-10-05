@@ -184,4 +184,20 @@ describe('featureQuery.mjs', function() {
             assert.deepEqual(substitution, [273, 1087]);
         });
     });
+    describe('unsupported lookups', function() {
+        it('skips an unsupported lookup and still applies the supported lookups of the same feature', function () {
+            const font = loadSync('./test/fonts/TestGSUB-UnsupportedLookup.ttf');
+            const originalWarn = console.warn;
+            const warnings = [];
+            console.warn = message => warnings.push(message);
+            try {
+                assert.deepEqual(font.stringToGlyphs('fia').map(glyph => glyph.name), ['f_i', 'a']);
+                assert.deepEqual(font.stringToGlyphs('fia').map(glyph => glyph.name), ['f_i', 'a']);
+            } finally {
+                console.warn = originalWarn;
+            }
+            assert.equal(warnings.length, 1);
+            assert.match(warnings[0], /lookupType: 3 - substFormat: 1 is not yet supported, lookup skipped/);
+        });
+    });
 });

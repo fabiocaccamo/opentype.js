@@ -88,6 +88,11 @@ TestCVARGVARTwo.ttf
     SIL Open Font License, Version 1.1
     http://scripts.sil.org/OFL
 
+TestGSUB-UnsupportedLookup.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite.
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 TestGVAROne.ttf
 TestGVARTwo.ttf
 TestGVARThree.ttf
