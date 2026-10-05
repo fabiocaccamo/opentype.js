@@ -239,6 +239,19 @@ describe('glyph.mjs', function() {
             assert.deepEqual(path._layers[2].fill, '#ff000099');
         });
     });
+
+    describe('getPath', function() {
+        it('keeps the closePath commands of filled contours', function() {
+            const font = loadSync('./test/fonts/Roboto-Black.ttf');
+            const glyph = font.charToGlyph('o');
+            const countCommands = (commands, type) => commands.filter(command => command.type === type).length;
+            const sourceCommands = glyph.path.commands;
+            const commands = glyph.getPath(0, 0, 72, {}, font).commands;
+            assert.equal(countCommands(sourceCommands, 'Z'), 2);
+            assert.equal(countCommands(commands, 'Z'), countCommands(sourceCommands, 'Z'));
+            assert.equal(countCommands(font.getPath('oo', 0, 0, 72).commands, 'Z'), 4);
+        });
+    });
 });
 
 describe('glyph.mjs on low memory mode', function() {

@@ -135,8 +135,23 @@ describe('tables/cff.mjs', function () {
             { type: 'M', x: 50, y: 0 },
             { type: 'L', x: 550, y: 0 },
             { type: 'L', x: 550, y: 500 },
-            { type: 'L', x: 50, y: 500 }
+            { type: 'L', x: 50, y: 500 },
+            { type: 'Z' }
         ] );
+    });
+
+    it('closes the last contour of CFF2 glyphs, which have no endchar operator', function() {
+        const font = loadSync('./test/fonts/TestRVRN-CFF2.otf');
+        const glyph = font.glyphs.get(1);
+        const countClosedContours = commands => commands.filter(command => command.type === 'Z').length;
+        const countContours = commands => commands.filter(command => command.type === 'M').length;
+        const defaultCommands = glyph.path.commands;
+        assert.ok(countContours(defaultCommands) > 0);
+        assert.equal(countClosedContours(defaultCommands), countContours(defaultCommands));
+        assert.equal(defaultCommands[defaultCommands.length - 1].type, 'Z');
+        const variedCommands = glyph.getPath(0, 0, 1000, { variation: { wght: 900 } }, font).commands;
+        assert.equal(countClosedContours(variedCommands), countContours(variedCommands));
+        assert.equal(variedCommands[variedCommands.length - 1].type, 'Z');
     });
 
     it('can handle standard encoding accented characters via endchar', function() {

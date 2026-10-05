@@ -232,7 +232,9 @@ Glyph.prototype.getPath = function(x, y, fontSize, options, font) {
             p.curveTo(x + (cmd.x1 * xScale), y + (-cmd.y1 * yScale),
                 x + (cmd.x2 * xScale), y + (-cmd.y2 * yScale),
                 x + (cmd.x * xScale), y + (-cmd.y * yScale));
-        } else if (cmd.type === 'Z' && p.stroke && p.strokeWidth) {
+        } else if (cmd.type === 'Z') {
+            // stroked single-line glyphs (CFF PaintType 2) never emit Z,
+            // so every Z found here closes a filled contour
             p.closePath();
         }
     }

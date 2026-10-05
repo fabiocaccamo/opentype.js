@@ -1164,6 +1164,12 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
 
     parse(code);
 
+    // CFF2 charstrings have no endchar operator: close the last contour here
+    if (open && paintType !== 2) {
+        p.closePath();
+        open = false;
+    }
+
     if(font.variation && coords) {
         // round the point values:  we can't do that directly in the blend operator,
         // because that might run multiple times and rounding errors might accumulate
