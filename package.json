@@ -26,6 +26,7 @@
   "scripts": {
     "build": "npm run b:umd && npm run b:esm",
     "dist": " npm run d:umd && npm run d:esm",
+    "prepare": "npm run build",
     "test": "npm run build && npm run dist && mocha --recursive && npm run lint",
     "lint": "eslint src",
     "lint-fix": "eslint src --fix",
