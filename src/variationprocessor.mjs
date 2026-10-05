@@ -210,26 +210,38 @@ export class VariationProcessor {
     }
 
     /**
+     * Adds the component offset deltas of a tuple to the accumulated deltas of a composite glyph.
+     * @param {Array<{dx: number, dy: number}>} componentDeltas - Accumulated deltas, one per component.
+     * @param {Array<number>} tuplePoints - Points that are part of the tuple.
+     * @param {Object} header - Header information from the variation data.
+     * @param {number} factor - The scaling factor of the tuple.
+     */
+    accumulateComponentDeltas(componentDeltas, tuplePoints, header, factor) {
+        for(let c = 0; c < componentDeltas.length; c++) {
+            // an empty tuple point list means "all points": component c maps to delta index c
+            const deltaIndex = tuplePoints.length ? tuplePoints.indexOf(c) : c;
+            if(deltaIndex > -1) {
+                componentDeltas[c].dx += header.deltas[deltaIndex] * factor;
+                componentDeltas[c].dy += header.deltasY[deltaIndex] * factor;
+            }
+        }
+    }
+
+    /**
      * Transforms glyph components based on variation data.
      * @param {Glyph} glyph - The composite glyph to transform.
      * @param {Array<Object>} transformedPoints - Points that are already transformed.
      * @param {Object} coords - Variation coordinates.
-     * @param {Array<number>} tuplePoints - Points that are part of the tuple.
-     * @param {Object} header - Header information from the variation data.
-     * @param {number} factor - The scaling factor for the transformation.
+     * @param {Array<{dx: number, dy: number}>} componentDeltas - Offset deltas of all the active tuples, one per component.
      */
-    transformComponents(glyph, transformedPoints, coords, tuplePoints, header, factor) {
+    transformComponents(glyph, transformedPoints, coords, componentDeltas) {
         let pointsIndex = 0;
         for(let c = 0; c < glyph.components.length; c++) {
             const component = glyph.components[c];
             const componentGlyph = this.font.glyphs.get(component.glyphIndex);
             const componentTransform = copyComponent(component);
-            // an empty tuple point list means "all points": component c maps to delta index c
-            const deltaIndex = tuplePoints.length ? tuplePoints.indexOf(c) : c;
-            if(deltaIndex > -1) {
-                componentTransform.dx += Math.round(header.deltas[deltaIndex] * factor);
-                componentTransform.dy += Math.round(header.deltasY[deltaIndex] * factor);
-            }
+            componentTransform.dx += Math.round(componentDeltas[c].dx);
+            componentTransform.dy += Math.round(componentDeltas[c].dy);
             const transformedComponentPoints = transformPoints(this.getTransform(componentGlyph, coords).points, componentTransform);
             transformedPoints.splice(pointsIndex, transformedComponentPoints.length, ...transformedComponentPoints);
             pointsIndex += componentGlyph.points.length;
@@ -252,6 +264,9 @@ export class VariationProcessor {
         } else if (flavor === 'cvar') {
             transformedPoints = [...points];
         }
+
+        const isComposite = flavor === 'gvar' && args.glyph && args.glyph.isComposite;
+        const componentDeltas = isComposite ? args.glyph.components.map(() => ({ dx: 0, dy: 0 })) : null;
 
         for(let h = 0; h < headers.length; h++) {
             const header = headers[h];
@@ -307,12 +322,10 @@ export class VariationProcessor {
             // use sharedPoints instead).
             const tuplePoints = header.privatePoints ? header.privatePoints : sharedPoints;
 
-            if(flavor === 'gvar' && args.glyph && args.glyph.isComposite) {
-                /** @TODO: composite glyphs that are not explicitly targeted in the gvar table
-                 ** will not be transformed. It's unclear whether this is the desired behaviour or not,
-                ** @see https://github.com/unicode-org/text-rendering-tests/issues/96
-                */
-                this.transformComponents(args.glyph, transformedPoints, coords, tuplePoints, header, factor);
+            if(isComposite) {
+                // the offset deltas of every active tuple add up: the components
+                // are transformed once, after the loop
+                this.accumulateComponentDeltas(componentDeltas, tuplePoints, header, factor);
             } else if (tuplePoints.length === 0) {
                 for (let i = 0; i < transformedPoints.length; i++) {
                     const point = transformedPoints[i];
@@ -362,7 +375,12 @@ export class VariationProcessor {
                 }
             }
         }
-        
+
+        if (isComposite) {
+            // also with no active tuple: the components still apply their own variations
+            this.transformComponents(args.glyph, transformedPoints, coords, componentDeltas);
+        }
+
         return transformedPoints;
     }
 
@@ -385,7 +403,11 @@ export class VariationProcessor {
                 coords = this.font.variation.get();
             }
             if(hasPoints) {
-                const variationData = this.gvar() && this.gvar().glyphVariations[glyph.index];
+                let variationData = this.gvar() && this.gvar().glyphVariations[glyph.index];
+                // a composite glyph without its own variations still has varied components
+                if(!variationData && this.gvar() && glyph.isComposite) {
+                    variationData = { headers: [], sharedPoints: [] };
+                }
 
                 if(variationData) {
                     const glyphPoints = glyph.points;
