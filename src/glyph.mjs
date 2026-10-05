@@ -133,6 +133,20 @@ Glyph.prototype.getBoundingBox = function() {
 };
 
 /**
+ * Get the advance width of the glyph, applying the font variation (HVAR) when the font is variable.
+ * The glyph itself is not modified.
+ * @param  {opentype.Font} [font] - The font of the glyph, needed for the variation.
+ * @param  {Object} [variation] - Variation coordinates, the current font variation if omitted.
+ * @return {number} Advance width in font units.
+ */
+Glyph.prototype.getAdvanceWidth = function(font, variation) {
+    if (font && font.variation) {
+        return font.variation.getAdvanceWidth(this, variation);
+    }
+    return this.advanceWidth;
+};
+
+/**
  * Convert the glyph to a Path we can draw on a drawing context.
  * @param  {number} [x=0] - Horizontal position of the beginning of the text.
  * @param  {number} [y=0] - Vertical position of the *baseline* of the text.

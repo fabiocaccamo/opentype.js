@@ -103,10 +103,11 @@ describe('variation.mjs', function() {
                 ]);
 
                 font = fonts.hvar2;
+                font.variation.set(font.variation.getDefaultCoordinates());
                 glyphPos = [];
                 assert.equal(
                     font.forEachGlyph('AB', 0, 0, font.unitsPerEm, {}, function(glyph, gX, gY, gFontSize) {
-                        glyphPos.push({w: glyph.advanceWidth, lsb: glyph.leftSideBearing, gX});
+                        glyphPos.push({w: glyph.getAdvanceWidth(font), lsb: font.variation.getLeftSideBearing(glyph), gX});
                     }),
                     900
                 );
@@ -118,13 +119,13 @@ describe('variation.mjs', function() {
                 font.variation.set({wght: 1000})
                 assert.equal(
                     font.forEachGlyph('AB', 0, 0, font.unitsPerEm, {}, function(glyph, gX, gY, gFontSize) {
-                        glyphPos.push({w: glyph.advanceWidth, lsb: glyph.leftSideBearing, gX});
+                        glyphPos.push({w: glyph.getAdvanceWidth(font), lsb: font.variation.getLeftSideBearing(glyph), gX});
                     }),
-                    900
+                    1700
                 );
                 assert.deepEqual(glyphPos, [
-                    {w: 450, lsb: 0, gX: 0},
-                    {w: 450, lsb: 0, gX: 450},
+                    {w: 850, lsb: 0, gX: 0},
+                    {w: 850, lsb: 0, gX: 850},
                 ]);
             });
         });
@@ -133,10 +134,11 @@ describe('variation.mjs', function() {
     describe('hvar', function() {
         it('transforms advanceWidth', function() {
             let font = fonts.hvar;
+            font.variation.set(font.variation.getDefaultCoordinates());
             let glyphPos = [];
             assert.equal(
                 font.forEachGlyph('ABC', 0, 0, font.unitsPerEm, {}, function(glyph, gX, gY, gFontSize) {
-                    glyphPos.push({w: glyph.advanceWidth, lsb: glyph.leftSideBearing, gX});
+                    glyphPos.push({w: glyph.getAdvanceWidth(font), lsb: font.variation.getLeftSideBearing(glyph), gX});
                 }),
                 1656
             );
@@ -147,23 +149,25 @@ describe('variation.mjs', function() {
             ]);
             glyphPos = [];
             font.variation.set({wght: 1000})
+            // expected values from fontTools.varLib.instancer at wght 1000
             assert.equal(
                 font.forEachGlyph('ABC', 0, 0, font.unitsPerEm, {}, function(glyph, gX, gY, gFontSize) {
-                    glyphPos.push({w: glyph.advanceWidth, lsb: glyph.leftSideBearing, gX});
+                    glyphPos.push({w: glyph.getAdvanceWidth(font), lsb: font.variation.getLeftSideBearing(glyph), gX});
                 }),
-                1656
+                1782
             );
             assert.deepEqual(glyphPos, [
-                {w: 520, lsb: 10, gX: 0},
-                {w: 574, lsb: 100, gX: 520},
-                {w: 562, lsb: 56, gX: 1094},
+                {w: 584, lsb: 10, gX: 0},
+                {w: 612, lsb: 100, gX: 584},
+                {w: 586, lsb: 56, gX: 1196},
             ]);
 
             font = fonts.hvar2;
+            font.variation.set(font.variation.getDefaultCoordinates());
             glyphPos = [];
             assert.equal(
                 font.forEachGlyph('AB', 0, 0, font.unitsPerEm, {}, function(glyph, gX, gY, gFontSize) {
-                    glyphPos.push({w: glyph.advanceWidth, lsb: glyph.leftSideBearing, gX});
+                    glyphPos.push({w: glyph.getAdvanceWidth(font), lsb: font.variation.getLeftSideBearing(glyph), gX});
                 }),
                 900
             );
@@ -175,14 +179,27 @@ describe('variation.mjs', function() {
             font.variation.set({wght: 1000})
             assert.equal(
                 font.forEachGlyph('AB', 0, 0, font.unitsPerEm, {}, function(glyph, gX, gY, gFontSize) {
-                    glyphPos.push({w: glyph.advanceWidth, lsb: glyph.leftSideBearing, gX});
+                    glyphPos.push({w: glyph.getAdvanceWidth(font), lsb: font.variation.getLeftSideBearing(glyph), gX});
                 }),
-                900
+                1700
             );
             assert.deepEqual(glyphPos, [
-                {w: 450, lsb: 0, gX: 0},
-                {w: 450, lsb: 0, gX: 450},
+                {w: 850, lsb: 0, gX: 0},
+                {w: 850, lsb: 0, gX: 850},
             ]);
+        });
+
+        it('computes the varied metrics without modifying the shared glyph', function() {
+            const font = fonts.hvar;
+            font.variation.set(font.variation.getDefaultCoordinates());
+            const glyph = font.charToGlyph('A');
+            const defaultAdvanceWidth = glyph.advanceWidth;
+            glyph.getPath(0, 0, font.unitsPerEm, { variation: { wght: 1000 } }, font);
+            font.variation.getTransform(glyph, { wght: 1000 });
+            assert.equal(glyph.advanceWidth, defaultAdvanceWidth);
+            assert.equal(glyph.getAdvanceWidth(font, { wght: 1000 }), 584);
+            assert.equal(font.variation.getTransform(glyph, { wght: 1000 }).advanceWidth, 584);
+            assert.equal(glyph.getAdvanceWidth(font), defaultAdvanceWidth);
         });
     });
 

@@ -6,6 +6,8 @@ export class VariationManager {
         this.process = new VariationProcessor(this.font);
         this.activateDefaultVariation();
         this.getTransform = this.process.getTransform.bind(this.process);
+        this.getAdvanceWidth = this.process.getAdvanceWidth.bind(this.process);
+        this.getLeftSideBearing = this.process.getLeftSideBearing.bind(this.process);
     }
 
     /**
