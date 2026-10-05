@@ -201,6 +201,21 @@ describe('variation.mjs', function() {
             assert.equal(font.variation.getTransform(glyph, { wght: 1000 }).advanceWidth, 584);
             assert.equal(glyph.getAdvanceWidth(font), defaultAdvanceWidth);
         });
+
+        it('varies the advance width through the gvar phantom points when there is no HVAR', function() {
+            const font = loadSync('./test/fonts/VARTest.ttf');
+            assert.equal(font.tables.hvar, undefined);
+            const glyphA = font.charToGlyph('A');
+            const glyphN = font.charToGlyph('n');
+            // expected values from fontTools.varLib.instancer at wght 700
+            assert.equal(glyphA.getAdvanceWidth(font, { wght: 700 }), 778);
+            assert.equal(glyphN.getAdvanceWidth(font, { wght: 700 }), 625);
+            assert.equal(font.variation.getLeftSideBearing(glyphA, { wght: 700 }), 40);
+            assert.equal(font.variation.getTransform(glyphA, { wght: 700 }).advanceWidth, 778);
+            assert.equal(glyphA.advanceWidth, 724);
+            font.variation.set({ wght: 700 });
+            assert.equal(font.getAdvanceWidth('An', font.unitsPerEm, { kerning: false }), 778 + 625);
+        });
     });
 
 });

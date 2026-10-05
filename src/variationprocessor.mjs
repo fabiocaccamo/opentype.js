@@ -238,6 +238,98 @@ export class VariationProcessor {
         }
     }
 
+    /**
+     * Calculates the scalar of a tuple variation header at the given normalized coordinates.
+     * @param {Object} header - Tuple variation header.
+     * @param {Array<number>} normalizedCoords - Normalized variation coordinates.
+     * @param {number} axisCount - Number of variation axes.
+     * @param {string} flavor - 'gvar' or 'cvar'.
+     * @returns {number} The scalar, 0 when the tuple is not active.
+     */
+    getTupleScalar(header, normalizedCoords, axisCount, flavor) {
+        let factor = 1;
+        for (let a = 0; a < axisCount; a++) {
+
+            let tupleCoords = [0];
+            switch(flavor) {
+                case 'gvar':
+                    tupleCoords = header.peakTuple ? header.peakTuple : this.gvar().sharedTuples[header.sharedTupleRecordsIndex];
+                    break;
+                case 'cvar':
+                    tupleCoords = header.peakTuple;
+                    break;
+            }
+
+            if (tupleCoords[a] === 0) {
+                continue;
+            }
+
+            if (normalizedCoords[a] === 0) {
+                return 0;
+            }
+
+            if (!header.intermediateStartTuple) {
+                if ((normalizedCoords[a] < Math.min(0, tupleCoords[a])) ||
+                    (normalizedCoords[a] > Math.max(0, tupleCoords[a]))) {
+                    return 0;
+                }
+
+                factor = (factor * normalizedCoords[a] + Number.EPSILON) / (tupleCoords[a] + Number.EPSILON);
+            } else {
+                if ((normalizedCoords[a] < header.intermediateStartTuple[a]) || (normalizedCoords[a] > header.intermediateEndTuple[a])) {
+                    return 0;
+                } else if (normalizedCoords[a] < tupleCoords[a]) {
+                    factor = factor * (normalizedCoords[a] - header.intermediateStartTuple[a] + Number.EPSILON) / (tupleCoords[a] - header.intermediateStartTuple[a] + Number.EPSILON);
+                } else {
+                    factor = factor * (header.intermediateEndTuple[a] - normalizedCoords[a] + Number.EPSILON) / (header.intermediateEndTuple[a] - tupleCoords[a] + Number.EPSILON);
+                }
+            }
+        }
+        return factor;
+    }
+
+    /**
+     * Calculates the horizontal deltas of the left and right phantom points of a glyph
+     * (the origin and the advance width end) from the gvar table. Phantom points
+     * follow the outline points (or the components of a composite glyph) and are
+     * never inferred: a tuple that does not reference them leaves them untouched.
+     * @param {Glyph} glyph
+     * @param {Object} [coords] - Variation coordinates, the current variation if omitted.
+     * @returns {{left: number, right: number}}
+     */
+    getPhantomPointDeltas(glyph, coords) {
+        const deltas = { left: 0, right: 0 };
+        const variationData = this.gvar() && this.gvar().glyphVariations[glyph.index];
+        if (!variationData) {
+            return deltas;
+        }
+        const normalizedCoords = this.getNormalizedCoords(coords || this.font.variation.get());
+        const axisCount = this.fvar().axes.length;
+        const pointCount = glyph.isComposite ? glyph.components.length : (glyph.points ? glyph.points.length : 0);
+        const leftIndex = pointCount;
+        const rightIndex = pointCount + 1;
+        const { headers, sharedPoints } = variationData;
+        for (let h = 0; h < headers.length; h++) {
+            const header = headers[h];
+            const factor = this.getTupleScalar(header, normalizedCoords, axisCount, 'gvar');
+            if (factor === 0) {
+                continue;
+            }
+            // an empty list of point numbers means "all points", phantom points included
+            const tuplePoints = header.privatePoints && header.privatePoints.length ? header.privatePoints : sharedPoints;
+            const allPoints = !tuplePoints || tuplePoints.length === 0;
+            const leftDeltaIndex = allPoints ? leftIndex : tuplePoints.indexOf(leftIndex);
+            const rightDeltaIndex = allPoints ? rightIndex : tuplePoints.indexOf(rightIndex);
+            if (leftDeltaIndex > -1 && header.deltas[leftDeltaIndex] !== undefined) {
+                deltas.left += header.deltas[leftDeltaIndex] * factor;
+            }
+            if (rightDeltaIndex > -1 && header.deltas[rightDeltaIndex] !== undefined) {
+                deltas.right += header.deltas[rightDeltaIndex] * factor;
+            }
+        }
+        return deltas;
+    }
+
     applyTupleVariationStore(variationData, points, coords, flavor = 'gvar', args = {}) {
         if(!coords) {
             coords = this.font.variation.get();
@@ -257,48 +349,7 @@ export class VariationProcessor {
 
         for(let h = 0; h < headers.length; h++) {
             const header = headers[h];
-            let factor = 1;
-            for (let a = 0; a < axisCount; a++) {
-
-                let tupleCoords = [0];
-                switch(flavor) {
-                    case 'gvar':
-                        tupleCoords = header.peakTuple ? header.peakTuple : this.gvar().sharedTuples[header.sharedTupleRecordsIndex];
-                        break;
-                    case 'cvar':
-                        tupleCoords = header.peakTuple;
-                        break;
-                }
-
-                
-                if (tupleCoords[a] === 0) {
-                    continue;
-                }
-                
-                if (normalizedCoords[a] === 0) {
-                    factor = 0;
-                    break;
-                }
-            
-                if (!header.intermediateStartTuple) {
-                    if ((normalizedCoords[a] < Math.min(0, tupleCoords[a])) ||
-                        (normalizedCoords[a] > Math.max(0, tupleCoords[a]))) {
-                        factor = 0;
-                        break;
-                    }
-            
-                    factor = (factor * normalizedCoords[a] + Number.EPSILON) / (tupleCoords[a] + Number.EPSILON);
-                } else {
-                    if ((normalizedCoords[a] < header.intermediateStartTuple[a]) || (normalizedCoords[a] > header.intermediateEndTuple[a])) {
-                        factor = 0;
-                        break;
-                    } else if (normalizedCoords[a] < tupleCoords[a]) {
-                        factor = factor * (normalizedCoords[a] - header.intermediateStartTuple[a] + Number.EPSILON) / (tupleCoords[a] - header.intermediateStartTuple[a] + Number.EPSILON);
-                    } else {
-                        factor = factor * (header.intermediateEndTuple[a] - normalizedCoords[a] + Number.EPSILON) / (header.intermediateEndTuple[a] - tupleCoords[a] + Number.EPSILON);
-                    }
-                }
-            }
+            const factor = this.getTupleScalar(header, normalizedCoords, axisCount, flavor);
 
             if (factor === 0) {
                 continue;
@@ -411,6 +462,9 @@ export class VariationProcessor {
             }
             transformedGlyph.advanceWidth = this.getAdvanceWidth(glyph, coords);
             transformedGlyph.leftSideBearing = this.getLeftSideBearing(glyph, coords);
+        } else if (transformedGlyph !== glyph && this.gvar()) {
+            transformedGlyph.advanceWidth = this.getAdvanceWidth(glyph, coords);
+            transformedGlyph.leftSideBearing = this.getLeftSideBearingFromPoints(glyph, transformedGlyph.points, coords);
         }
 
         return transformedGlyph;
@@ -427,10 +481,32 @@ export class VariationProcessor {
         if(Number.isInteger(glyph)) {
             glyph = this.font.glyphs.get(glyph);
         }
-        if(!this.font.tables.hvar) {
-            return glyph.advanceWidth;
+        if(this.font.tables.hvar) {
+            return Math.round(glyph.advanceWidth + this.getVariableAdjustment(glyph.index, 'hvar', 'advanceWidth', coords));
         }
-        return Math.round(glyph.advanceWidth + this.getVariableAdjustment(glyph.index, 'hvar', 'advanceWidth', coords));
+        if(this.gvar()) {
+            // without HVAR the advance width varies through the gvar phantom points
+            const phantomDeltas = this.getPhantomPointDeltas(glyph, coords);
+            return Math.round(glyph.advanceWidth + phantomDeltas.right - phantomDeltas.left);
+        }
+        return glyph.advanceWidth;
+    }
+
+    /**
+     * Calculates the left side bearing of a gvar varied glyph from its varied points
+     * and its varied left phantom point.
+     * @param {Glyph} glyph - The source glyph.
+     * @param {Array<Object>} transformedPoints - The varied points of the glyph.
+     * @param {Object} [coords] - Variation coordinates, the current variation if omitted.
+     * @returns {number} Left side bearing in font units.
+     */
+    getLeftSideBearingFromPoints(glyph, transformedPoints, coords) {
+        if (!transformedPoints || !transformedPoints.length || glyph.xMin === undefined) {
+            return glyph.leftSideBearing;
+        }
+        const variedXMin = Math.min(...transformedPoints.map(point => point.x));
+        const variedOrigin = glyph.xMin - glyph.leftSideBearing + this.getPhantomPointDeltas(glyph, coords).left;
+        return Math.round(variedXMin - variedOrigin);
     }
 
     /**
@@ -447,10 +523,14 @@ export class VariationProcessor {
         // the implicit glyph id mapping only applies to advance widths: without
         // an LSB mapping HVAR carries no left side bearing variations
         const hvar = this.font.tables.hvar;
-        if(!hvar || !hvar.lsb || !hvar.lsb.map || !hvar.lsb.map.length) {
-            return glyph.leftSideBearing;
+        if(hvar && hvar.lsb && hvar.lsb.map && hvar.lsb.map.length) {
+            return Math.round(glyph.leftSideBearing + this.getVariableAdjustment(glyph.index, 'hvar', 'lsb', coords));
         }
-        return Math.round(glyph.leftSideBearing + this.getVariableAdjustment(glyph.index, 'hvar', 'lsb', coords));
+        if(!hvar && this.gvar()) {
+            // getTransform() derives it from the varied points and phantom points
+            return this.getTransform(glyph, coords).leftSideBearing;
+        }
+        return glyph.leftSideBearing;
     }
 
     getCvarTransform(coords) {
