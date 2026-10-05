@@ -5,6 +5,9 @@
 import { ContextParams } from '../tokenizer.mjs';
 import { isTashkeelArabicChar } from '../char.mjs';
 
+// font -> substitution types already warned as unsupported (warn once per font)
+const warnedUnsupportedSubstitutionTypes = new WeakMap();
+
 /**
  * Create feature query instance
  * @param {Font} font opentype font instance
@@ -162,6 +165,9 @@ function chainingSubstitutionFormat3(contextParams, subtable) {
                 } else {
                     lookup = this.getLookupMethod(lookupTable, subtable);
                 }
+                if (!lookup) {
+                    continue;
+                }
 
                 if (substitutionType === '12') {
                     const glyphIndex = contextParams.get(lookupRecord.sequenceIndex);
@@ -171,8 +177,6 @@ function chainingSubstitutionFormat3(contextParams, subtable) {
                     const glyphIndex = contextParams.get(lookupRecord.sequenceIndex);
                     const substitution = lookup(glyphIndex);
                     if (substitution) substitutions.push(substitution);
-                } else {
-                    throw new Error(`Substitution type ${substitutionType} is not supported in chaining substitution`);
                 }
             }
         }
@@ -285,6 +289,9 @@ function contextSubstitutionFormat3(contextParams, subtable) {
                 subtable = subtable.extension;
             } else {
                 lookup = this.getLookupMethod(lookupTable, subtable);
+            }
+            if (!lookup) {
+                continue;
             }
 
             if (substitutionType === '12') {
@@ -434,12 +441,21 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
                 this, [contextParams, subtable]
             );
         default:
-            throw new Error(
-                `substitutionType : ${substitutionType} ` +
-                `lookupType: ${lookupTable.lookupType} - ` +
-                `substFormat: ${subtable.substFormat} ` +
-                'is not yet supported'
-            );
+            // unsupported lookups are skipped (warned once per type), so the
+            // supported lookups of the same feature still apply
+            if (!warnedUnsupportedSubstitutionTypes.has(this.font)) {
+                warnedUnsupportedSubstitutionTypes.set(this.font, new Set());
+            }
+            if (!warnedUnsupportedSubstitutionTypes.get(this.font).has(substitutionType)) {
+                warnedUnsupportedSubstitutionTypes.get(this.font).add(substitutionType);
+                console.warn(
+                    `[opentype.js] substitutionType: ${substitutionType} ` +
+                    `lookupType: ${lookupTable.lookupType} - ` +
+                    `substFormat: ${subtable.substFormat} ` +
+                    'is not yet supported, lookup skipped'
+                );
+            }
+            return null;
     }
 };
 
@@ -498,6 +514,9 @@ FeatureQuery.prototype.lookupFeature = function (query) {
                 subtable = subtable.extension;
             } else {
                 lookup = this.getLookupMethod(lookupTable, subtable);
+            }
+            if (!lookup) {
+                continue;
             }
 
             let substitution;
