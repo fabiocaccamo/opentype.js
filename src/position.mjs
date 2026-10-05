@@ -25,13 +25,39 @@ Position.prototype.init = function() {
 };
 
 /**
+ * Get the xAdvance of a value record, adding the variation delta of its
+ * VariationIndex table when the font is variable.
+ *
+ * @param {object} valueRecord
+ * @param {object} [variation] - variation coordinates, the current font variation if omitted
+ * @returns {number}
+ */
+Position.prototype.getValueRecordXAdvance = function(valueRecord, variation) {
+    if (!valueRecord) {
+        return 0;
+    }
+    const xAdvance = valueRecord.xAdvance || 0;
+    const device = valueRecord.xAdvDevice;
+    const gdef = this.font.tables.gdef;
+    if (!device || device.deltaFormat !== 0x8000 || !this.font.variation || !gdef || !gdef.itemVarStore) {
+        return xAdvance;
+    }
+    const delta = this.font.variation.process.getDelta(
+        gdef.itemVarStore, device.deltaSetOuterIndex, device.deltaSetInnerIndex,
+        variation || this.font.variation.get()
+    );
+    return Math.round(xAdvance + delta);
+};
+
+/**
  * Find a glyph pair in a list of lookup tables of type 2 and retrieve the xAdvance kerning value.
  *
  * @param {integer} leftIndex - left glyph index
  * @param {integer} rightIndex - right glyph index
+ * @param {object} [variation] - variation coordinates, the current font variation if omitted
  * @returns {integer}
  */
-Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIndex) {
+Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIndex, variation) {
     for (let i = 0; i < kerningLookups.length; i++) {
         const subtables = kerningLookups[i].subtables;
         for (let j = 0; j < subtables.length; j++) {
@@ -45,7 +71,7 @@ Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIn
                     for (let k = 0; k < pairSet.length; k++) {
                         let pair = pairSet[k];
                         if (pair.secondGlyph === rightIndex) {
-                            return pair.value1 && pair.value1.xAdvance || 0;
+                            return this.getValueRecordXAdvance(pair.value1, variation);
                         }
                     }
                     break;      // left glyph found, not right glyph - try next subtable
@@ -55,7 +81,7 @@ Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIn
                     const class1 = this.getGlyphClass(subtable.classDef1, leftIndex);
                     const class2 = this.getGlyphClass(subtable.classDef2, rightIndex);
                     const pair = subtable.classRecords[class1][class2];
-                    return pair.value1 && pair.value1.xAdvance || 0;
+                    return this.getValueRecordXAdvance(pair.value1, variation);
                 }
             }
         }

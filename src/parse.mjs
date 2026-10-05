@@ -406,8 +406,10 @@ Parser.prototype.parseStruct = function(description) {
  * Parse a GPOS valueRecord
  * https://docs.microsoft.com/en-us/typography/opentype/spec/gpos#value-record
  * valueFormat is optional, if omitted it is read from the stream.
+ * subtableStart is the absolute offset of the subtable the device offsets are
+ * relative to: when omitted, the device tables are not parsed.
  */
-Parser.prototype.parseValueRecord = function(valueFormat) {
+Parser.prototype.parseValueRecord = function(valueFormat, subtableStart) {
     if (valueFormat === undefined) {
         valueFormat = this.parseUShort();
     }
@@ -423,14 +425,35 @@ Parser.prototype.parseValueRecord = function(valueFormat) {
     if (valueFormat & 0x0004) { valueRecord.xAdvance = this.parseShort(); }
     if (valueFormat & 0x0008) { valueRecord.yAdvance = this.parseShort(); }
 
-    // Device table (non-variable font) / VariationIndex table (variable font) not supported
+    // Device table (non-variable font) / VariationIndex table (variable font)
     // https://docs.microsoft.com/fr-fr/typography/opentype/spec/chapter2#devVarIdxTbls
-    if (valueFormat & 0x0010) { valueRecord.xPlaDevice = undefined; this.parseShort(); }
-    if (valueFormat & 0x0020) { valueRecord.yPlaDevice = undefined; this.parseShort(); }
-    if (valueFormat & 0x0040) { valueRecord.xAdvDevice = undefined; this.parseShort(); }
-    if (valueFormat & 0x0080) { valueRecord.yAdvDevice = undefined; this.parseShort(); }
+    const parseDevice = (offset) => {
+        if (!offset || subtableStart === undefined) {
+            return undefined;
+        }
+        return new Parser(this.data, subtableStart + offset).parseDeviceTable();
+    };
+    if (valueFormat & 0x0010) { valueRecord.xPlaDevice = parseDevice(this.parseOffset16()); }
+    if (valueFormat & 0x0020) { valueRecord.yPlaDevice = parseDevice(this.parseOffset16()); }
+    if (valueFormat & 0x0040) { valueRecord.xAdvDevice = parseDevice(this.parseOffset16()); }
+    if (valueFormat & 0x0080) { valueRecord.yAdvDevice = parseDevice(this.parseOffset16()); }
 
     return valueRecord;
+};
+
+/**
+ * Parse a Device or VariationIndex table
+ * https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#device-and-variationindex-tables
+ * The hinting deltas of a Device table are not decoded.
+ */
+Parser.prototype.parseDeviceTable = function() {
+    const first = this.parseUShort();
+    const second = this.parseUShort();
+    const deltaFormat = this.parseUShort();
+    if (deltaFormat === 0x8000) {
+        return { deltaFormat, deltaSetOuterIndex: first, deltaSetInnerIndex: second };
+    }
+    return { deltaFormat, startSize: first, endSize: second };
 };
 
 /**

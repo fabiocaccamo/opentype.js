@@ -44,10 +44,12 @@ subtableParsers[2] = function parseLookup2() {
             valueFormat1: valueFormat1,
             valueFormat2: valueFormat2,
             pairSets: this.parseList(Parser.pointer(Parser.list(function() {
+                // device offsets of a PairValueRecord are relative to its PairSet table
+                const pairSetStart = this.offset;
                 return {        // pairValueRecord
                     secondGlyph: this.parseUShort(),
-                    value1: this.parseValueRecord(valueFormat1),
-                    value2: this.parseValueRecord(valueFormat2)
+                    value1: this.parseValueRecord(valueFormat1, pairSetStart),
+                    value2: this.parseValueRecord(valueFormat2, pairSetStart)
                 };
             })))
         };
@@ -67,9 +69,10 @@ subtableParsers[2] = function parseLookup2() {
             class1Count: class1Count,
             class2Count: class2Count,
             classRecords: this.parseList(class1Count, Parser.list(class2Count, function() {
+                // device offsets of a Class2Record are relative to the PairPos subtable
                 return {
-                    value1: this.parseValueRecord(valueFormat1),
-                    value2: this.parseValueRecord(valueFormat2)
+                    value1: this.parseValueRecord(valueFormat1, start),
+                    value2: this.parseValueRecord(valueFormat2, start)
                 };
             }))
         };

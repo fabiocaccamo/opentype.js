@@ -57,6 +57,12 @@ function parseGDEFTable(data, start) {
     if (tableVersion >= 1.2) {
         gdef.markGlyphSets = p.parsePointer(markGlyphSets);
     }
+    if (tableVersion >= 1.3) {
+        // deltas referenced by the VariationIndex tables of GPOS value records
+        gdef.itemVarStore = p.parsePointer32(function() {
+            return this.parseItemVariationStore();
+        });
+    }
     return gdef;
 }
 export default { parse: parseGDEFTable };
