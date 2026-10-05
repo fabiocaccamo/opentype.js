@@ -125,7 +125,7 @@ describe('tables/gvar.mjs', function() {
     });
 
     it('correctly transforms composite glyphs', function() {
-        ['Comp'/*,'CompMissing'*/].forEach(n => {
+        ['Comp','CompMissing'].forEach(n => {
             const font = fonts[`gvarTest${n}`];
             const untransformedPathData =
                 'M171 500Q135 500 106.50 483.50Q78 467 62 438.50Q46 410 46 373L46 257' +
@@ -271,6 +271,32 @@ describe('tables/gvar.mjs', function() {
         ];
         const points = font.variation.process.getTransform(font.glyphs.get(16), coords).points;
         assert.equal(points.length, expectedPoints.length);
+        expectedPoints.forEach(([x, y], index) => {
+            assert.ok(Math.abs(points[index].x - x) <= 2, `point ${index} x: ${points[index].x} != ${x}`);
+            assert.ok(Math.abs(points[index].y - y) <= 2, `point ${index} y: ${points[index].y} != ${y}`);
+        });
+    });
+
+    it('adds up the component offset deltas of all the active tuples of a composite glyph', function() {
+        const font = fonts.interVariable;
+        // Adieresis (A + uni0308) at opsz 32 and wght 900 has several active tuples;
+        // expected points from fontTools.varLib.instancer at the same location
+        const expectedPoints = [
+            [0, 0], [500, 1490], [1060, 1490], [1565, 0], [1097, 0], [930, 578], [876, 766], [774, 1133],
+            [726, 1331], [838, 1331], [788, 1133], [684, 766], [628, 578], [455, 0], [373, 245], [373, 565],
+            [1193, 565], [1193, 245], [1017.18, 1566], [929, 1566], [816, 1672.75], [816, 1755.17],
+            [816, 1838.18], [929.33, 1944], [1017.23, 1944], [1105.12, 1944], [1218, 1838.49], [1218, 1755.25],
+            [1218, 1672], [1105.36, 1566], [548.68, 1566], [460, 1566], [348, 1672.75], [348, 1755.17],
+            [348, 1838.18], [460.33, 1944], [548.73, 1944], [637.12, 1944], [750, 1838.49], [750, 1755.25],
+            [750, 1672], [637.36, 1566]
+        ];
+        const glyph = font.glyphs.get(3);
+        // isComposite is set when the glyph is parsed
+        glyph.path;
+        assert.equal(glyph.isComposite, true);
+        const points = font.variation.getTransform(glyph, { opsz: 32, wght: 900 }).points;
+        assert.equal(points.length, expectedPoints.length);
+        // the tolerance covers the per-tuple rounding of opentype.js
         expectedPoints.forEach(([x, y], index) => {
             assert.ok(Math.abs(points[index].x - x) <= 2, `point ${index} x: ${points[index].x} != ${x}`);
             assert.ok(Math.abs(points[index].y - y) <= 2, `point ${index} y: ${points[index].y} != ${y}`);
