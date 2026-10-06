@@ -636,12 +636,70 @@ Parser.prototype.parseScriptList = function() {
     })) || [];
 };
 
+// https://learn.microsoft.com/en-us/typography/opentype/spec/features_pt#ss01---ss20
+const STYLISTIC_SET_TAG = /^ss(0[1-9]|1\d|20)$/;
+// https://learn.microsoft.com/en-us/typography/opentype/spec/features_ae#cv01-cv99
+const CHARACTER_VARIANT_TAG = /^cv(0[1-9]|[1-9]\d)$/;
+
+/**
+ * Parse the FeatureParams table of a stylistic set (ss01-ss20) or character variant (cv01-cv99) feature,
+ * the only features whose FeatureParams table (holding the name IDs of their UI names) is parsed.
+ * @param {string} tag feature tag
+ * @returns {object|undefined}
+ */
+Parser.prototype.parseFeatureParams = function(tag) {
+    if (STYLISTIC_SET_TAG.test(tag)) {
+        return {
+            version: this.parseUShort(),
+            uiNameID: this.parseUShort()
+        };
+    }
+    if (CHARACTER_VARIANT_TAG.test(tag)) {
+        const featureParams = {
+            format: this.parseUShort(),
+            featUiLabelNameID: this.parseUShort(),
+            featUiTooltipTextNameID: this.parseUShort(),
+            sampleTextNameID: this.parseUShort(),
+            numNamedParameters: this.parseUShort(),
+            firstParamUiLabelNameID: this.parseUShort()
+        };
+        const charCount = this.parseUShort();
+        featureParams.characters = new Array(charCount);
+        for (let i = 0; i < charCount; i++) {
+            featureParams.characters[i] = this.parseUInt24();
+        }
+        return featureParams;
+    }
+};
+
 Parser.prototype.parseFeatureList = function() {
+    // the tag of the feature record being parsed, which tells how to parse its FeatureParams table
+    let tag;
     return this.parsePointer(Parser.recordList({
-        tag: Parser.tag,
-        feature: Parser.pointer({
-            featureParams: Parser.offset16,
-            lookupListIndexes: Parser.uShortList
+        tag: function() {
+            tag = this.parseTag();
+            return tag;
+        },
+        feature: Parser.pointer(function() {
+            // the FeatureParams offset is relative to the start of the Feature table
+            const featureStart = this.offset;
+            const feature = {
+                featureParams: this.parseOffset16(),
+                lookupListIndexes: this.parseUShortList()
+            };
+            if (feature.featureParams) {
+                let featureParamsTable;
+                try {
+                    featureParamsTable = new Parser(this.data, featureStart + feature.featureParams).parseFeatureParams(tag);
+                } catch (error) {
+                    // a malformed FeatureParams table only loses the UI names, not the feature
+                    console.warn('Failed to parse the FeatureParams table of the ' + tag + ' feature, skipping: ' + error.message);
+                }
+                if (featureParamsTable) {
+                    feature.featureParamsTable = featureParamsTable;
+                }
+            }
+            return feature;
         })
     })) || [];
 };

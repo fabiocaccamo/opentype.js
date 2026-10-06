@@ -4,6 +4,7 @@
 import check from '../check.mjs';
 import { Parser } from '../parse.mjs';
 import table from '../table.mjs';
+import { getNameByID } from './name.mjs';
 
 const subtableParsers = new Array(9);         // subtableParsers[0] is unused
 
@@ -186,21 +187,49 @@ subtableParsers[8] = function parseLookup8() {
     };
 };
 
+// a name ID of a FeatureParams table, 0 when there is no name
+function getFeatureParamsName(names, nameID) {
+    return nameID ? getNameByID(names, nameID) : undefined;
+}
+
+// add the UI names of stylistic set and character variant features to their FeatureParams tables
+function resolveFeatureParamsNames(features, names) {
+    for (let i = 0; i < features.length; i++) {
+        const feature = features[i].feature;
+        const featureParams = feature && feature.featureParamsTable;
+        if (!featureParams) continue;
+        if (featureParams.uiNameID !== undefined) {
+            // stylistic set
+            featureParams.uiName = getFeatureParamsName(names, featureParams.uiNameID);
+        } else {
+            // character variant
+            featureParams.featUiLabelName = getFeatureParamsName(names, featureParams.featUiLabelNameID);
+            featureParams.featUiTooltipText = getFeatureParamsName(names, featureParams.featUiTooltipTextNameID);
+            featureParams.sampleText = getFeatureParamsName(names, featureParams.sampleTextNameID);
+            featureParams.paramUiLabels = [];
+            for (let j = 0; j < featureParams.numNamedParameters; j++) {
+                featureParams.paramUiLabels.push(getFeatureParamsName(names, featureParams.firstParamUiLabelNameID + j));
+            }
+        }
+    }
+}
+
 // https://www.microsoft.com/typography/OTSPEC/gsub.htm
-function parseGsubTable(data, start) {
+function parseGsubTable(data, start, names) {
     start = start || 0;
     const p = new Parser(data, start);
     const tableVersion = p.parseVersion(1);
     check.argument(tableVersion === 1 || tableVersion === 1.1, 'Unsupported GSUB table version.');
+    let gsub;
     if (tableVersion === 1) {
-        return {
+        gsub = {
             version: tableVersion,
             scripts: p.parseScriptList(),
             features: p.parseFeatureList(),
             lookups: p.parseLookupList(subtableParsers)
         };
     } else {
-        return {
+        gsub = {
             version: tableVersion,
             scripts: p.parseScriptList(),
             features: p.parseFeatureList(),
@@ -208,7 +237,10 @@ function parseGsubTable(data, start) {
             variations: p.parseFeatureVariationsList()
         };
     }
-
+    if (names) {
+        resolveFeatureParamsNames(gsub.features, names);
+    }
+    return gsub;
 }
 
 // GSUB Writing //////////////////////////////////////////////

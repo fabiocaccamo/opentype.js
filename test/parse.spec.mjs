@@ -224,6 +224,39 @@ describe('parse.mjs', function() {
         });
     });
 
+        it('should parse the FeatureParams tables of stylistic set and character variant features', function() {
+            const data = '0004 0000' +                                // table offset + filler
+                '0003 73733031 0014 63763031 001E 6C696761 0038' +  // feature list: ss01, cv01, liga
+                '0006 0001 0000   0000 0100' +                      // ss01 feature, FeatureParams: version 0, uiNameID 256
+                '0006 0001 0001   0000 0101 0102 0000 0002 0103' +  // cv01 feature, FeatureParams: format 0, label 257, tooltip 258,
+                '0002 000061 01D5BA' +                              //   no sample text, 2 parameters from 259, 2 characters
+                '0006 0001 0002   DEAD';                            // liga feature with a FeatureParams offset, not parsed
+            const p = new Parser(unhex(data), 0);
+            assert.deepEqual(p.parseFeatureList(), [
+                { tag: 'ss01', feature: { featureParams: 6, lookupListIndexes: [0], featureParamsTable: { version: 0, uiNameID: 256 } } },
+                { tag: 'cv01', feature: { featureParams: 6, lookupListIndexes: [1], featureParamsTable: {
+                    format: 0,
+                    featUiLabelNameID: 257,
+                    featUiTooltipTextNameID: 258,
+                    sampleTextNameID: 0,
+                    numNamedParameters: 2,
+                    firstParamUiLabelNameID: 259,
+                    characters: [0x61, 0x1D5BA]
+                } } },
+                { tag: 'liga', feature: { featureParams: 6, lookupListIndexes: [2] } }
+            ]);
+        });
+
+        it('should ignore a FeatureParams table outside of the data', function() {
+            const data = '0004 0000' +       // table offset + filler
+                '0001 73733031 0008' +      // feature list: ss01
+                '7FF0 0001 0000';           // ss01 feature, with a FeatureParams offset beyond the data
+            const p = new Parser(unhex(data), 0);
+            assert.deepEqual(p.parseFeatureList(), [
+                { tag: 'ss01', feature: { featureParams: 0x7FF0, lookupListIndexes: [0] } }
+            ]);
+        });
+
     describe('parseLookupList', function() {
         it('should parse a LookupList table', function() {
             // https://www.microsoft.com/typography/OTSPEC/chapter2.htm Example 4
