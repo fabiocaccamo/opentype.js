@@ -11,6 +11,19 @@ describe('parse.mjs', function() {
         return (hex & mask) ? -(~hex & maxUnsigned) - 1 : hex;
     };    
 
+    describe('parseFixed', function() {
+        it('can parse 16.16 fixed-point values exactly', function() {
+            const p = new Parser(unhex('00010000 00018000 FFF68000 0000FFFF 7FFFFFFF 80000000'), 0);
+            assert.strictEqual(p.parseFixed(), 1);
+            assert.strictEqual(p.parseFixed(), 1.5);
+            assert.strictEqual(p.parseFixed(), -9.5);
+            assert.strictEqual(p.parseFixed(), 65535 / 65536);
+            assert.strictEqual(p.parseFixed(), 32767 + 65535 / 65536);
+            assert.strictEqual(p.parseFixed(), -32768);
+            assert.equal(p.relativeOffset, 24);
+        });
+    });
+
     describe('parseUShortList', function() {
         it('can parse an empty list', function() {
             const p = new Parser(unhex('0000'), 0);
