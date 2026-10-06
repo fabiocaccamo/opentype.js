@@ -24,6 +24,8 @@ function parseCmapTableFormat0(cmap, p, platformID, encodingID) {
     cmap.glyphIndexMap = glyphIndexMap;
 }
 
+const MAX_UNICODE_CODE_POINT = 0x10FFFF;
+
 function parseCmapTableFormat12or13(cmap, p, format) {
     //Skip reserved.
     p.parseUShort();
@@ -41,7 +43,10 @@ function parseCmapTableFormat12or13(cmap, p, format) {
         const endCharCode = p.parseULong();
         let startGlyphId = p.parseULong();
 
-        for (let c = startCharCode; c <= endCharCode; c += 1) {
+        // character codes are Unicode code points: a malformed group reaching beyond U+10FFFF
+        // would map invalid code points, and could loop billions of times
+        const lastCharCode = Math.min(endCharCode, MAX_UNICODE_CODE_POINT);
+        for (let c = startCharCode; c <= lastCharCode; c += 1) {
             cmap.glyphIndexMap[c] = startGlyphId;
             if (format === 12) {
                 startGlyphId++;
