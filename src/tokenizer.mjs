@@ -511,6 +511,8 @@ Tokenizer.prototype.tokenize = function (text) {
     this.tokens = [];
     this.resetContextsRanges();
     let chars = Array.from(text);
+    // UTF-16 offset of the character of each token in the text
+    let charOffset = 0;
     this.dispatch('start');
     for (let i = 0; i < chars.length; i++) {
         const char = chars[i];
@@ -518,6 +520,8 @@ Tokenizer.prototype.tokenize = function (text) {
         this.dispatch('next', [contextParams]);
         this.runContextCheck(contextParams);
         let token = new Token(char);
+        token.charOffset = charOffset;
+        charOffset += char.length;
         this.tokens.push(token);
         this.dispatch('newToken', [token, contextParams]);
     }

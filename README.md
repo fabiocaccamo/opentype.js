@@ -241,6 +241,9 @@ Convert the string to a list of glyph objects.
 Note that there is no strict 1-to-1 correspondence between the string and glyph list due to
 possible substitutions such as ligatures. The list of returned glyphs can be larger or smaller than the length of the given string.
 
+#### `Font.stringToGlyphClusters(string)`
+Convert the string to the list of glyph objects of `stringToGlyphs`, each one with the characters of the string it represents (its cluster), as `{ glyph, start, end }` where `string.slice(start, end)` are the characters of the glyph (UTF-16 offsets). A ligature represents all its component characters, a character with no glyph of its own (e.g. a variation selector) belongs to the glyph before it.
+
 #### `Font.charToGlyph(char)`
 Convert the character to a Glyph object. Returns `null` if the glyph could not be found. Note that this function assumes that there is a one-to-one mapping between the given character and a glyph; for complex scripts, this might not be the case.
 

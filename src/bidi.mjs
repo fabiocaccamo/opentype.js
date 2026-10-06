@@ -308,4 +308,52 @@ Bidi.prototype.getTextGlyphs = function (text) {
     return indexes;
 };
 
+/**
+ * Get the current state index of each token, with the range of the characters of the text it represents
+ * (its cluster): the characters of the deleted tokens (e.g. ligature components, variation selectors)
+ * belong to the glyph of the previous token in the text.
+ * @param {string} text an input text
+ * @returns {Array<{index: number, start: number, end: number}>} glyph indexes in the glyph order,
+ * with the UTF-16 range [start, end) of their characters in the text
+ */
+Bidi.prototype.getTextGlyphClusters = function (text) {
+    this.processText(text);
+    const tokens = this.tokenizer.tokens;
+    const clusters = [];
+    const tokenClusters = new Map();
+    for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        if (token.state.deleted) continue;
+        const index = token.activeState.value;
+        const cluster = {
+            index: Array.isArray(index) ? index[0] : index,
+            start: token.charOffset,
+            end: token.charOffset + token.char.length
+        };
+        clusters.push(cluster);
+        tokenClusters.set(token, cluster);
+    }
+    // extend the clusters with the characters of the deleted tokens, in text order
+    const tokensInTextOrder = tokens.slice().sort((tokenA, tokenB) => tokenA.charOffset - tokenB.charOffset);
+    let previousCluster = null;
+    let pendingTokens = [];
+    for (let i = 0; i < tokensInTextOrder.length; i++) {
+        const token = tokensInTextOrder[i];
+        const cluster = tokenClusters.get(token);
+        if (cluster) {
+            // deleted tokens before the first glyph belong to it
+            for (let j = 0; j < pendingTokens.length; j++) {
+                cluster.start = Math.min(cluster.start, pendingTokens[j].charOffset);
+            }
+            pendingTokens = [];
+            previousCluster = cluster;
+        } else if (previousCluster) {
+            previousCluster.end = Math.max(previousCluster.end, token.charOffset + token.char.length);
+        } else {
+            pendingTokens.push(token);
+        }
+    }
+    return clusters;
+};
+
 export default Bidi;
