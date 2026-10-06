@@ -77,4 +77,17 @@ describe('tables/gdef.mjs', function() {
     it('can parse a GDEF table', function() {
         assert.deepEqual(table, gdef.parse(unhex(data)));
     });
+
+    it('can parse the mark glyph sets of a GDEF 1.2 table, with 32-bit coverage offsets', function() {
+        const data = unhex(
+            '0001 0002 0000 0000 0000 0000 000E' + // version 1.2, no classDef/attachList/ligCaretList/markAttachClassDef, markGlyphSetsDef
+            '0001 0002 0000000C 00000012' +        // MarkGlyphSets: format 1, 2 sets, coverage offsets from this table
+            '0001 0001 0005' +                     // coverage format 1: glyph 5
+            '0001 0002 0007 0008'                  // coverage format 1: glyphs 7, 8
+        );
+        assert.deepEqual(gdef.parse(data).markGlyphSets, [
+            { format: 1, glyphs: [5] },
+            { format: 1, glyphs: [7, 8] }
+        ]);
+    });
 });

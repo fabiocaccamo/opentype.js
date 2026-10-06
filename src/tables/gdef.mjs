@@ -37,8 +37,9 @@ var ligCaretList = function() {
 };
 
 var markGlyphSets = function() {
-    this.parseUShort(); // Version
-    return this.parseList(Parser.pointer(Parser.coverage));
+    this.parseUShort(); // Format
+    // the coverage offsets of the mark glyph sets are 32-bit
+    return this.parseList(Parser.pointer32(Parser.coverage));
 };
 
 function parseGDEFTable(data, start) {
