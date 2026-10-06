@@ -14,8 +14,13 @@ function parseCmapTableFormat0(cmap, p, platformID, encodingID) {
     // section "Macintosh Language Codes"
     cmap.language = p.parseUShort() - 1;
 
-    const indexMap = p.parseByteList(cmap.length);
-    const glyphIndexMap = Object.assign({}, indexMap);
+    // the glyph ids of the 256 character codes (the length includes the 6-byte header)
+    const indexMap = p.parseByteList(256);
+    // the character codes below 0x80 are ASCII, the others are decoded with the 8-bit Macintosh encoding
+    const glyphIndexMap = {};
+    for (let i = 0; i < 0x80; i++) {
+        glyphIndexMap[i] = indexMap[i];
+    }
     const encoding = getEncoding(platformID, encodingID, cmap.language);
     const decodingTable = eightBitMacEncodings[encoding];
     for (let i = 0; i < decodingTable.length; i++) {
@@ -157,70 +162,66 @@ function parseCmapTableFormat14(cmap, p) {
 }
 
 // Parse the `cmap` table. This table stores the mappings from characters to glyphs.
-// There are many available formats, but we only support the Windows format 4 and 12, and format 14 as a supplement if available.
+// The supported sub-tables ("platformId,encodingId"), from the best to the worst, like HarfBuzz:
+// full Unicode repertoire, Unicode BMP, Windows symbol, Macintosh Roman (8-bit, at most 256 characters).
+const CMAP_SUBTABLE_RANKS = ['3,10', '0,6', '0,4', '3,1', '0,3', '0,2', '0,1', '0,0', '3,0', '1,0'];
+const CMAP_SUPPORTED_FORMATS = [0, 4, 12, 13];
+
+// There are many available formats, but we only support the formats 0, 4, 12 and 13, and format 14 as a supplement if available.
 // This function returns a `CmapEncoding` object or null if no supported format could be found.
 function parseCmapTable(data, start) {
     const cmap = {};
     cmap.version = parse.getUShort(data, start);
     check.argument(cmap.version === 0, 'cmap table version should be 0.');
 
-    // The cmap table can contain many sub-tables, each with their own format.
-    // We're only interested in a "platform 0" (Unicode format) and "platform 3" (Windows format) table,
-    // 
+    // The cmap table can contain many sub-tables, each with their own format:
+    // the best ranked one with a supported format is used (see CMAP_SUBTABLE_RANKS).
     cmap.numTables = parse.getUShort(data, start + 2);
     let format14Parser = null;
-    let format14offset = -1;
-    let offset = -1;
-    let platformId = null;
-    let encodingId = null;
-    const platform0Encodings = [0,1,2,3,4,6];
-    const platform3Encodings = [0,1,10];
+    const candidates = [];
+    // walk the records from the last one, so that among equally ranked sub-tables the last one wins as before
     for (let i = cmap.numTables - 1; i >= 0; i -= 1) {
-        platformId = parse.getUShort(data, start + 4 + (i * 8));
-        encodingId = parse.getUShort(data, start + 4 + (i * 8) + 2);
-        if ((platformId === 3 && platform3Encodings.includes(encodingId)) ||
-            (platformId === 0 && platform0Encodings.includes(encodingId)) ||
-            (platformId === 1 && encodingId === 0) // MacOS <= 9
-        ) {
-            // only use the first supported table
-            if (offset > 0) continue;
-            offset = parse.getULong(data, start + 4 + (i * 8) + 4);
-            // allow for early break
-            if (format14Parser) {
-                break;
+        const platformId = parse.getUShort(data, start + 4 + (i * 8));
+        const encodingId = parse.getUShort(data, start + 4 + (i * 8) + 2);
+        const offset = parse.getULong(data, start + 4 + (i * 8) + 4);
+        if (platformId === 0 && encodingId === 5) {
+            const parser = new parse.Parser(data, start + offset);
+            if (parser.parseUShort() === 14) {
+                format14Parser = parser;
             }
-        } else if (platformId === 0 && encodingId === 5) {
-            format14offset = parse.getULong(data, start + 4 + (i * 8) + 4);
-            format14Parser = new parse.Parser(data, start + format14offset);
-            if (format14Parser.parseUShort() !== 14) {
-                format14offset = -1;
-                format14Parser = null;
-            } else if (offset > 0) {
-                // we already got the regular table, early break
-                break;
-            }
+            continue;
+        }
+        const rank = CMAP_SUBTABLE_RANKS.indexOf(platformId + ',' + encodingId);
+        if (rank !== -1) {
+            candidates.push({ rank, platformId, encodingId, offset, format: parse.getUShort(data, start + offset) });
         }
     }
 
-    if (offset === -1) {
+    if (candidates.length === 0) {
         // There is no cmap table in the font that we support.
         throw new Error('No valid cmap sub-tables found.');
     }
 
-    const p = new parse.Parser(data, start + offset);
+    // the best ranked sub-table with a supported format
+    candidates.sort((candidateA, candidateB) => candidateA.rank - candidateB.rank);
+    const subtable = candidates.find(candidate => CMAP_SUPPORTED_FORMATS.includes(candidate.format));
+    if (!subtable) {
+        const best = candidates[0];
+        throw new Error(
+            'Only format 0 (platformId 1, encodingId 0), 4, 12 and 14 cmap tables are supported ' +
+            '(found format ' + best.format + ', platformId ' + best.platformId + ', encodingId ' + best.encodingId + ').'
+        );
+    }
+
+    const p = new parse.Parser(data, start + subtable.offset);
     cmap.format = p.parseUShort();
 
     if (cmap.format === 0) {
-        parseCmapTableFormat0(cmap, p, platformId, encodingId);
+        parseCmapTableFormat0(cmap, p, subtable.platformId, subtable.encodingId);
     } else if (cmap.format === 12 || cmap.format === 13) {
         parseCmapTableFormat12or13(cmap, p, cmap.format);
     } else if (cmap.format === 4) {
-        parseCmapTableFormat4(cmap, p, data, start, offset);
-    } else {
-        throw new Error(
-            'Only format 0 (platformId 1, encodingId 0), 4, 12 and 14 cmap tables are supported ' +
-            '(found format ' + cmap.format + ', platformId ' + platformId + ', encodingId ' + encodingId + ').'
-        );
+        parseCmapTableFormat4(cmap, p, data, start, subtable.offset);
     }
 
     // format 14 is the only one that's not exclusive but can be used as a supplement.

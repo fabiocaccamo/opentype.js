@@ -2,6 +2,7 @@ import assert from 'assert';
 import { unhex } from '../testutil.mjs';
 import { Parser } from '../../src/parse.mjs';
 import { parseCmapTableFormat14, parseCmapTableFormat0, makeCmapTable } from '../../src/tables/cmap.mjs';
+import cmapTable from '../../src/tables/cmap.mjs';
 import { Font, Path, Glyph, parse } from '../../src/opentype.mjs';
 import { readFileSync } from 'fs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
@@ -94,6 +95,101 @@ describe('tables/cmap.mjs', function() {
             }
         };
     }
+
+    describe('sub-table selection', function() {
+        const hex = (value, bytes) => value.toString(16).padStart(bytes * 2, '0');
+
+        // format 4 sub-table mapping one code point to one glyph
+        function format4(code, glyphIndex) {
+            return '0004 0020 0000 0004 0004 0001 0000' +  // format, length, language, segCountX2, searchRange, entrySelector, rangeShift
+                hex(code, 2) + ' FFFF 0000' +             // endCode, reservedPad
+                hex(code, 2) + ' FFFF' +                  // startCode
+                hex((glyphIndex - code) & 0xFFFF, 2) + ' 0001' + // idDelta
+                '0000 0000';                              // idRangeOffset
+        }
+
+        // format 0 sub-table (8-bit Macintosh) mapping one byte to one glyph
+        function format0(code, glyphIndex) {
+            const glyphIds = new Array(256).fill('00');
+            glyphIds[code] = hex(glyphIndex, 1);
+            return '0000 0106 0000' + glyphIds.join('');
+        }
+
+        // format 12 sub-table mapping one code point to one glyph
+        function format12(code, glyphIndex) {
+            return '000C 0000 0000001C 00000000 00000001' + hex(code, 4) + hex(code, 4) + hex(glyphIndex, 4);
+        }
+
+        // format 6 sub-table (not supported)
+        function format6() {
+            return '0006 000C 0000 0041 0001 0007';
+        }
+
+        function cmapData(records) {
+            let offset = 4 + records.length * 8;
+            let header = '0000' + hex(records.length, 2);
+            let body = '';
+            for (const record of records) {
+                header += hex(record.platformId, 2) + hex(record.encodingId, 2) + hex(offset, 4);
+                const subtable = record.subtable.replace(/ /g, '');
+                body += subtable;
+                offset += subtable.length / 2;
+            }
+            return unhex(header + body);
+        }
+
+        it('prefers a Unicode sub-table over a Macintosh one listed after it', function() {
+            const cmap = cmapTable.parse(cmapData([
+                { platformId: 0, encodingId: 3, subtable: format4(0x41, 1) },
+                { platformId: 1, encodingId: 0, subtable: format4(0x41, 2) }
+            ]), 0);
+            assert.equal(cmap.glyphIndexMap[0x41], 1);
+        });
+
+        it('prefers a full Unicode repertoire sub-table over a BMP one', function() {
+            const cmap = cmapTable.parse(cmapData([
+                { platformId: 0, encodingId: 4, subtable: format12(0x1F600, 3) },
+                { platformId: 3, encodingId: 1, subtable: format4(0x41, 1) }
+            ]), 0);
+            assert.equal(cmap.format, 12);
+            assert.equal(cmap.glyphIndexMap[0x1F600], 3);
+        });
+
+        it('skips a better ranked sub-table of an unsupported format', function() {
+            const cmap = cmapTable.parse(cmapData([
+                { platformId: 0, encodingId: 3, subtable: format6() },
+                { platformId: 1, encodingId: 0, subtable: format0(0x41, 2) }
+            ]), 0);
+            assert.equal(cmap.format, 0);
+            assert.equal(cmap.glyphIndexMap[0x41], 2);
+        });
+
+        it('decodes a Macintosh format 0 sub-table with its own platform and encoding', function() {
+            // the record before the Macintosh one is an unsupported Windows encoding
+            const cmap = cmapTable.parse(cmapData([
+                { platformId: 3, encodingId: 2, subtable: format4(0x41, 1) },
+                { platformId: 1, encodingId: 0, subtable: format0(0x8E, 5) }
+            ]), 0);
+            assert.equal(cmap.format, 0);
+            // 0x8E is "é" in Mac Roman
+            assert.equal(cmap.glyphIndexMap[0xE9], 5);
+        });
+
+        it('does not map the upper half of a Macintosh format 0 sub-table as Latin-1 code points', function() {
+            // 0xB9 is "π" in Mac Roman, U+00B9 is "¹", which Mac Roman does not have
+            const cmap = cmapTable.parse(cmapData([
+                { platformId: 1, encodingId: 0, subtable: format0(0xB9, 7) }
+            ]), 0);
+            assert.equal(cmap.glyphIndexMap[0x03C0], 7);
+            assert.equal(cmap.glyphIndexMap[0xB9], undefined);
+        });
+
+        it('throws when no sub-table has a supported format', function() {
+            assert.throws(() => cmapTable.parse(cmapData([
+                { platformId: 0, encodingId: 3, subtable: format6() }
+            ]), 0), /found format 6, platformId 0, encodingId 3/);
+        });
+    });
 
     describe('makeCmapTable segment merging', function() {
         it('merges contiguous codepoints with same delta into one segment', function() {
