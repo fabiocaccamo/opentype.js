@@ -205,8 +205,8 @@ Options is an optional _{GlyphRenderOptions}_ object containing:
 * `script`: script used to determine which features to apply (default: `"DFLT"` or `"latn"`)
 * `language`: language system used to determine which features to apply (default: `"dflt"`)
 * `kerning`: if true takes kerning information into account (default: `true`)
-* `features`: an object with [OpenType feature tags](https://docs.microsoft.com/en-us/typography/opentype/spec/featuretags) as keys, and a boolean value to enable each feature.
-Currently only ligature features `"liga"` and `"rlig"` are supported (default: `true`).
+* `features`: an object with [OpenType feature tags](https://docs.microsoft.com/en-us/typography/opentype/spec/featuretags) as keys, and a boolean value to enable or disable each feature over the default ones (e.g. `{ liga: false, ss01: true }`).
+For latin text the GSUB features browsers enable by default are applied: `"ccmp"`, `"locl"`, `"rlig"`, `"rclt"`, `"calt"`, `"liga"` and `"clig"`, with their lookups in lookup list order and the GSUB feature variations of the current variation coordinates.
 * `hinting`: if true uses TrueType font hinting if available (default: `false`).
 * `colorFormat`: the format colors are converted to for rendering (default: `"hexa"`). Can be `"rgb"`/`"rgba"` for `rgb()`/`rgba()` output, `"hex"`/`"hexa"` for 6/8 digit hex colors, or `"hsl"`/`"hsla"` for `hsl()`/`hsla()` output. `"bgra"` outputs an object with r, g, b, a keys (r/g/b from 0-255, a from 0-1). `"raw"` outputs an integer as used in the CPAL table.
 * `fill`: font color, the color used to render each glyph (default: `"black"`)
@@ -223,8 +223,8 @@ Create a Path that represents the given text.
 
 Options is an optional object containing:
 * `kerning`: if `true`, takes kerning information into account (default: `true`)
-* `features`: an object with [OpenType feature tags](https://docs.microsoft.com/en-us/typography/opentype/spec/featuretags) as keys, and a boolean value to enable each feature.
-Currently only ligature features `"liga"` and `"rlig"` are supported (default: `true`).
+* `features`: an object with [OpenType feature tags](https://docs.microsoft.com/en-us/typography/opentype/spec/featuretags) as keys, and a boolean value to enable or disable each feature over the default ones (e.g. `{ liga: false, ss01: true }`).
+For latin text the GSUB features browsers enable by default are applied: `"ccmp"`, `"locl"`, `"rlig"`, `"rclt"`, `"calt"`, `"liga"` and `"clig"`, with their lookups in lookup list order and the GSUB feature variations of the current variation coordinates.
 * `hinting`: if true uses TrueType font hinting if available (default: `false`).
 
 #### `Font.drawPoints(ctx, text, x, y, fontSize, options)`

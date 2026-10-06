@@ -47,6 +47,22 @@ function chainingSubstitutionFormat3(action, tokens, index) {
 }
 
 /**
+ * Apply multiple substitution format 1: the token holds the sequence of glyphs
+ * replacing its glyph (expanded in the glyphs of the text), an empty sequence deletes it
+ * @param {Array} substitutions substitutions
+ * @param {any} tokens a list of tokens
+ * @param {number} index token index
+ */
+function multipleSubstitutionFormat1(action, tokens, index) {
+    const glyphs = action.substitution;
+    if (!glyphs.length) {
+        tokens[index].setState('deleted', true);
+        return;
+    }
+    tokens[index].setState(action.tag, glyphs.length === 1 ? glyphs[0] : glyphs.slice());
+}
+
+/**
  * Apply ligature substitution format 1
  * @param {Array} substitutions substitutions
  * @param {any} tokens a list of tokens
@@ -68,11 +84,13 @@ function ligatureSubstitutionFormat1(action, tokens, index) {
 const SUBSTITUTIONS = {
     11: singleSubstitutionFormat1,
     12: singleSubstitutionFormat2,
+    21: multipleSubstitutionFormat1,
     63: chainingSubstitutionFormat3,
     41: ligatureSubstitutionFormat1,
     51: chainingSubstitutionFormat3,
     52: chainingSubstitutionFormat3,
     53: chainingSubstitutionFormat3,
+    61: chainingSubstitutionFormat3,
     62: chainingSubstitutionFormat3
 };
 

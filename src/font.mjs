@@ -215,12 +215,18 @@ Font.prototype.charToGlyph = function(c) {
  */
 Font.prototype.updateFeatures = function (options) {
     // TODO: update all features options not only 'latn'.
+    // options: an object of feature tags overriding the default latin features
+    // (e.g. { liga: false, ss01: true }); the defaults when absent (or a features list)
+    const overrides = options && !Array.isArray(options) ? options : {};
     return this.defaultRenderOptions.features.map(feature => {
         if (feature.script === 'latn') {
-            return {
-                script: 'latn',
-                tags: feature.tags.filter(tag => options[tag])
-            };
+            const tags = feature.tags.filter(tag => overrides[tag] !== false);
+            for (const tag of Object.keys(overrides)) {
+                if (overrides[tag] && !tags.includes(tag)) {
+                    tags.push(tag);
+                }
+            }
+            return { script: 'latn', tags };
         } else {
             return feature;
         }
@@ -371,7 +377,8 @@ Font.prototype.getKerningValue = function(leftGlyph, rightGlyph) {
  * @property {string} [language='dflt'] - language system used to determine which features to apply.
  *                                        See https://www.microsoft.com/typography/developers/opentype/languagetags.aspx
  * @property {boolean} [kerning=true] - whether to include kerning values
- * @property {object} [features] - OpenType Layout feature tags. Used to enable or disable the features of the given script/language system.
+ * @property {object} [features] - OpenType Layout feature tags (e.g. `{ liga: false, ss01: true }`), enabling or disabling them over the default ones
+ *                                 (for latin text: ccmp, locl, rlig, rclt, calt, liga and clig).
  *                                 See https://www.microsoft.com/typography/otspec/featuretags.htm
  * @property {boolean} [hinting=false] - whether to apply font hinting to the outlines
  * @property {integer} [usePalette=0] For COLR/CPAL fonts, the zero-based index of the color palette to use. (Use `Font.palettes.get()` to get the available palettes)
@@ -386,7 +393,8 @@ Font.prototype.defaultRenderOptions = {
          * and shouldn't be turned off when rendering arabic text.
          */
         { script: 'arab', tags: ['init', 'medi', 'fina', 'rlig'] },
-        { script: 'latn', tags: ['liga', 'rlig'] },
+        // the substitution features browsers enable by default
+        { script: 'latn', tags: ['ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig'] },
         { script: 'thai', tags: ['liga', 'rlig', 'ccmp'] },
     ],
     hinting: false,

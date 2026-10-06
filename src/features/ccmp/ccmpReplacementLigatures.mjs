@@ -1,5 +1,6 @@
 import { ContextParams } from '../../tokenizer.mjs';
 import applySubstitution from '../applySubstitution.mjs';
+import { isLatinRunChar } from '../latn/latinFeatures.mjs';
 
 // @TODO: use commonFeatureUtils.js for reduction of code duplication
 // once #564 has been merged.
@@ -23,8 +24,13 @@ function ccmpReplacementLigatures(range) {
     const tag = 'ccmp';
     let tokens = this.tokenizer.getRangeTokens(range);
     let contextParams = getContextParams(tokens);
+    // the latin features apply ccmp to the latin runs, in lookup order with the other features
+    const latinCcmp = (this.featuresTags.latn || []).includes(tag);
     for(let index = 0; index < contextParams.context.length; index++) {
         if (!this.query.getFeature({tag, script, contextParams})){
+            continue;
+        }
+        if (latinCcmp && isLatinRunChar(tokens[index].char)) {
             continue;
         }
         contextParams.setCurrentIndex(index);
