@@ -96,6 +96,27 @@ describe('latin features', function() {
             [['a', 0, 1], ['a.alt', 1, 2], ['b.alt', 1, 2], ['b', 2, 3]]);
     });
 
+    it('applies ccmp once to latin text', function() {
+        // a -> a.alt and a.alt -> b.alt in the same lookup: applied twice, a would become b.alt
+        const lookup = { lookupType: 1, lookupFlag: 0, subtables: [{ substFormat: 2, coverage: { format: 1, glyphs: [1, 6] }, substitute: [6, 7] }] };
+        const font = createFont([['ccmp', [0]]], [lookup]);
+        assert.deepEqual(shape(font, 'ab'), ['a.alt', 'b']);
+    });
+
+    it('applies extension lookups', function() {
+        const extension = { lookupType: 7, lookupFlag: 0, subtables: [{ substFormat: 1, lookupType: 4, extension: ligature(1, [2], 8).subtables[0] }] };
+        const font = createFont([['liga', [0]]], [extension]);
+        assert.deepEqual(shape(font, 'abc'), ['a_b', 'c']);
+    });
+
+    it('does not apply the latin features across arabic or thai text', function() {
+        // - > is a code ligature, but not when an arabic or a thai character separates the two glyphs
+        const font = createFont([['calt', [0]]], [ligature(4, [5], 9)]);
+        assert.deepEqual(shape(font, '->'), ['arrow']);
+        assert.deepEqual(shape(font, '-\u0628>').filter(name => name !== '.notdef'), ['hyphen', 'greater']);
+        assert.deepEqual(shape(font, '-\u0E01>').filter(name => name !== '.notdef'), ['hyphen', 'greater']);
+    });
+
     it('applies the ligatures in getPath and getAdvanceWidth too', function() {
         const font = loadSync('./test/fonts/FiraSansMedium.woff');
         const glyphs = [];
@@ -136,5 +157,14 @@ describe('GSUB feature variations', function() {
         assert.deepEqual(shape(font, 'ab'), ['a_b']);
         normalizedCoordinates = [0.75];
         assert.deepEqual(shape(font, 'ab'), ['a.alt', 'b']);
+    });
+
+    it('does not match the records with conditions of unsupported formats', function() {
+        const font = createFont([['liga', [0]]], [ligature(1, [2], 8), single(1, 6)]);
+        font.tables.gsub.variations = [
+            { conditions: [{ format: 2 }], substitutions: [{ featureIndex: 0, feature: { featureParams: 0, lookupListIndexes: [1] } }] }
+        ];
+        font.variation = { process: { getNormalizedCoords: () => [0.75] } };
+        assert.deepEqual(shape(font, 'ab'), ['a_b']);
     });
 });
