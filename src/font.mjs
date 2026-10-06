@@ -237,6 +237,16 @@ Font.prototype.updateFeatures = function (options) {
  * @return {number[]}
  */
 Font.prototype.stringToGlyphIndexes = function(s, options) {
+    return this._createBidi(options).getTextGlyphs(s);
+};
+
+/**
+ * Create a Bidi instance mapping the characters to glyph indexes, with the features of the given options.
+ * @param  {GlyphRenderOptions} [options]
+ * @return {Bidi}
+ * @private
+ */
+Font.prototype._createBidi = function(options) {
     const bidi = new Bidi();
 
     // Create and register 'glyphIndex' state modifier
@@ -250,7 +260,27 @@ Font.prototype.stringToGlyphIndexes = function(s, options) {
 
     bidi.applyFeatures(this, features);
 
-    return bidi.getTextGlyphs(s);
+    return bidi;
+};
+
+/**
+ * Convert the given text to a list of glyphs, each one with the characters of the text it represents
+ * (its cluster): a ligature represents all its component characters, a character represented by no glyph
+ * of its own (e.g. a variation selector) belongs to the cluster of the glyph before it.
+ * The glyphs are the ones (and in the same order) returned by stringToGlyphs().
+ * @param  {string} s
+ * @param  {GlyphRenderOptions} [options]
+ * @return {Array<{glyph: opentype.Glyph, start: number, end: number}>} the glyphs, with the UTF-16 range
+ * [start, end) of their characters in the text (text.slice(start, end) are the characters of the glyph)
+ */
+Font.prototype.stringToGlyphClusters = function(s, options) {
+    const clusters = this._createBidi(options).getTextGlyphClusters(s);
+    const notdef = this.glyphs.get(0);
+    return clusters.map(cluster => ({
+        glyph: this.glyphs.get(cluster.index) || notdef,
+        start: cluster.start,
+        end: cluster.end
+    }));
 };
 
 /**
