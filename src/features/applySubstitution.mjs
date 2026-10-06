@@ -21,7 +21,8 @@ function singleSubstitutionFormat2(action, tokens, index) {
 }
 
 /**
- * Apply chaining context substitution format 3
+ * Apply contextual substitutions (context format 1 and 3, chaining context format 3),
+ * whose substitutions are indexed by the sequence index of the input glyphs
  * @param {Array} substitutions substitutions
  * @param {any} tokens a list of tokens
  * @param {number} index token index
@@ -29,6 +30,8 @@ function singleSubstitutionFormat2(action, tokens, index) {
 function chainingSubstitutionFormat3(action, tokens, index) {
     for(let i = 0; i < action.substitution.length; i++) {
         const subst = action.substitution[i];
+        // a hole in the substitutions keeps the glyph at this sequence index
+        if (subst === undefined) continue;
         const token = tokens[index + i];
         if (Array.isArray(subst)) {
             if (subst.length){
