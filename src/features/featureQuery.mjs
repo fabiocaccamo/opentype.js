@@ -703,7 +703,7 @@ const APPLIED_SUBSTITUTION_TYPES = ['11', '12', '21', '41', '51', '52', '53', '6
 /**
  * Apply one lookup at the current glyph of a context: the first subtable of the
  * lookup that applies wins (a matching contextual rule ends the lookup even when it
- * substitutes nothing). Lookups of unsupported types are skipped.
+ * substitutes nothing). Lookups of unsupported types are handled by getLookupMethod.
  * @param {any} lookupTable lookup table
  * @param {ContextParams} contextParams context params, its current glyph is the one to substitute
  * @param {string} tag feature tag set as the state of the substituted tokens
@@ -721,8 +721,9 @@ FeatureQuery.prototype.lookupSubstitution = function (lookupTable, contextParams
             subtable = subtable.extension;
             substitutionType = this.getSubstitutionType(subtableOwner, subtable);
         }
-        if (!APPLIED_SUBSTITUTION_TYPES.includes(substitutionType)) continue;
+        // getLookupMethod handles the lookups of unsupported types (it throws, or reports and skips them)
         const lookup = this.getLookupMethod(subtableOwner, subtable);
+        if (!lookup || !APPLIED_SUBSTITUTION_TYPES.includes(substitutionType)) continue;
         const id = parseInt(substitutionType);
         if (substitutionType === '11' || substitutionType === '12') {
             const substitution = lookup(contextParams.current);
