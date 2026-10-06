@@ -52,6 +52,15 @@ opentype.Font.prototype.charToGlyph = function(c) {};
 opentype.Font.prototype.stringToGlyphs = function(s, options) {};
 
 /**
+ * Convert the given text to the list of glyphs of stringToGlyphs, each one with
+ * the UTF-16 range [start, end) of the characters of the text it represents.
+ * @param  {string} s
+ * @param  {Object=} options
+ * @return {Array<{glyph: opentype.Glyph, start: number, end: number}>}
+ */
+opentype.Font.prototype.stringToGlyphClusters = function(s, options) {};
+
+/**
  * @param  {string}
  * @return {Number}
  */
