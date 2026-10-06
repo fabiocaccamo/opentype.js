@@ -110,6 +110,88 @@ describe('nested lookups of contextual substitutions', function() {
         });
     });
 
+    describe('chaining context substitution format 2 (class-based rules)', function() {
+        // classes: input A = 1, B = 2; backtrack C = 1; lookahead B = 1
+        function chainingFormat2Lookup(chainClassSet) {
+            return {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 2,
+                    coverage: { format: 1, glyphs: [1, 2] },
+                    backtrackClassDef: { format: 2, ranges: [{ start: 3, end: 3, classId: 1 }] },
+                    inputClassDef: { format: 2, ranges: [{ start: 1, end: 1, classId: 1 }, { start: 2, end: 2, classId: 2 }] },
+                    lookaheadClassDef: { format: 2, ranges: [{ start: 2, end: 2, classId: 1 }] },
+                    chainClassSet
+                }]
+            };
+        }
+
+        it('matches the backtrack and lookahead classes around the input', function() {
+            // C A' B -> C A.alt B
+            const font = createFont(chainingFormat2Lookup([
+                undefined,
+                [{ backtrack: [1], input: [], lookahead: [1], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] }]
+            ]));
+            assert.deepEqual(shape(font, 'CAB'), ['C', 'A.alt', 'B']);
+            assert.deepEqual(shape(font, 'AB'), ['A', 'B']);
+            assert.deepEqual(shape(font, 'CAC'), ['C', 'A', 'C']);
+        });
+
+        it('matches input sequences of several classes and substitutes at the sequence index', function() {
+            // A B' -> A B.alt
+            const font = createFont(chainingFormat2Lookup([
+                undefined,
+                [{ backtrack: [], input: [2], lookahead: [], lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 0 }] }]
+            ]));
+            assert.deepEqual(shape(font, 'AB'), ['A', 'B.alt']);
+            assert.deepEqual(shape(font, 'BA'), ['B', 'A']);
+        });
+
+        it('applies the first matching rule only, even when it substitutes nothing', function() {
+            const font = createFont(chainingFormat2Lookup([
+                undefined,
+                [
+                    // exception: A followed by B is left as is
+                    { backtrack: [], input: [], lookahead: [1], lookupRecords: [] },
+                    { backtrack: [], input: [], lookahead: [], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] }
+                ]
+            ]));
+            assert.deepEqual(shape(font, 'AB'), ['A', 'B']);
+            assert.deepEqual(shape(font, 'AC'), ['A.alt', 'C']);
+        });
+    });
+
+    describe('contextual rules ending a lookup', function() {
+        it('skips the next subtables of the lookup once a rule matches, even when it substitutes nothing', function() {
+            const lookup = chainingFormat3Lookup([1], []);
+            // subtable 0: exception, A followed by B is left as is; subtable 1: A -> A.alt
+            lookup.subtables[0].lookaheadCoverage = [{ format: 1, glyphs: [2] }];
+            lookup.subtables.push(chainingFormat3Lookup([1], [{ sequenceIndex: 0, lookupListIndex: 0 }]).subtables[0]);
+            const font = createFont(lookup);
+            assert.deepEqual(shape(font, 'AB'), ['A', 'B']);
+            assert.deepEqual(shape(font, 'AC'), ['A.alt', 'C']);
+        });
+    });
+
+    describe('context substitution format 2 (class-based rules)', function() {
+        it('matches the classes of the input sequence', function() {
+            // classes: A = 1, B = 2; A B -> A.alt B
+            const font = createFont({
+                lookupType: 5,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 2,
+                    coverage: { format: 1, glyphs: [1] },
+                    classDef: { format: 1, startGlyph: 1, classes: [1, 2] },
+                    classSets: [undefined, [{ classes: [2], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] }]]
+                }]
+            });
+            assert.deepEqual(shape(font, 'AB'), ['A.alt', 'B']);
+            assert.deepEqual(shape(font, 'AC'), ['A', 'C']);
+        });
+    });
+
     describe('context substitution format 1', function() {
         it('only matches the rules of the rule set of the current glyph', function() {
             const font = createFont({

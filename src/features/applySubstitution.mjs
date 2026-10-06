@@ -21,7 +21,7 @@ function singleSubstitutionFormat2(action, tokens, index) {
 }
 
 /**
- * Apply contextual substitutions (context format 1 and 3, chaining context format 3),
+ * Apply contextual substitutions (context and chaining context, all formats),
  * whose substitutions are indexed by the sequence index of the input glyphs
  * @param {Array} substitutions substitutions
  * @param {any} tokens a list of tokens
@@ -71,7 +71,9 @@ const SUBSTITUTIONS = {
     63: chainingSubstitutionFormat3,
     41: ligatureSubstitutionFormat1,
     51: chainingSubstitutionFormat3,
-    53: chainingSubstitutionFormat3
+    52: chainingSubstitutionFormat3,
+    53: chainingSubstitutionFormat3,
+    62: chainingSubstitutionFormat3
 };
 
 /**
