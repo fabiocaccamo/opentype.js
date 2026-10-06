@@ -90,7 +90,7 @@ Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIn
 };
 
 /**
- * List all kerning lookup tables.
+ * List all kerning lookup tables, including the pair adjustment subtables wrapped in extension lookups.
  *
  * @param {string} [script='DFLT'] - use font.position.getDefaultScriptName() for a better default value
  * @param {string} [language='dflt']
@@ -98,7 +98,37 @@ Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIn
  */
 Position.prototype.getKerningTables = function(script, language) {
     if (this.font.tables.gpos) {
-        return this.getLookupTables(script, language, 'kern', 2);
+        const kerningTables = [];
+        const featureTable = this.getFeatureTable(script, language, 'kern');
+        if (featureTable) {
+            const allLookups = this.font.tables.gpos.lookups;
+            for (let i = 0; i < featureTable.lookupListIndexes.length; i++) {
+                const lookupTable = allLookups[featureTable.lookupListIndexes[i]];
+                if (!lookupTable) continue;
+                if (lookupTable.lookupType === 2) {
+                    kerningTables.push(lookupTable);
+                } else if (lookupTable.lookupType === 9) {
+                    // Extension Positioning lookup (used by fonts whose kerning data exceeds the 16-bit offsets):
+                    // expose its wrapped pair adjustment subtables as a lookup of type 2, keeping the lookup order.
+                    const subtables = [];
+                    for (let j = 0; j < lookupTable.subtables.length; j++) {
+                        const subtable = lookupTable.subtables[j];
+                        if (subtable.lookupType === 2) {
+                            subtables.push(subtable.extension);
+                        }
+                    }
+                    if (subtables.length) {
+                        kerningTables.push({
+                            lookupType: 2,
+                            lookupFlag: lookupTable.lookupFlag,
+                            subtables: subtables,
+                            markFilteringSet: lookupTable.markFilteringSet
+                        });
+                    }
+                }
+            }
+        }
+        return kerningTables;
     }
 };
 
