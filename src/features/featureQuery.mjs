@@ -153,6 +153,7 @@ function applyNestedLookupRecords(inputGlyphs, lookupRecords) {
 /**
  * Handle chaining context substitution - format 3
  * @param {ContextParams} contextParams context params to lookup
+ * @returns {Array|null} substitutions by sequence index if the rule matches (empty if it substitutes nothing), null otherwise
  */
 function chainingSubstitutionFormat3(contextParams, subtable) {
     const lookupsCount = (
@@ -160,15 +161,15 @@ function chainingSubstitutionFormat3(contextParams, subtable) {
         subtable.lookaheadCoverage.length +
         subtable.backtrackCoverage.length
     );
-    if (contextParams.context.length < lookupsCount) return [];
+    if (contextParams.context.length < lookupsCount) return null;
     // INPUT LOOKUP //
     let inputLookups = lookupCoverageList(
         subtable.inputCoverage, contextParams
     );
-    if (inputLookups === -1) return [];
+    if (inputLookups === -1) return null;
     // LOOKAHEAD LOOKUP //
     const lookaheadOffset = subtable.inputCoverage.length - 1;
-    if (contextParams.lookahead.length < subtable.lookaheadCoverage.length) return [];
+    if (contextParams.lookahead.length < subtable.lookaheadCoverage.length) return null;
     let lookaheadContext = contextParams.lookahead.slice(lookaheadOffset);
     while (lookaheadContext.length && isTashkeelArabicChar(lookaheadContext[0].char)) {
         lookaheadContext.shift();
@@ -183,7 +184,7 @@ function chainingSubstitutionFormat3(contextParams, subtable) {
     while (backtrackContext.length && isTashkeelArabicChar(backtrackContext[0].char)) {
         backtrackContext.shift();
     }
-    if (backtrackContext.length < subtable.backtrackCoverage.length) return [];
+    if (backtrackContext.length < subtable.backtrackCoverage.length) return null;
     const backtrackParams = new ContextParams(backtrackContext, 0);
     let backtrackLookups = lookupCoverageList(
         subtable.backtrackCoverage, backtrackParams
@@ -193,7 +194,7 @@ function chainingSubstitutionFormat3(contextParams, subtable) {
         lookaheadLookups.length === subtable.lookaheadCoverage.length &&
         backtrackLookups.length === subtable.backtrackCoverage.length
     );
-    if (!contextRulesMatch) return [];
+    if (!contextRulesMatch) return null;
     const inputGlyphs = [contextParams.current].concat(
         contextParams.lookahead.slice(0, subtable.inputCoverage.length - 1)
     );
@@ -228,6 +229,7 @@ function ligatureSubstitutionFormat1(contextParams, subtable) {
 /**
  * Handle context substitution - format 1
  * @param {ContextParams} contextParams context params to lookup
+ * @returns {Array|null} substitutions by sequence index if a rule matches (empty if it substitutes nothing), null otherwise
  */
 function contextSubstitutionFormat1(contextParams, subtable) {
     const glyphIndex = contextParams.current;
@@ -253,19 +255,94 @@ function contextSubstitutionFormat1(contextParams, subtable) {
 }
 
 /**
+ * Get the class of a glyph in a class definition table, 0 when the table is missing
+ * @param {Font} font opentype font instance
+ * @param {any} classDef class definition table
+ * @param {number|number[]} glyph glyph index (or the glyphs of a multiple substitution)
+ * @returns {number}
+ */
+function getGlyphClass(font, classDef, glyph) {
+    if (!classDef) return 0;
+    const glyphIndex = Array.isArray(glyph) ? glyph[0] : glyph;
+    return font.substitution.getGlyphClass(classDef, glyphIndex) || 0;
+}
+
+/**
+ * Check that a sequence of glyphs starts with glyphs of the given classes
+ * @param {Font} font opentype font instance
+ * @param {Array} glyphs glyph sequence
+ * @param {number[]} classes expected glyph classes
+ * @param {any} classDef class definition table
+ * @returns {boolean}
+ */
+function matchGlyphClasses(font, glyphs, classes, classDef) {
+    if (glyphs.length < classes.length) return false;
+    for (let i = 0; i < classes.length; i++) {
+        if (getGlyphClass(font, classDef, glyphs[i]) !== classes[i]) return false;
+    }
+    return true;
+}
+
+/**
+ * Handle context substitution - format 2 (class-based rules)
+ * @param {ContextParams} contextParams context params to lookup
+ * @returns {Array|null} substitutions by sequence index if a rule matches (empty if it substitutes nothing), null otherwise
+ */
+function contextSubstitutionFormat2(contextParams, subtable) {
+    const glyphIndex = contextParams.current;
+    if (lookupCoverage(Array.isArray(glyphIndex) ? glyphIndex[0] : glyphIndex, subtable.coverage) === -1) return null;
+    const classSet = subtable.classSets[getGlyphClass(this.font, subtable.classDef, glyphIndex)];
+    if (!classSet) return null;
+    for (let i = 0; i < classSet.length; i++) {
+        const rule = classSet[i];
+        if (!matchGlyphClasses(this.font, contextParams.lookahead, rule.classes, subtable.classDef)) continue;
+        // the first matching rule applies, even when its lookups substitute nothing
+        const inputGlyphs = [glyphIndex].concat(contextParams.lookahead.slice(0, rule.classes.length));
+        return applyNestedLookupRecords.call(this, inputGlyphs, rule.lookupRecords);
+    }
+    return null;
+}
+
+/**
+ * Handle chaining context substitution - format 2 (class-based rules)
+ * @param {ContextParams} contextParams context params to lookup
+ * @returns {Array|null} substitutions by sequence index if a rule matches (empty if it substitutes nothing), null otherwise
+ */
+function chainingSubstitutionFormat2(contextParams, subtable) {
+    const glyphIndex = contextParams.current;
+    if (lookupCoverage(Array.isArray(glyphIndex) ? glyphIndex[0] : glyphIndex, subtable.coverage) === -1) return null;
+    const chainClassSet = subtable.chainClassSet[getGlyphClass(this.font, subtable.inputClassDef, glyphIndex)];
+    if (!chainClassSet) return null;
+    // the backtrack sequence is matched from the glyph before the current one, backwards
+    const backtrack = contextParams.backtrack.slice().reverse();
+    for (let i = 0; i < chainClassSet.length; i++) {
+        const rule = chainClassSet[i];
+        if (!matchGlyphClasses(this.font, backtrack, rule.backtrack, subtable.backtrackClassDef)) continue;
+        if (!matchGlyphClasses(this.font, contextParams.lookahead, rule.input, subtable.inputClassDef)) continue;
+        const lookahead = contextParams.lookahead.slice(rule.input.length);
+        if (!matchGlyphClasses(this.font, lookahead, rule.lookahead, subtable.lookaheadClassDef)) continue;
+        // the first matching rule applies, even when its lookups substitute nothing
+        const inputGlyphs = [glyphIndex].concat(contextParams.lookahead.slice(0, rule.input.length));
+        return applyNestedLookupRecords.call(this, inputGlyphs, rule.lookupRecords);
+    }
+    return null;
+}
+
+/**
  * Handle context substitution - format 3
  * @param {ContextParams} contextParams context params to lookup
+ * @returns {Array|null} substitutions by sequence index if the rule matches (empty if it substitutes nothing), null otherwise
  */
 function contextSubstitutionFormat3(contextParams, subtable) {
     if (contextParams.context.length < subtable.coverages.length) {
-        return [];
+        return null;
     }
     // Check each coverage against the glyph at the corresponding position
     for (let i = 0; i < subtable.coverages.length; i++) {
         let glyphIndex = contextParams.get(i);
         glyphIndex = Array.isArray(glyphIndex) ? glyphIndex[0] : glyphIndex;
         if (lookupCoverage(glyphIndex, subtable.coverages[i]) === -1) {
-            return [];
+            return null;
         }
     }
     const inputGlyphs = [];
@@ -387,6 +464,10 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
             return glyphIndex => singleSubstitutionFormat2.apply(
                 this, [glyphIndex, subtable]
             );
+        case '62':
+            return contextParams => chainingSubstitutionFormat2.apply(
+                this, [contextParams, subtable]
+            );
         case '63':
             return contextParams => chainingSubstitutionFormat3.apply(
                 this, [contextParams, subtable]
@@ -401,6 +482,10 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
             );
         case '51':
             return contextParams => contextSubstitutionFormat1.apply(
+                this, [contextParams, subtable]
+            );
+        case '52':
+            return contextParams => contextSubstitutionFormat2.apply(
                 this, [contextParams, subtable]
             );
         case '53':
@@ -487,6 +572,7 @@ FeatureQuery.prototype.lookupFeature = function (query) {
             }
 
             let substitution;
+            let contextualRuleMatched = false;
             switch (substType) {
                 case '11':
                     substitution = lookup(contextParams.current);
@@ -501,14 +587,6 @@ FeatureQuery.prototype.lookupFeature = function (query) {
                     if (substitution) {
                         substitutions.splice(currentIndex, 1, new SubstitutionAction({
                             id: 12, tag: query.tag, substitution
-                        }));
-                    }
-                    break;
-                case '63':
-                    substitution = lookup(contextParams);
-                    if (Array.isArray(substitution) && substitution.length) {
-                        substitutions.splice(currentIndex, 1, new SubstitutionAction({
-                            id: 63, tag: query.tag, substitution
                         }));
                     }
                     break;
@@ -529,9 +607,14 @@ FeatureQuery.prototype.lookupFeature = function (query) {
                     }
                     break;
                 case '51':
+                case '52':
                 case '53':
+                case '62':
+                case '63':
                     substitution = lookup(contextParams);
-                    if (Array.isArray(substitution) && substitution.length) {
+                    // a matching contextual rule ends the lookup, even when it substitutes nothing (e.g. an exception rule)
+                    contextualRuleMatched = Array.isArray(substitution);
+                    if (contextualRuleMatched && substitution.length) {
                         substitutions.splice(currentIndex, 1, new SubstitutionAction({
                             id: parseInt(substType),
                             tag: query.tag,
@@ -541,6 +624,7 @@ FeatureQuery.prototype.lookupFeature = function (query) {
                     break;
             }
             contextParams = new ContextParams(substitutions, currentIndex);
+            if (contextualRuleMatched) break;
             if (Array.isArray(substitution) && !substitution.length) continue;
             substitution = null;
         }

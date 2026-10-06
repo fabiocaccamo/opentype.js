@@ -132,7 +132,7 @@ describe('contextSubstitutionFormat3', function () {
         assert.deepEqual(substitutions, [3, 4]);
     });
 
-    it('should return empty array when context is too short', function () {
+    it('should return null when context is too short', function () {
         const feature = query.getFeature({ tag: 'test', script: 'DFLT' });
         const featureLookups = query.getFeatureLookups(feature);
         const lookupSubtables = query.getLookupSubtables(featureLookups[0]);
@@ -141,10 +141,10 @@ describe('contextSubstitutionFormat3', function () {
         const contextParams = new ContextParams([1], 0);
         const substitutions = lookup(contextParams);
 
-        assert.deepEqual(substitutions, []);
+        assert.strictEqual(substitutions, null);
     });
 
-    it('should return empty array when glyphs do not match coverages', function () {
+    it('should return null when glyphs do not match coverages', function () {
         const feature = query.getFeature({ tag: 'test', script: 'DFLT' });
         const featureLookups = query.getFeatureLookups(feature);
         const lookupSubtables = query.getLookupSubtables(featureLookups[0]);
@@ -154,7 +154,7 @@ describe('contextSubstitutionFormat3', function () {
         const contextParams = new ContextParams([2, 1], 0);
         const substitutions = lookup(contextParams);
 
-        assert.deepEqual(substitutions, []);
+        assert.strictEqual(substitutions, null);
     });
 
     it('should only substitute at specific sequenceIndex positions', function () {
