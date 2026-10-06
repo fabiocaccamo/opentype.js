@@ -39,9 +39,8 @@ function getLong(dataView, offset) {
 // Retrieve a 32-bit signed fixed-point number (16.16) from the DataView.
 // The value is stored in big endian.
 function getFixed(dataView, offset) {
-    const decimal = dataView.getInt16(offset, false);
-    const fraction = dataView.getUint16(offset + 2, false);
-    return decimal + fraction / 65535;
+    // the 16-bit fraction counts 1/65536 units, so the whole value is a signed 32-bit integer of 1/65536 units
+    return dataView.getInt32(offset, false) / 65536;
 }
 
 // Retrieve a 4-character tag from the DataView.
