@@ -158,9 +158,14 @@ describe('featureQuery.mjs', function() {
             const substitutionType = query.sub5.getSubstitutionType(featureLookups[0], lookupSubtables[0]);
             assert.equal(substitutionType, 51);
             const lookup = query.sub5.getLookupMethod(featureLookups[0], lookupSubtables[0]);
+            // space endash space: both spaces become uni2009 (86), like HarfBuzz does;
+            // the endash (88) is not substituted, so it is a hole in the substitutions
             let contextParams = new ContextParams([1, 88, 1], 0);
             const substitutions = lookup(contextParams);
-            assert.deepEqual(substitutions, [85, 88, 85]);
+            assert.equal(substitutions.length, 3);
+            assert.equal(substitutions[0], 86);
+            assert.equal(1 in substitutions, false);
+            assert.equal(substitutions[2], 86);
         });
         it('should parse multiple glyphs -ligature substitution format 3 (53)', function () {
             const feature = query.sub5.getFeature({tag: 'ccmp', script: 'DFLT'});

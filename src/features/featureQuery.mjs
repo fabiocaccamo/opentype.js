@@ -67,7 +67,8 @@ function lookupCoverage(glyphIndex, coverage) {
 function singleSubstitutionFormat1(glyphIndex, subtable) {
     let substituteIndex = lookupCoverage(glyphIndex, subtable.coverage);
     if (substituteIndex === -1) return null;
-    return glyphIndex + subtable.deltaGlyphId;
+    // the delta addition is modulo 65536
+    return (glyphIndex + subtable.deltaGlyphId) & 0xFFFF;
 }
 
 /**
@@ -81,7 +82,7 @@ function singleSubstitutionFormat2(glyphIndex, subtable) {
 }
 
 /**
- * Lookup a list of coverage tables
+ * Lookup a list of coverage tables, each one against the glyph at its position from the current one
  * @param {any} coverageList a list of coverage tables
  * @param {ContextParams} contextParams context params to lookup
  */
@@ -89,7 +90,7 @@ function lookupCoverageList(coverageList, contextParams) {
     let lookupList = [];
     for (let i = 0; i < coverageList.length; i++) {
         const coverage = coverageList[i];
-        let glyphIndex = contextParams.current;
+        let glyphIndex = contextParams.get(i);
         glyphIndex = Array.isArray(glyphIndex) ? glyphIndex[0] : glyphIndex;
         const lookupIndex = lookupCoverage(glyphIndex, coverage);
         if (lookupIndex !== -1) {
@@ -98,6 +99,52 @@ function lookupCoverageList(coverageList, contextParams) {
     }
     if (lookupList.length !== coverageList.length) return -1;
     return lookupList;
+}
+
+// nested lookup types (lookupType + substFormat) a contextual rule can apply:
+// single substitution format 1 and 2, multiple substitution format 1
+const NESTED_SUBSTITUTION_TYPES = ['11', '12', '21'];
+
+/**
+ * Apply the nested lookups of a matched contextual rule to its input sequence.
+ * Each lookup record substitutes the glyph at its sequence index, in record order,
+ * so a record sees the substitutions of the previous ones. The first subtable
+ * of a lookup that substitutes the glyph wins. Nested lookups of other types are skipped.
+ * @param {Array} inputGlyphs glyph indexes of the matched input sequence
+ * @param {any[]} lookupRecords lookup records of the matched rule
+ * @returns {Array} substitutions by sequence index (sparse, a hole keeps the glyph), empty if nothing is substituted
+ */
+function applyNestedLookupRecords(inputGlyphs, lookupRecords) {
+    const glyphs = inputGlyphs.slice();
+    const substitutions = [];
+    for (let i = 0; i < lookupRecords.length; i++) {
+        const lookupRecord = lookupRecords[i];
+        const sequenceIndex = lookupRecord.sequenceIndex;
+        if (sequenceIndex >= glyphs.length) continue;
+        const lookupTable = this.getLookupByIndex(lookupRecord.lookupListIndex);
+        if (!lookupTable) continue;
+        for (let s = 0; s < lookupTable.subtables.length; s++) {
+            let subtableOwner = lookupTable;
+            let subtable = lookupTable.subtables[s];
+            let substitutionType = this.getSubstitutionType(lookupTable, subtable);
+            if (substitutionType === '71') {
+                // This is an extension subtable, so lookup the target subtable
+                subtableOwner = subtable;
+                subtable = subtable.extension;
+                substitutionType = this.getSubstitutionType(subtableOwner, subtable);
+            }
+            if (!NESTED_SUBSTITUTION_TYPES.includes(substitutionType)) continue;
+            const glyph = glyphs[sequenceIndex];
+            const glyphIndex = Array.isArray(glyph) ? glyph[0] : glyph;
+            const substitution = this.getLookupMethod(subtableOwner, subtable)(glyphIndex);
+            if (substitution !== null && substitution !== undefined) {
+                glyphs[sequenceIndex] = substitution;
+                substitutions[sequenceIndex] = substitution;
+                break;
+            }
+        }
+    }
+    return substitutions;
 }
 
 /**
@@ -143,41 +190,11 @@ function chainingSubstitutionFormat3(contextParams, subtable) {
         lookaheadLookups.length === subtable.lookaheadCoverage.length &&
         backtrackLookups.length === subtable.backtrackCoverage.length
     );
-    let substitutions = [];
-    if (contextRulesMatch) {
-        for (let i = 0; i < subtable.lookupRecords.length; i++) {
-            const lookupRecord = subtable.lookupRecords[i];
-            const lookupListIndex = lookupRecord.lookupListIndex;
-            const lookupTable = this.getLookupByIndex(lookupListIndex);
-            for (let s = 0; s < lookupTable.subtables.length; s++) {
-                let subtable = lookupTable.subtables[s];
-                let lookup;
-                let substitutionType = this.getSubstitutionType(lookupTable, subtable);
-
-                if (substitutionType === '71') {
-                    // This is an extension subtable, so lookup the target subtable
-                    substitutionType = this.getSubstitutionType(subtable, subtable.extension);
-                    lookup = this.getLookupMethod(subtable, subtable.extension);
-                    subtable = subtable.extension;
-                } else {
-                    lookup = this.getLookupMethod(lookupTable, subtable);
-                }
-
-                if (substitutionType === '12') {
-                    const glyphIndex = contextParams.get(lookupRecord.sequenceIndex);
-                    const substitution = lookup(glyphIndex);
-                    if (substitution) substitutions.push(substitution);
-                } else if (substitutionType === '21') {
-                    const glyphIndex = contextParams.get(lookupRecord.sequenceIndex);
-                    const substitution = lookup(glyphIndex);
-                    if (substitution) substitutions.push(substitution);
-                } else {
-                    throw new Error(`Substitution type ${substitutionType} is not supported in chaining substitution`);
-                }
-            }
-        }
-    }
-    return substitutions;
+    if (!contextRulesMatch) return [];
+    const inputGlyphs = [contextParams.current].concat(
+        contextParams.lookahead.slice(0, subtable.inputCoverage.length - 1)
+    );
+    return applyNestedLookupRecords.call(this, inputGlyphs, subtable.lookupRecords);
 }
 
 /**
@@ -210,43 +227,23 @@ function ligatureSubstitutionFormat1(contextParams, subtable) {
  * @param {ContextParams} contextParams context params to lookup
  */
 function contextSubstitutionFormat1(contextParams, subtable) {
-    let glyphId = contextParams.current;
-    let ligSetIndex = lookupCoverage(glyphId, subtable.coverage);
-    if (ligSetIndex === -1)
-        return null;
-    for (const ruleSet of subtable.ruleSets) {
-        for (const rule of ruleSet) {
-            let matched = true;
-            for (let i = 0; i < rule.input.length; i++) {
-                if (contextParams.lookahead[i] !== rule.input[i]){
-                    matched = false;
-                    break;
-                }
+    const glyphIndex = contextParams.current;
+    const coverageIndex = lookupCoverage(glyphIndex, subtable.coverage);
+    if (coverageIndex === -1) return null;
+    // only the rules of the rule set of the current glyph apply
+    const ruleSet = subtable.ruleSets[coverageIndex];
+    if (!ruleSet) return null;
+    for (const rule of ruleSet) {
+        let matched = true;
+        for (let i = 0; i < rule.input.length; i++) {
+            if (contextParams.lookahead[i] !== rule.input[i]) {
+                matched = false;
+                break;
             }
-            if (matched) {
-                let substitutions = [];
-                substitutions.push(glyphId);
-                for (let i = 0; i < rule.input.length; i++) {
-                    substitutions.push(rule.input[i]);
-                }
-                const parser = (substitutions, lookupRecord)=>{
-                    const {lookupListIndex,sequenceIndex} = lookupRecord;
-                    const {subtables} = this.getLookupByIndex(lookupListIndex);
-                    for (const subtable of subtables){
-                        let ligSetIndex = lookupCoverage(substitutions[sequenceIndex], subtable.coverage);
-                        if (ligSetIndex !== -1){
-                            substitutions[sequenceIndex] = subtable.deltaGlyphId;
-                        }
-                    }
-                };
-
-                for (let i = 0; i < rule.lookupRecords.length; i++) {
-                    const lookupRecord = rule.lookupRecords[i];
-                    parser(substitutions, lookupRecord);
-                }
-
-                return substitutions;
-            }
+        }
+        if (matched) {
+            // the first matching rule applies, even when its lookups substitute nothing
+            return applyNestedLookupRecords.call(this, [glyphIndex].concat(rule.input), rule.lookupRecords);
         }
     }
     return null;
@@ -268,37 +265,11 @@ function contextSubstitutionFormat3(contextParams, subtable) {
             return [];
         }
     }
-    let substitutions = [];
-    for (let i = 0; i < subtable.lookupRecords.length; i++) {
-        const lookupRecord = subtable.lookupRecords[i];
-        const lookupListIndex = lookupRecord.lookupListIndex;
-        const lookupTable = this.getLookupByIndex(lookupListIndex);
-        for (let s = 0; s < lookupTable.subtables.length; s++) {
-            let subtable = lookupTable.subtables[s];
-            let lookup;
-            let substitutionType = this.getSubstitutionType(lookupTable, subtable);
-
-            if (substitutionType === '71') {
-                // This is an extension subtable, so lookup the target subtable
-                substitutionType = this.getSubstitutionType(subtable, subtable.extension);
-                lookup = this.getLookupMethod(subtable, subtable.extension);
-                subtable = subtable.extension;
-            } else {
-                lookup = this.getLookupMethod(lookupTable, subtable);
-            }
-
-            if (substitutionType === '12') {
-                const glyphIndex = contextParams.get(lookupRecord.sequenceIndex);
-                const substitution = lookup(glyphIndex);
-                if (substitution) substitutions.push(substitution);
-            } else if (substitutionType === '21') {
-                const glyphIndex = contextParams.get(lookupRecord.sequenceIndex);
-                const substitution = lookup(glyphIndex);
-                if (substitution) substitutions.push(substitution);
-            }
-        }
+    const inputGlyphs = [];
+    for (let i = 0; i < subtable.coverages.length; i++) {
+        inputGlyphs.push(contextParams.get(i));
     }
-    return substitutions;
+    return applyNestedLookupRecords.call(this, inputGlyphs, subtable.lookupRecords);
 }
 
 /**
