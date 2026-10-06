@@ -138,4 +138,45 @@ describe('tables/gpos.mjs', function() {
             ]
         });
     });
+
+    //// Lookup type 9 ////////////////////////////////////////////////////////
+    it('can parse lookup9 ExtensionPosFormat1 wrapping a PairPosFormat1 subtable', function() {
+        // https://docs.microsoft.com/en-us/typography/opentype/spec/gpos#lookuptype-9-extension-positioning
+        const data = '0001 0002 00000008' +       // posFormat, extensionLookupType 2, offset from this subtable
+            '0001 001E 0004 0001 0002 000E 0016   0001 0059 FFE2 FFEC 0001 0059 FFD8 FFE7   0001 0002 002D 0031';
+        assert.deepEqual(parseLookup(9, data), {
+            posFormat: 1,
+            lookupType: 2,
+            extension: {
+                posFormat: 1,
+                coverage: {
+                    format: 1,
+                    glyphs: [0x2d, 0x31]
+                },
+                valueFormat1: 4,
+                valueFormat2: 1,
+                pairSets: [
+                    [{ secondGlyph: 0x59, value1: { xAdvance: -30 }, value2: { xPlacement: -20 } }],
+                    [{ secondGlyph: 0x59, value1: { xAdvance: -40 }, value2: { xPlacement: -25 } }]
+                ]
+            }
+        });
+    });
+
+    it('can parse lookup9 ExtensionPosFormat1 wrapping a PairPosFormat2 subtable', function() {
+        // the wrapped subtable is not adjacent to the extension subtable: its offsets are relative to its own start
+        const data = '0001 0002 0000000C' +       // posFormat, extensionLookupType 2, offset from this subtable
+            'DEAD BEEF' +                         // unrelated data between the two subtables
+            '0002 0018 0004 0000 0022 0032 0002 0002 0000 0000 0000 FFCE   0001 0003 0046 0047 0049   0002 0002 0046 0047 0001 0049 0049 0001   0002 0001 006A 006B 0001';
+        const subtable = parseLookup(9, data);
+        assert.equal(subtable.lookupType, 2);
+        assert.equal(subtable.extension.posFormat, 2);
+        assert.deepEqual(subtable.extension.coverage, { format: 1, glyphs: [0x46, 0x47, 0x49] });
+        assert.deepEqual(subtable.extension.classRecords[1][1], { value1: { xAdvance: -50 }, value2: undefined });
+    });
+
+    it('skips a malformed lookup9 subtable without throwing', function() {
+        assert.match(parseLookup(9, '0002 0002 00000008').error, /GPOS lookup type 9 format must be 1/);
+        assert.match(parseLookup(9, '0001 0009 00000008').error, /GPOS extension lookup type must be 1 to 8/);
+    });
 });

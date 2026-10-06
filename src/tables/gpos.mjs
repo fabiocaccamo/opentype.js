@@ -82,7 +82,27 @@ subtableParsers[5] = function parseLookup5() { return { error: 'GPOS Lookup 5 no
 subtableParsers[6] = function parseLookup6() { return { error: 'GPOS Lookup 6 not supported' }; };
 subtableParsers[7] = function parseLookup7() { return { error: 'GPOS Lookup 7 not supported' }; };
 subtableParsers[8] = function parseLookup8() { return { error: 'GPOS Lookup 8 not supported' }; };
-subtableParsers[9] = function parseLookup9() { return { error: 'GPOS Lookup 9 not supported' }; };
+// https://docs.microsoft.com/en-us/typography/opentype/spec/gpos#lookup-type-9-extension-positioning
+subtableParsers[9] = function parseLookup9() {
+    // Extension Positioning subtable: wraps a subtable of another lookup type behind a 32-bit offset
+    const start = this.offset + this.relativeOffset;
+    const posFormat = this.parseUShort();
+    const extensionLookupType = this.parseUShort();
+    // a malformed extension subtable is skipped like the unsupported lookups, without failing the font parsing
+    if (posFormat !== 1) {
+        return { error: '0x' + start.toString(16) + ': GPOS lookup type 9 format must be 1.' };
+    }
+    if (extensionLookupType < 1 || extensionLookupType > 8) {
+        return { error: '0x' + start.toString(16) + ': GPOS extension lookup type must be 1 to 8.' };
+    }
+    // the offset is relative to the start of this Extension Positioning subtable
+    const extensionParser = new Parser(this.data, start + this.parseOffset32());
+    return {
+        posFormat: 1,
+        lookupType: extensionLookupType,
+        extension: subtableParsers[extensionLookupType].call(extensionParser)
+    };
+};
 
 // https://docs.microsoft.com/en-us/typography/opentype/spec/gpos
 function parseGposTable(data, start) {
