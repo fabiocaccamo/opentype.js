@@ -2,6 +2,7 @@ import assert from 'assert';
 import { unhex } from '../testutil.mjs';
 import { Parser } from '../../src/parse.mjs';
 import { parseCmapTableFormat14, parseCmapTableFormat0, makeCmapTable } from '../../src/tables/cmap.mjs';
+import cmapTable from '../../src/tables/cmap.mjs';
 import { Font, Path, Glyph, parse } from '../../src/opentype.mjs';
 import { readFileSync } from 'fs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
@@ -94,6 +95,22 @@ describe('tables/cmap.mjs', function() {
             }
         };
     }
+
+    it('does not map format 12 and 13 code points beyond U+10FFFF', function() {
+        for (const format of [12, 13]) {
+            const cmapData =
+                '0000 0001' +                     // version, numTables
+                '0003 000A 0000000C' +            // platformID 3, encodingID 10, offset 12
+                '000' + format.toString(16).toUpperCase() + ' 0000' + // format, reserved
+                '00000028' +                      // length
+                '00000000' +                      // language
+                '00000002' +                      // numGroups
+                '0010FFFE 00110003 00000005' +    // a group straddling U+10FFFF
+                '00200000 FFFFFFFF 00000009';     // a group entirely beyond U+10FFFF, up to the 32-bit maximum
+            const cmap = cmapTable.parse(unhex(cmapData), 0);
+            assert.deepEqual(cmap.glyphIndexMap, format === 12 ? { 0x10FFFE: 5, 0x10FFFF: 6 } : { 0x10FFFE: 5, 0x10FFFF: 5 });
+        }
+    });
 
     describe('makeCmapTable segment merging', function() {
         it('merges contiguous codepoints with same delta into one segment', function() {
