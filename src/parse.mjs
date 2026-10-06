@@ -741,8 +741,10 @@ Parser.prototype.parseLookupList = function(lookupTableParsers) {
     }))) || [];
 };
 
+// https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#featurevariations-table
 Parser.prototype.parseFeatureVariationsList = function() {
     return this.parsePointer32(function() {
+        const featureVariationsStart = this.offset;
         const majorVersion = this.parseUShort();
         const minorVersion = this.parseUShort();
         check.argument(majorVersion === 1 && minorVersion < 1, 'GPOS/GSUB feature variations table unknown.');
@@ -750,8 +752,57 @@ Parser.prototype.parseFeatureVariationsList = function() {
             conditionSetOffset: Parser.offset32,
             featureTableSubstitutionOffset: Parser.offset32
         });
+        for (let i = 0; i < featureVariations.length; i++) {
+            const record = featureVariations[i];
+            record.conditions = record.conditionSetOffset ?
+                new Parser(this.data, featureVariationsStart + record.conditionSetOffset).parseConditionSet() : [];
+            record.substitutions = record.featureTableSubstitutionOffset ?
+                new Parser(this.data, featureVariationsStart + record.featureTableSubstitutionOffset).parseFeatureTableSubstitution() : [];
+        }
         return featureVariations;
     }) || [];
+};
+
+// the conditions on the axis values of a feature variation record, all of them must be met:
+// format 1 is an axis range in normalized coordinates, other formats are kept as unsupported
+Parser.prototype.parseConditionSet = function() {
+    const conditionSetStart = this.offset;
+    const conditionOffsets = this.parseULongList(this.parseUShort());
+    return conditionOffsets.map(conditionOffset => {
+        const p = new Parser(this.data, conditionSetStart + conditionOffset);
+        const format = p.parseUShort();
+        if (format !== 1) {
+            return { format };
+        }
+        return {
+            format,
+            axisIndex: p.parseUShort(),
+            filterRangeMinValue: p.parseF2Dot14(),
+            filterRangeMaxValue: p.parseF2Dot14()
+        };
+    });
+};
+
+// the alternate feature tables of a feature variation record, by feature index
+Parser.prototype.parseFeatureTableSubstitution = function() {
+    const substitutionStart = this.offset;
+    this.parseUShort(); // majorVersion
+    this.parseUShort(); // minorVersion
+    const substitutionCount = this.parseUShort();
+    const substitutions = [];
+    for (let i = 0; i < substitutionCount; i++) {
+        const featureIndex = this.parseUShort();
+        const alternateFeatureOffset = this.parseOffset32();
+        const p = new Parser(this.data, substitutionStart + alternateFeatureOffset);
+        substitutions.push({
+            featureIndex,
+            feature: {
+                featureParams: p.parseOffset16(),
+                lookupListIndexes: p.parseUShortList()
+            }
+        });
+    }
+    return substitutions;
 };
 
 // VariationStore, ItemVariationStore, VariationRegionList, regionAxes, ItemVariationSubtables ...

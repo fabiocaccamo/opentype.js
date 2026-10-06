@@ -11,8 +11,7 @@ import arabicPresentationForms from './features/arab/arabicPresentationForms.mjs
 import arabicRequiredLigatures from './features/arab/arabicRequiredLigatures.mjs';
 import ccmpReplacementCheck from './features/ccmp/contextCheck/ccmpReplacement.mjs';
 import ccmpReplacement from './features/ccmp/ccmpReplacementLigatures.mjs';
-import latinWordCheck from './features/latn/contextCheck/latinWord.mjs';
-import latinLigature from './features/latn/latinLigatures.mjs';
+import latinFeatures from './features/latn/latinFeatures.mjs';
 import thaiWordCheck from './features/thai/contextCheck/thaiWord.mjs';
 import thaiGlyphComposition from './features/thai/thaiGlyphComposition.mjs';
 import thaiLigatures from './features/thai/thaiLigatures.mjs';
@@ -45,7 +44,6 @@ Bidi.prototype.setText = function (text) {
  */
 Bidi.prototype.contextChecks = ({
     ccmpReplacementCheck,
-    latinWordCheck,
     arabicWordCheck,
     arabicSentenceCheck,
     thaiWordCheck,
@@ -68,7 +66,6 @@ function registerContextChecker(checkId) {
  */
 function tokenizeText() {
     registerContextChecker.call(this, 'ccmpReplacement');
-    registerContextChecker.call(this, 'latinWord');
     registerContextChecker.call(this, 'arabicWord');
     registerContextChecker.call(this, 'arabicSentence');
     registerContextChecker.call(this, 'thaiWord');
@@ -190,16 +187,12 @@ function applyArabicRequireLigatures() {
 }
 
 /**
- * Apply required arabic ligatures
+ * Apply the enabled latin features
  */
-function applyLatinLigatures() {
-    if (!this.hasFeatureEnabled('latn', 'liga')) return;
+function applyLatinFeatures() {
+    if (!(this.featuresTags.latn || []).length) return;
     checkGlyphIndexStatus.call(this);
-    const ranges = this.tokenizer.getContextRanges('latinWord');
-    for(let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        latinLigature.call(this, range);
-    }
+    latinFeatures.call(this);
 }
 
 function applyUnicodeVariationSequences() {
@@ -246,9 +239,9 @@ Bidi.prototype.applyFeaturesToContexts = function () {
         applyArabicPresentationForms.call(this);
         applyArabicRequireLigatures.call(this);
     }
-    if (this.checkContextReady('latinWord')) {
-        applyLatinLigatures.call(this);
-    }
+    // the latin features apply to the runs of text that are not arabic or thai,
+    // with their spaces, digits and punctuation, not only to the latin words
+    applyLatinFeatures.call(this);
     if (this.checkContextReady('arabicSentence')) {
         reverseArabicSentences.call(this);
     }
@@ -303,7 +296,12 @@ Bidi.prototype.getTextGlyphs = function (text) {
         const token = this.tokenizer.tokens[i];
         if (token.state.deleted) continue;
         const index = token.activeState.value;
-        indexes.push(Array.isArray(index) ? index[0] : index);
+        // a multiple substitution replaces the glyph of a token with a sequence of glyphs
+        if (Array.isArray(index)) {
+            indexes.push(...index);
+        } else {
+            indexes.push(index);
+        }
     }
     return indexes;
 };
@@ -324,31 +322,37 @@ Bidi.prototype.getTextGlyphClusters = function (text) {
     for (let i = 0; i < tokens.length; i++) {
         const token = tokens[i];
         if (token.state.deleted) continue;
-        const index = token.activeState.value;
-        const cluster = {
-            index: Array.isArray(index) ? index[0] : index,
+        // a multiple substitution replaces the glyph of a token with a sequence of glyphs,
+        // all of them representing the characters of the token
+        const value = token.activeState.value;
+        const tokenGlyphClusters = (Array.isArray(value) ? value : [value]).map(index => ({
+            index,
             start: token.charOffset,
             end: token.charOffset + token.char.length
-        };
-        clusters.push(cluster);
-        tokenClusters.set(token, cluster);
+        }));
+        clusters.push(...tokenGlyphClusters);
+        tokenClusters.set(token, tokenGlyphClusters);
     }
     // extend the clusters with the characters of the deleted tokens, in text order
     const tokensInTextOrder = tokens.slice().sort((tokenA, tokenB) => tokenA.charOffset - tokenB.charOffset);
-    let previousCluster = null;
+    let previousClusters = null;
     let pendingTokens = [];
     for (let i = 0; i < tokensInTextOrder.length; i++) {
         const token = tokensInTextOrder[i];
-        const cluster = tokenClusters.get(token);
-        if (cluster) {
+        const tokenGlyphClusters = tokenClusters.get(token);
+        if (tokenGlyphClusters) {
             // deleted tokens before the first glyph belong to it
             for (let j = 0; j < pendingTokens.length; j++) {
-                cluster.start = Math.min(cluster.start, pendingTokens[j].charOffset);
+                for (const cluster of tokenGlyphClusters) {
+                    cluster.start = Math.min(cluster.start, pendingTokens[j].charOffset);
+                }
             }
             pendingTokens = [];
-            previousCluster = cluster;
-        } else if (previousCluster) {
-            previousCluster.end = Math.max(previousCluster.end, token.charOffset + token.char.length);
+            previousClusters = tokenGlyphClusters;
+        } else if (previousClusters) {
+            for (const cluster of previousClusters) {
+                cluster.end = Math.max(cluster.end, token.charOffset + token.char.length);
+            }
         } else {
             pendingTokens.push(token);
         }
