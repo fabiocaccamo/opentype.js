@@ -1,6 +1,8 @@
 import assert from 'assert';
 import { unhex, unhexArray } from '../testutil.mjs';
 import gsub from '../../src/tables/gsub.mjs';
+import { parse } from '../../src/opentype.mjs';
+import { readFileSync } from 'fs';
 
 // Helper that builds a minimal GSUB table to test a lookup subtable.
 function parseLookup(lookupType, subTableData) {
@@ -27,6 +29,44 @@ function makeLookup(lookupType, data) {
 }
 
 describe('tables/gsub.mjs', function() {
+    it('can resolve the UI names of stylistic set and character variant features', function() {
+        const data = unhex('00010000 000A 000C 004C' +      // header
+            '0000' +                                        // ScriptList - 0 scripts
+            '0003 73733031 0014 63763031 001E 6C696761 0038' + // FeatureList: ss01, cv01, liga
+            '0006 0001 0000   0000 0100' +                  // ss01, uiNameID 256
+            '0006 0001 0001   0000 0101 0102 0000 0002 0103 0002 000061 01D5BA' + // cv01, label 257, tooltip 258, parameters 259 and 260
+            '0006 0001 0002   DEAD' +                       // liga
+            '0000');                                        // LookupList - 0 lookups
+        const names = {
+            macintosh: { 256: { en: 'Straight l' } },
+            windows: {
+                256: { en: 'Straight l', de: 'Gerades l' },
+                257: { en: 'Alternate a' },
+                258: { en: 'Single-storey a' },
+                259: { en: 'Variant 1' },
+                260: { en: 'Variant 2' }
+            }
+        };
+        const features = gsub.parse(data, 0, names).features;
+        assert.deepEqual(features[0].feature.featureParamsTable.uiName, { en: 'Straight l' });
+        const characterVariant = features[1].feature.featureParamsTable;
+        assert.deepEqual(characterVariant.featUiLabelName, { en: 'Alternate a' });
+        assert.deepEqual(characterVariant.featUiTooltipText, { en: 'Single-storey a' });
+        assert.strictEqual(characterVariant.sampleText, undefined);
+        assert.deepEqual(characterVariant.paramUiLabels, [{ en: 'Variant 1' }, { en: 'Variant 2' }]);
+        assert.deepEqual(characterVariant.characters, [0x61, 0x1D5BA]);
+        assert.strictEqual(features[2].feature.featureParamsTable, undefined);
+    });
+
+    it('can load the UI names of stylistic sets of a font', function() {
+        const font = parse(readFileSync('./test/fonts/SourceSansPro-Regular.otf'));
+        const uiName = tag => font.tables.gsub.features.find(record => record.tag === tag).feature.featureParamsTable.uiName.en;
+        assert.equal(uiName('ss01'), 'Straight l');
+        assert.equal(uiName('ss02'), 'Alternate a');
+        const lowMemoryFont = parse(readFileSync('./test/fonts/SourceSansPro-Regular.otf'), { lowMemory: true });
+        assert.equal(lowMemoryFont.tables.gsub.features.find(record => record.tag === 'ss05').feature.featureParamsTable.uiName.en, 'Slashed zero');
+    });
+
     //// Header ///////////////////////////////////////////////////////////////
     it('can parse a GSUB header', function() {
         const data = unhex(
