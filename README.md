@@ -193,6 +193,7 @@ A Font represents a loaded OpenType font file. It contains a set of glyphs and m
 * `unitsPerEm`: X/Y coordinates in fonts are stored as integers. This value determines the size of the grid. Common values are `2048` and `4096`.
 * `ascender`: Distance from baseline of highest ascender. In font units, not pixels.
 * `descender`: Distance from baseline of lowest descender. In font units, not pixels.
+* `tableTags`: the tags of all the tables of the parsed font file, including the ones opentype.js does not parse (e.g. the color bitmap tables `sbix`, `CBDT` and `CBLC`).
 
 #### `Font.getPath(text, x, y, fontSize, options)`
 Create a Path that represents the given text.

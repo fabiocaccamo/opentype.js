@@ -176,6 +176,10 @@ function parseBuffer(buffer, opt={}) {
         throw new Error('Unsupported OpenType signature ' + signature);
     }
 
+    // the tags of all the tables of the font file, including the ones opentype.js does
+    // not parse (e.g. the color bitmap tables sbix, CBDT and CBLC)
+    font.tableTags = tableEntries.map(tableEntry => tableEntry.tag);
+
     let cffTableEntry;
     let cff2TableEntry;
     let fvarTableEntry;
