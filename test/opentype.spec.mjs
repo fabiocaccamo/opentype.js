@@ -221,3 +221,28 @@ describe('opentype.js on low memory mode', function() {
         }, /The unicode value "0" is reserved for the glyph name ".null" and cannot be used by any other glyph./);
     });
 });
+
+describe('opentype.mjs table tags', function() {
+    it('lists the tags of all the tables of the font file, the unparsed ones too', function() {
+        const font = loadSync('./test/fonts/OpenMojiCOLRv0-subset.otf');
+        assert.deepEqual(font.tableTags.slice().sort(),
+            ['CFF ', 'COLR', 'CPAL', 'GSUB', 'OS/2', 'cmap', 'head', 'hhea', 'hmtx', 'ltag', 'maxp', 'name', 'post']);
+    });
+
+    it('lists the tags of the tables of a WOFF font, including the color bitmap ones', function() {
+        // rename the FFTM table (not parsed) of the WOFF table directory to sbix
+        const data = new Uint8Array(readFileSync('./test/fonts/FiraSansMedium.woff'));
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        const numTables = view.getUint16(12);
+        for (let i = 0; i < numTables; i++) {
+            const offset = 44 + i * 20;
+            if (String.fromCharCode(...data.slice(offset, offset + 4)) === 'FFTM') {
+                data.set([0x73, 0x62, 0x69, 0x78], offset);
+            }
+        }
+        const font = parse(data.buffer);
+        assert.ok(font.tableTags.includes('sbix'));
+        assert.ok(!font.tableTags.includes('FFTM'));
+        assert.ok(font.tableTags.includes('GPOS'));
+    });
+});
