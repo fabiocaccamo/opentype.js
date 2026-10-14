@@ -60,7 +60,9 @@ function assertSameFont(woff2Font, sourceFont) {
     assert.equal(woff2Font.descender, sourceFont.descender);
     assert.deepStrictEqual(woff2Font.names, sourceFont.names);
     if (sourceFont.tableTags) { // font.tableTags is not in every version of opentype.js
-        assert.deepStrictEqual([...woff2Font.tableTags].sort(), [...sourceFont.tableTags].sort());
+        // the encoders drop the DSIG table, which a WOFF2 transform would invalidate
+        const getTags = font => font.tableTags.filter(tag => tag !== 'DSIG').sort();
+        assert.deepStrictEqual(getTags(woff2Font), getTags(sourceFont));
     }
     assert.deepStrictEqual(getTablesFingerprint(woff2Font), getTablesFingerprint(sourceFont));
     for (let glyphIndex = 0; glyphIndex < sourceFont.numGlyphs; glyphIndex += 1) {
