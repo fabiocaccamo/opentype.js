@@ -4,6 +4,7 @@
 // opentype.js may be freely distributed under the MIT license.
 
 import { tinf_uncompress as inflate } from './tiny-inflate@1.0.3.esm.mjs'; // from code4fukui/tiny-inflate-es
+import { parseWOFF2TableEntries } from './woff2.mjs';
 import Font from './font.mjs';
 import Glyph from './glyph.mjs';
 import { CmapEncoding, GlyphNames, addGlyphNames } from './encoding.mjs';
@@ -107,7 +108,10 @@ function parseWOFFTableEntries(data, numTables) {
  * @return {TableData}
  */
 function uncompressTable(data, tableEntry) {
-    if (tableEntry.compression === 'WOFF') {
+    if (tableEntry.compression === 'WOFF2') {
+        // decompressed (and reconstructed) by parseWOFF2TableEntries
+        return {data: tableEntry.data, offset: 0};
+    } else if (tableEntry.compression === 'WOFF') {
         const inBuffer = new Uint8Array(data.buffer, tableEntry.offset + 2, tableEntry.compressedLength - 2);
         const outBuffer = new Uint8Array(tableEntry.length);
         inflate(inBuffer, outBuffer);
@@ -170,8 +174,17 @@ function parseBuffer(buffer, opt={}) {
         numTables = parse.getUShort(data, 12);
         tableEntries = parseWOFFTableEntries(data, numTables);
     } else if (signature === 'wOF2') {
-        const issue = 'https://github.com/opentypejs/opentype.js/issues/183#issuecomment-1147228025';
-        throw new Error('WOFF2 require an external decompressor library, see examples at: ' + issue);
+        const flavor = parse.getTag(data, 4);
+        if (flavor === String.fromCharCode(0, 1, 0, 0) || flavor === 'true') {
+            font.outlinesFormat = 'truetype';
+        } else if (flavor === 'OTTO') {
+            font.outlinesFormat = 'cff';
+        } else {
+            throw new Error('Unsupported OpenType flavor ' + flavor);
+        }
+
+        tableEntries = parseWOFF2TableEntries(data);
+        numTables = tableEntries.length;
     } else {
         throw new Error('Unsupported OpenType signature ' + signature);
     }

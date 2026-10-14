@@ -1,6 +1,10 @@
 import js from "@eslint/js";
 
 export default [
+  // vendored third-party code, kept as published
+  {
+    ignores: ["src/brotli-decode@*.mjs"]
+  },
   js.configs.recommended,
   {
     languageOptions: {
