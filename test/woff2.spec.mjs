@@ -211,6 +211,11 @@ function getParsedGlyph(font, glyphIndex) {
     return glyph;
 }
 
+// the table of an entry of parseWOFF2TableEntries, as an array of bytes
+function getEntryBytes(entry) {
+    return Array.from(new Uint8Array(entry.data.buffer, entry.data.byteOffset, entry.data.byteLength));
+}
+
 function getPoints(font, glyphIndex) {
     return getParsedGlyph(font, glyphIndex).points.map(point => [point.x, point.y, point.onCurve]);
 }
@@ -393,7 +398,7 @@ describe('woff2.mjs', function() {
                 expected.push(...int16(xMins[glyphIndex]));
             }
             const hmtxEntry = parseWOFF2TableEntries(new DataView(file.buffer)).find(entry => entry.tag === 'hmtx');
-            assert.deepStrictEqual(Array.from(new Uint8Array(hmtxEntry.data.buffer)), expected);
+            assert.deepStrictEqual(getEntryBytes(hmtxEntry), expected);
             // and through the parser, for the glyphs with their own metrics
             const font = parse(file.buffer);
             for (let glyphIndex = 0; glyphIndex < numberOfHMetrics; glyphIndex += 1) {
@@ -402,35 +407,42 @@ describe('woff2.mjs', function() {
             }
         });
 
-        it('reads the left side bearings stored in the transformed hmtx table', function() {
-            const sourceTables = readSfntTables(CRAFT_SOURCE);
-            const numberOfHMetrics = new DataView(sourceTables.hhea.buffer).getUint16(34);
-            const glyf = buildTransformedGlyf({
-                numGlyphs: 5,
-                nContour: [...int16(0), ...int16(1), ...int16(1), ...int16(1), ...int16(1)],
-                nPoints: [1, 1, 1, 1],
-                flags: [11, 12, 11, 12],
-                glyph: [30, 0, 40, 0, 50, 0, 60, 0],
-                bboxBitmap: [0, 0, 0, 0],
-            });
-            // flags 0: both arrays of left side bearings stored
-            const hmtx = new Uint8Array([
-                0,
-                ...Array.from({length: numberOfHMetrics}, (_, index) => uint16(1000 + index)).flat(),
-                ...Array.from({length: numberOfHMetrics}, (_, index) => int16(-7 - index)).flat(),
-                ...Array.from({length: 5 - numberOfHMetrics}, (_, index) => int16(70 + index)).flat(),
-            ]);
-            const expected = [];
-            for (let glyphIndex = 0; glyphIndex < 5; glyphIndex += 1) {
-                if (glyphIndex < numberOfHMetrics) {
-                    expected.push(...uint16(1000 + glyphIndex), ...int16(-7 - glyphIndex));
-                } else {
-                    expected.push(...int16(70 + glyphIndex - numberOfHMetrics));
+        // flags 1: the proportional left side bearings are the xMins, the monospace ones are stored;
+        // flags 2: the other way round (with flags 0 the reference decoder rejects the table)
+        for (const flags of [1, 2]) {
+            it('reads the left side bearings stored in the transformed hmtx table (flags ' + flags + ')', function() {
+                const sourceTables = readSfntTables(CRAFT_SOURCE);
+                const numberOfHMetrics = new DataView(sourceTables.hhea.buffer).getUint16(34);
+                const glyf = buildTransformedGlyf({
+                    numGlyphs: 5,
+                    nContour: [...int16(0), ...int16(1), ...int16(1), ...int16(1), ...int16(1)],
+                    nPoints: [1, 1, 1, 1],
+                    flags: [11, 12, 11, 12],
+                    glyph: [30, 0, 40, 0, 50, 0, 60, 0],
+                    bboxBitmap: [0, 0, 0, 0],
+                });
+                const xMins = [0, 30, -296, 50, -316];
+                const storedLeftSideBearing = glyphIndex => -7 - glyphIndex;
+                const proportionalStored = flags === 2;
+                const hmtx = [flags];
+                const expected = [];
+                for (let glyphIndex = 0; glyphIndex < numberOfHMetrics; glyphIndex += 1) {
+                    hmtx.push(...uint16(1000 + glyphIndex));
                 }
-            }
-            const hmtxEntry = parseWOFF2TableEntries(new DataView(buildCraftedFont(glyf, {hmtx}).buffer)).find(entry => entry.tag === 'hmtx');
-            assert.deepStrictEqual(Array.from(new Uint8Array(hmtxEntry.data.buffer)), expected);
-        });
+                for (let glyphIndex = 0; glyphIndex < 5; glyphIndex += 1) {
+                    const stored = glyphIndex < numberOfHMetrics ? proportionalStored : !proportionalStored;
+                    if (stored) {
+                        hmtx.push(...int16(storedLeftSideBearing(glyphIndex)));
+                    }
+                    if (glyphIndex < numberOfHMetrics) {
+                        expected.push(...uint16(1000 + glyphIndex));
+                    }
+                    expected.push(...int16(stored ? storedLeftSideBearing(glyphIndex) : xMins[glyphIndex]));
+                }
+                const hmtxEntry = parseWOFF2TableEntries(new DataView(buildCraftedFont(glyf, {hmtx: new Uint8Array(hmtx)}).buffer)).find(entry => entry.tag === 'hmtx');
+                assert.deepStrictEqual(getEntryBytes(hmtxEntry), expected);
+            });
+        }
     });
 
     describe('reads the table directory', function() {
@@ -471,6 +483,12 @@ describe('woff2.mjs', function() {
             const tables = sourceTables();
             const compressed = brotliCompressSync(concatBytes(tables.map(table => table.data)).subarray(0, 100));
             assert.throws(() => parse(buildWOFF2(tables, {compressed}).buffer), /WOFF2: unexpected end of the decompressed tables/);
+        });
+
+        it('a decompressed stream longer than the tables', function() {
+            const tables = sourceTables();
+            const compressed = brotliCompressSync(concatBytes([...tables.map(table => table.data), new Uint8Array(4)]));
+            assert.throws(() => parse(buildWOFF2(tables, {compressed}).buffer), /WOFF2: decompressed tables longer than the table directory/);
         });
 
         it('invalid UIntBase128 values', function() {

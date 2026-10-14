@@ -1,12 +1,12 @@
 // Generates the WOFF2 fixtures of test/woff2.spec.mjs with the reference
 // encoder of Google (woff2_compress, through its WebAssembly build wawoff2):
-// <name>.google.woff2 in test/fonts/woff2/ for each source font of
-// generate-woff2-fonts.py (the fontTools fixtures).
+// <name>.google.woff2 in test/fonts/woff2/ for each source font of the
+// fontTools fixtures (run generate-woff2-fonts.py first).
 //
 // Usage: node test/generate-woff2-fonts-google.mjs <path of the wawoff2 package>
 // (wawoff2 is not a dependency: install it anywhere, e.g. npm install --prefix /tmp/wawoff2 wawoff2)
 
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, readdirSync, writeFileSync } from 'fs';
 import { createRequire } from 'module';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -21,8 +21,11 @@ async function main() {
     const compress = require(path.resolve(wawoff2Path, 'compress.js'));
 
     const fontsDir = path.join(path.dirname(new URL(import.meta.url).pathname), 'fonts');
-    const generator = readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), 'generate-woff2-fonts.py'), 'utf8');
-    const sources = [...generator.matchAll(/^ {4}"([^"]+\.(?:ttf|otf))",/gm)].map(match => match[1]);
+    // the sources of the fontTools fixtures: <name>.glyf.woff2 (TrueType) or <name>.fonttools.woff2 (CFF)
+    const names = readdirSync(path.join(fontsDir, 'woff2'))
+        .filter(file => /\.(glyf|fonttools)\.woff2$/.test(file))
+        .map(file => file.replace(/\.(glyf|fonttools)\.woff2$/, ''));
+    const sources = readdirSync(fontsDir).filter(file => names.includes(file.replace(/\.(ttf|otf)$/, '')));
 
     for (const source of sources) {
         const name = source.replace(/\.(ttf|otf)$/, '');

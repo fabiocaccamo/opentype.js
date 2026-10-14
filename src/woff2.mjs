@@ -7,6 +7,7 @@
 // that the tables are then parsed exactly as the ones of a TTF/OTF file.
 
 import { BrotliDecode } from './brotli-decode@3499acb.mjs'; // from google/brotli
+import parse from './parse.mjs';
 
 // the tags of the table directory, by index (§ 5.1, "Known Table Tags")
 const KNOWN_TAGS = [
@@ -111,6 +112,13 @@ class Reader {
         return value;
     }
 
+    tag() {
+        this.require(4);
+        const value = parse.getTag(this.view, this.offset);
+        this.offset += 4;
+        return value;
+    }
+
     // UIntBase128 (§ 4.1): up to 5 bytes, 7 bits each, most significant first
     base128() {
         let value = 0;
@@ -153,10 +161,6 @@ class Reader {
     }
 }
 
-function tagFromUint32(value) {
-    return String.fromCharCode((value >>> 24) & 0xFF, (value >>> 16) & 0xFF, (value >>> 8) & 0xFF, value & 0xFF);
-}
-
 function isGlyfOrLoca(tag) {
     return tag === 'glyf' || tag === 'loca';
 }
@@ -173,7 +177,7 @@ function readTableDirectory(reader, numTables) {
     for (let i = 0; i < numTables; i += 1) {
         const flags = reader.uint8();
         const tagIndex = flags & 0x3F;
-        const tag = tagIndex === ARBITRARY_TAG_INDEX ? tagFromUint32(reader.uint32()) : KNOWN_TAGS[tagIndex];
+        const tag = tagIndex === ARBITRARY_TAG_INDEX ? reader.tag() : KNOWN_TAGS[tagIndex];
         const transformVersion = flags >> 6;
         const origLength = reader.base128();
         const transformed = isGlyfOrLoca(tag) ? transformVersion !== GLYF_NULL_TRANSFORM : transformVersion !== 0;
@@ -182,7 +186,7 @@ function readTableDirectory(reader, numTables) {
             fail('duplicate table ' + tag);
         }
         tags.add(tag);
-        tables.push({ tag, transformVersion, transformed, origLength, transformLength, bytes: null });
+        tables.push({ tag, transformVersion, transformed, transformLength, bytes: null });
     }
     return tables;
 }
@@ -226,7 +230,8 @@ function validateTransforms(tablesByTag) {
 }
 
 /**
- * Growable byte buffer used to write the reconstructed glyf table.
+ * Growable byte buffer used to write the reconstructed glyf table. The writes
+ * do not check the capacity: reserve the room of a whole glyph first.
  */
 class Writer {
     constructor(capacity) {
@@ -247,31 +252,27 @@ class Writer {
     }
 
     uint8(value) {
-        this.reserve(1);
         this.bytes[this.length++] = value;
     }
 
     uint16(value) {
-        this.reserve(2);
         this.bytes[this.length++] = (value >> 8) & 0xFF;
         this.bytes[this.length++] = value & 0xFF;
     }
 
     array(values) {
-        this.reserve(values.length);
         this.bytes.set(values, this.length);
         this.length += values.length;
     }
 
-    // pads with zeros to a multiple of 4 bytes, like the reference decoder
+    // pads to a multiple of 4 bytes, like the reference decoder (3 bytes at
+    // most, already zero: the buffer is never written past the length)
     pad4() {
-        while (this.length % 4 !== 0) {
-            this.uint8(0);
-        }
+        this.length = (this.length + 3) & ~3;
     }
 
     result() {
-        return this.bytes.slice(0, this.length);
+        return this.bytes.subarray(0, this.length);
     }
 }
 
@@ -280,98 +281,111 @@ function withSign(flag, value) {
     return (flag & 1) ? value : -value;
 }
 
+// the number of bytes of each triplet flag (§ 5.2, "Triplet Encoding")
+function getTripletLength(flag) {
+    return flag < 84 ? 1 : flag < 120 ? 2 : flag < 124 ? 3 : 4;
+}
+
 /**
  * Decodes the point coordinates of a simple glyph (§ 5.2, "Triplet Encoding").
  * @param {Uint8Array} flags - one flag per point
  * @param {Reader} glyphStream
- * @param {Int32Array} xs - output, absolute coordinates
- * @param {Int32Array} ys - output, absolute coordinates
- * @param {Uint8Array} onCurve - output, 1 for on-curve points
+ * @param {Object} points - output: absolute coordinates (xs, ys), on-curve flags (onCurve), bounding box
  */
-function decodeTriplets(flags, glyphStream, xs, ys, onCurve) {
+function decodeTriplets(flags, glyphStream, points) {
+    const { xs, ys, onCurve } = points;
+    const data = glyphStream.bytes;
+    let offset = glyphStream.offset;
     let x = 0;
     let y = 0;
+    let xMin = 0x7FFFFFFF;
+    let yMin = 0x7FFFFFFF;
+    let xMax = -0x7FFFFFFF;
+    let yMax = -0x7FFFFFFF;
     for (let i = 0; i < flags.length; i += 1) {
         const flag = flags[i] & 0x7F;
-        onCurve[i] = (flags[i] >> 7) === 0 ? 1 : 0;
+        onCurve[i] = flags[i] < 0x80 ? 1 : 0;
+        const tripletLength = getTripletLength(flag);
+        if (offset + tripletLength > data.length) {
+            glyphStream.offset = offset;
+            glyphStream.require(tripletLength);
+        }
         let dx;
         let dy;
         if (flag < 10) {
             dx = 0;
-            dy = withSign(flag, ((flag & 14) << 7) + glyphStream.uint8());
+            dy = withSign(flag, ((flag & 14) << 7) + data[offset]);
         } else if (flag < 20) {
-            dx = withSign(flag, (((flag - 10) & 14) << 7) + glyphStream.uint8());
+            dx = withSign(flag, (((flag - 10) & 14) << 7) + data[offset]);
             dy = 0;
         } else if (flag < 84) {
             const base = flag - 20;
-            const byte = glyphStream.uint8();
+            const byte = data[offset];
             dx = withSign(flag, 1 + (base & 0x30) + (byte >> 4));
             dy = withSign(flag >> 1, 1 + ((base & 0x0C) << 2) + (byte & 0x0F));
         } else if (flag < 120) {
             const base = flag - 84;
-            dx = withSign(flag, 1 + (Math.floor(base / 12) << 8) + glyphStream.uint8());
-            dy = withSign(flag >> 1, 1 + (((base % 12) >> 2) << 8) + glyphStream.uint8());
+            dx = withSign(flag, 1 + (Math.floor(base / 12) << 8) + data[offset]);
+            dy = withSign(flag >> 1, 1 + (((base % 12) >> 2) << 8) + data[offset + 1]);
         } else if (flag < 124) {
-            const byte0 = glyphStream.uint8();
-            const byte1 = glyphStream.uint8();
-            const byte2 = glyphStream.uint8();
-            dx = withSign(flag, (byte0 << 4) + (byte1 >> 4));
-            dy = withSign(flag >> 1, ((byte1 & 0x0F) << 8) + byte2);
+            const byte1 = data[offset + 1];
+            dx = withSign(flag, (data[offset] << 4) + (byte1 >> 4));
+            dy = withSign(flag >> 1, ((byte1 & 0x0F) << 8) + data[offset + 2]);
         } else {
-            const byte0 = glyphStream.uint8();
-            const byte1 = glyphStream.uint8();
-            const byte2 = glyphStream.uint8();
-            const byte3 = glyphStream.uint8();
-            dx = withSign(flag, (byte0 << 8) + byte1);
-            dy = withSign(flag >> 1, (byte2 << 8) + byte3);
+            dx = withSign(flag, (data[offset] << 8) + data[offset + 1]);
+            dy = withSign(flag >> 1, (data[offset + 2] << 8) + data[offset + 3]);
         }
+        offset += tripletLength;
         x += dx;
         y += dy;
         xs[i] = x;
         ys[i] = y;
+        xMin = Math.min(xMin, x);
+        yMin = Math.min(yMin, y);
+        xMax = Math.max(xMax, x);
+        yMax = Math.max(yMax, y);
     }
+    glyphStream.offset = offset;
+    points.bbox = flags.length ? [xMin, yMin, xMax, yMax] : [0, 0, 0, 0];
+}
+
+// the bytes of a coordinate delta: 0 (same), 1 (short) or 2
+function getDeltaLength(delta) {
+    return delta === 0 ? 0 : (delta > -256 && delta < 256) ? 1 : 2;
 }
 
 /**
- * Writes the coordinates of a simple glyph in the glyf format: flags (with
- * the repeat flag), then the x and the y deltas, each as short or long.
+ * Writes the points of a simple glyph in the glyf format: flags (with the
+ * repeat flag), then the x and the y deltas, each as short or long.
+ * The writer must have the room for 5 bytes per point.
  */
-function writeSimpleGlyphPoints(writer, xs, ys, onCurve, overlap) {
-    const pointCount = xs.length;
-    const flags = new Uint8Array(pointCount);
-    let xLength = 0;
-    let yLength = 0;
-    let previousX = 0;
-    let previousY = 0;
+function writeSimpleGlyphPoints(writer, pointCount, points, overlap) {
+    const { xs, ys, onCurve, flags } = points;
     for (let i = 0; i < pointCount; i += 1) {
-        const dx = xs[i] - previousX;
-        const dy = ys[i] - previousY;
+        const dx = xs[i] - (i ? xs[i - 1] : 0);
+        const dy = ys[i] - (i ? ys[i - 1] : 0);
         let flag = onCurve[i] ? ON_CURVE_POINT : 0;
         if (i === 0 && overlap) {
             flag |= OVERLAP_SIMPLE;
         }
-        if (dx === 0) {
+        const dxLength = getDeltaLength(dx);
+        if (dxLength === 0 || (dxLength === 1 && dx > 0)) {
             flag |= X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR;
-        } else if (dx > -256 && dx < 256) {
-            flag |= X_SHORT_VECTOR | (dx > 0 ? X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR : 0);
-            xLength += 1;
-        } else {
-            xLength += 2;
         }
-        if (dy === 0) {
+        if (dxLength === 1) {
+            flag |= X_SHORT_VECTOR;
+        }
+        const dyLength = getDeltaLength(dy);
+        if (dyLength === 0 || (dyLength === 1 && dy > 0)) {
             flag |= Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR;
-        } else if (dy > -256 && dy < 256) {
-            flag |= Y_SHORT_VECTOR | (dy > 0 ? Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR : 0);
-            yLength += 1;
-        } else {
-            yLength += 2;
+        }
+        if (dyLength === 1) {
+            flag |= Y_SHORT_VECTOR;
         }
         flags[i] = flag;
-        previousX = xs[i];
-        previousY = ys[i];
     }
 
-    // flags, a run of equal flags written once with the repeat flag (0x08)
+    // a run of equal flags is written once, with the repeat flag (0x08)
     for (let i = 0; i < pointCount;) {
         let repeat = 0;
         while (i + repeat + 1 < pointCount && flags[i + repeat + 1] === flags[i] && repeat < 255) {
@@ -386,20 +400,45 @@ function writeSimpleGlyphPoints(writer, xs, ys, onCurve, overlap) {
         i += repeat + 1;
     }
 
-    writer.reserve(xLength + yLength);
-    for (const [coordinates, shortFlag] of [[xs, X_SHORT_VECTOR], [ys, Y_SHORT_VECTOR]]) {
-        let previous = 0;
-        for (let i = 0; i < pointCount; i += 1) {
-            const delta = coordinates[i] - previous;
-            previous = coordinates[i];
-            if (delta === 0) {
-                continue;
-            }
-            if (flags[i] & shortFlag) {
-                writer.uint8(Math.abs(delta));
-            } else {
-                writer.uint16(delta & 0xFFFF);
-            }
+    writeDeltas(writer, pointCount, xs, flags, X_SHORT_VECTOR, X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR);
+    writeDeltas(writer, pointCount, ys, flags, Y_SHORT_VECTOR, Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR);
+}
+
+function writeDeltas(writer, pointCount, coordinates, flags, shortFlag, sameFlag) {
+    for (let i = 0; i < pointCount; i += 1) {
+        const delta = coordinates[i] - (i ? coordinates[i - 1] : 0);
+        if (flags[i] & shortFlag) {
+            writer.uint8(delta < 0 ? -delta : delta);
+        } else if (!(flags[i] & sameFlag)) {
+            writer.uint16(delta & 0xFFFF);
+        }
+    }
+}
+
+/**
+ * Buffers reused by the simple glyphs of a font, grown on demand (their
+ * content is not kept when they grow).
+ */
+class PointBuffers {
+    constructor() {
+        this.pointCapacity = 0;
+        this.contourCapacity = 0;
+    }
+
+    ensureContours(contourCount) {
+        if (contourCount > this.contourCapacity) {
+            this.contourCapacity = Math.max(contourCount, this.contourCapacity * 2, 64);
+            this.endPoints = new Uint16Array(this.contourCapacity);
+        }
+    }
+
+    ensurePoints(pointCount) {
+        if (pointCount > this.pointCapacity) {
+            this.pointCapacity = Math.max(pointCount, this.pointCapacity * 2, 256);
+            this.xs = new Int32Array(this.pointCapacity);
+            this.ys = new Int32Array(this.pointCapacity);
+            this.onCurve = new Uint8Array(this.pointCapacity);
+            this.flags = new Uint8Array(this.pointCapacity);
         }
     }
 }
@@ -450,10 +489,17 @@ function reconstructGlyfAndLoca(bytes) {
 
     const isBitSet = (bitmap, index) => (bitmap[index >> 3] & (0x80 >> (index & 7))) !== 0;
     const readBbox = () => [bboxStream.int16(), bboxStream.int16(), bboxStream.int16(), bboxStream.int16()];
+    const writeGlyphHeader = (numberOfContours, bbox) => {
+        writer.uint16(numberOfContours & 0xFFFF);
+        for (let i = 0; i < 4; i += 1) {
+            writer.uint16(bbox[i] & 0xFFFF);
+        }
+    };
 
     const writer = new Writer(bytes.length * 2);
     const offsets = new Uint32Array(numGlyphs + 1);
     const xMins = new Int16Array(numGlyphs);
+    const points = new PointBuffers();
 
     for (let glyphIndex = 0; glyphIndex < numGlyphs; glyphIndex += 1) {
         offsets[glyphIndex] = writer.length;
@@ -491,17 +537,15 @@ function reconstructGlyfAndLoca(bytes) {
             } while (flags & MORE_COMPONENTS);
             const components = compositeStream.bytes.subarray(compositeStart, compositeStream.offset);
             const bbox = readBbox();
+            const instructions = haveInstructions ? instructionStream.subarray(glyphStream.uint255()) : null;
             xMins[glyphIndex] = bbox[0];
 
-            writer.uint16(0xFFFF); // numberOfContours -1
-            for (const value of bbox) {
-                writer.uint16(value & 0xFFFF);
-            }
+            writer.reserve(10 + components.length + (instructions ? 2 + instructions.length : 0) + 3);
+            writeGlyphHeader(numberOfContours, bbox);
             writer.array(components);
-            if (haveInstructions) {
-                const instructionLength = glyphStream.uint255();
-                writer.uint16(instructionLength);
-                writer.array(instructionStream.subarray(instructionLength));
+            if (instructions) {
+                writer.uint16(instructions.length);
+                writer.array(instructions);
             }
             writer.pad4();
             continue;
@@ -512,50 +556,31 @@ function reconstructGlyfAndLoca(bytes) {
         }
 
         // simple glyph
-        const endPoints = new Uint16Array(numberOfContours);
+        points.ensureContours(numberOfContours);
         let pointCount = 0;
         for (let contour = 0; contour < numberOfContours; contour += 1) {
             pointCount += nPointsStream.uint255();
             if (pointCount > 0xFFFF) {
                 fail('too many points in glyph ' + glyphIndex);
             }
-            endPoints[contour] = pointCount - 1;
+            points.endPoints[contour] = pointCount - 1;
         }
-        const pointFlags = flagStream.subarray(pointCount);
-        const xs = new Int32Array(pointCount);
-        const ys = new Int32Array(pointCount);
-        const onCurve = new Uint8Array(pointCount);
-        decodeTriplets(pointFlags, glyphStream, xs, ys, onCurve);
-        const instructionLength = glyphStream.uint255();
-        const instructions = instructionStream.subarray(instructionLength);
-
-        let bbox;
-        if (hasBbox) {
-            bbox = readBbox();
-        } else if (pointCount > 0) {
-            bbox = [xs[0], ys[0], xs[0], ys[0]];
-            for (let i = 1; i < pointCount; i += 1) {
-                bbox[0] = Math.min(bbox[0], xs[i]);
-                bbox[1] = Math.min(bbox[1], ys[i]);
-                bbox[2] = Math.max(bbox[2], xs[i]);
-                bbox[3] = Math.max(bbox[3], ys[i]);
-            }
-        } else {
-            bbox = [0, 0, 0, 0];
-        }
+        points.ensurePoints(pointCount);
+        decodeTriplets(flagStream.subarray(pointCount), glyphStream, points);
+        const instructions = instructionStream.subarray(glyphStream.uint255());
+        const bbox = hasBbox ? readBbox() : points.bbox;
         xMins[glyphIndex] = bbox[0];
 
-        writer.uint16(numberOfContours);
-        for (const value of bbox) {
-            writer.uint16(value & 0xFFFF);
-        }
+        // header, end points, instructions, then 5 bytes per point at most
+        writer.reserve(10 + numberOfContours * 2 + 2 + instructions.length + pointCount * 5 + 3);
+        writeGlyphHeader(numberOfContours, bbox);
         for (let contour = 0; contour < numberOfContours; contour += 1) {
-            writer.uint16(endPoints[contour]);
+            writer.uint16(points.endPoints[contour]);
         }
-        writer.uint16(instructionLength);
+        writer.uint16(instructions.length);
         writer.array(instructions);
         const overlap = overlapBitmap !== null && isBitSet(overlapBitmap, glyphIndex);
-        writeSimpleGlyphPoints(writer, xs, ys, onCurve, overlap);
+        writeSimpleGlyphPoints(writer, pointCount, points, overlap);
         writer.pad4();
     }
     offsets[numGlyphs] = writer.length;
@@ -626,21 +651,15 @@ function readUint16At(table, offset, name) {
  * Parses the table entries of a WOFF2 file, decompressing all the tables and
  * reconstructing the transformed ones. Each entry carries its table in `data`
  * (a DataView of the table alone), see uncompressTable.
- * Font collections (flavor 'ttcf') are not supported.
+ * The caller checks the signature and the flavor (font collections, 'ttcf',
+ * are not supported).
  * @param {DataView} data - the whole WOFF2 file
  * @return {Object[]}
  */
 function parseWOFF2TableEntries(data) {
     const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     const header = new Reader(bytes, 'WOFF2 header');
-    if (header.uint32() !== 0x774F4632) { // 'wOF2'
-        fail('invalid signature');
-    }
-    const flavor = header.uint32();
-    if (flavor === 0x74746366) { // 'ttcf'
-        fail('font collections are not supported');
-    }
-    header.skip(4); // length
+    header.skip(12); // signature, flavor and length
     const numTables = header.uint16();
     if (numTables === 0) {
         fail('no tables');
@@ -663,6 +682,9 @@ function parseWOFF2TableEntries(data) {
     for (const table of tables) {
         table.bytes = stream.subarray(table.transformLength);
     }
+    if (stream.offset !== stream.bytes.length) {
+        fail('decompressed tables longer than the table directory');
+    }
 
     const tablesByTag = new Map(tables.map(table => [table.tag, table]));
     validateTransforms(tablesByTag);
@@ -677,8 +699,7 @@ function parseWOFF2TableEntries(data) {
         // the loca format of the transform header wins over the head table
         const head = tablesByTag.get('head');
         if (readUint16At(head, HEAD_INDEX_TO_LOC_FORMAT_OFFSET, 'head') !== reconstructed.indexFormat) {
-            head.bytes = head.bytes.slice();
-            new DataView(head.bytes.buffer).setUint16(HEAD_INDEX_TO_LOC_FORMAT_OFFSET, reconstructed.indexFormat);
+            new DataView(head.bytes.buffer, head.bytes.byteOffset).setUint16(HEAD_INDEX_TO_LOC_FORMAT_OFFSET, reconstructed.indexFormat);
         }
 
         const hmtx = tablesByTag.get('hmtx');
@@ -689,17 +710,14 @@ function parseWOFF2TableEntries(data) {
         }
     }
 
-    return tables.map(table => {
-        // each table in a buffer of its own, starting at 0 like the WOFF tables
-        const tableBytes = table.bytes.byteOffset === 0 && table.bytes.byteLength === table.bytes.buffer.byteLength ? table.bytes : table.bytes.slice();
-        return {
-            tag: table.tag,
-            offset: 0,
-            length: tableBytes.length,
-            compression: 'WOFF2',
-            data: new DataView(tableBytes.buffer),
-        };
-    });
+    // views on the decompressed buffer, not copies
+    return tables.map(table => ({
+        tag: table.tag,
+        offset: 0,
+        length: table.bytes.length,
+        compression: 'WOFF2',
+        data: new DataView(table.bytes.buffer, table.bytes.byteOffset, table.bytes.byteLength),
+    }));
 }
 
 export { parseWOFF2TableEntries };
