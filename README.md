@@ -393,6 +393,9 @@ Sets the variation coordinates to be used by default for rendering in the font's
 Gets the current variation settings from the font's default render options.
 * Returns: Object with the current variation settings.
 
+###### `Font.variation.getMetricAdjustment(tag, coords)`
+Just a shortcut for [`Font.variation.process.getMetricAdjustment()`](#fontvariationprocessgetmetricadjustmenttag-coords).
+
 
 ##### The `Font.variation.process` object (`VariationProcessor`)
 The `VariationProcessor` is a component of the `VariationManager`, used mainly internally for computing and applying variations to the glyphs in a variable font. It handles transformations and adjustments based on the font's variable axes and instances.
@@ -438,6 +441,12 @@ Retrieves a transformed copy of a glyph based on the provided variation coordina
 Calculates the variable adjustment for a given adjustment parameter.
 * `adjustment`: Adjustment parameter.
 * Returns: Adjusted value based on current variation settings.
+
+###### `Font.variation.process.getMetricAdjustment(tag, coords)`
+Calculates the variation adjustment of a font-wide metric from the MVAR table, by its value tag (e.g. `'hcrs'` and `'hcrn'`, the caret slope rise and run of the hhea table, or `'xhgt'`, the x-height of the OS/2 table): the value to add to the one of the metric in its table, not rounded.
+* `tag`: Value tag of the metric.
+* `coords`: Variation coords object (or the variation coords in the font's `defaultRenderOptions` by default)
+* Returns: The adjustment, or `0` when the font does not vary the metric.
 
 ###### `Font.variation.process.getDelta(deltas)`
 Selects the appropriate delta values from a collection of deltas based on the current variation settings.
