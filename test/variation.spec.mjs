@@ -12,6 +12,8 @@ describe('variation.mjs', function() {
         zycon: loadSync('./test/fonts/Zycon.ttf'),
         cvar1: loadSync('./test/fonts/TestCVARGVAROne.ttf'),
         cvar2: loadSync('./test/fonts/TestCVARGVARTwo.ttf'),
+        mvar: loadSync('./test/fonts/TestGVAR-Composite-0.ttf'),
+        mvarWithoutCaret: loadSync('./test/fonts/TestItalicSwitch.ttf'),
     };
 
     it('pads axis tags with spaces for lookup', function() {
@@ -130,6 +132,37 @@ describe('variation.mjs', function() {
         });
     });
     
+    describe('mvar', function() {
+        it('parses the value records', function() {
+            assert.deepStrictEqual(Object.keys(fonts.mvar.tables.mvar.valueRecords).sort(), ['hcrn', 'hcrs', 'sbxo', 'spxo']);
+        });
+
+        // the values of fontTools (varLib.instancer) at each slnt, minus the ones of hhea and OS/2
+        it('calculates the adjustment of a metric at a variation', function() {
+            const font = fonts.mvar;
+            assert.equal(Math.round(font.variation.getMetricAdjustment('hcrs', { slnt: -15 })), 999);
+            assert.equal(Math.round(font.variation.getMetricAdjustment('hcrn', { slnt: -15 })), 268);
+            assert.equal(Math.round(font.variation.getMetricAdjustment('spxo', { slnt: -15 })), 70);
+            assert.equal(Math.round(font.variation.getMetricAdjustment('hcrn', { slnt: -7.5 })), 134);
+            assert.equal(font.variation.getMetricAdjustment('hcrn', { slnt: 0 }), 0);
+        });
+
+        it('uses the current variation without coordinates', function() {
+            const font = loadSync('./test/fonts/TestGVAR-Composite-0.ttf');
+            font.variation.set({ slnt: -15 });
+            assert.equal(Math.round(font.variation.getMetricAdjustment('hcrn')), 268);
+        });
+
+        it('returns 0 for a metric the font does not vary', function() {
+            assert.equal(fonts.mvar.variation.getMetricAdjustment('xhgt', { slnt: -15 }), 0);
+            assert.equal(fonts.mvarWithoutCaret.variation.getMetricAdjustment('hcrn', { ital: 1 }), 0);
+        });
+
+        it('returns 0 without an mvar table', function() {
+            assert.equal(fonts.hvar.variation.getMetricAdjustment('hcrn'), 0);
+        });
+    });
+
     describe('hvar', function() {
         it('transforms advanceWidth', function() {
             let font = fonts.hvar;
