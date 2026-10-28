@@ -341,6 +341,10 @@ function parseBuffer(buffer, opt={}) {
     } else if (cffTableEntry) {
         const cffTable = uncompressTable(data, cffTableEntry);
         cff.parse(cffTable.data, cffTable.offset, font, opt);
+        // the glyph names of a CFF font are in its charset, as the names of its
+        // glyphs (see addGlyphNames): its post table usually has none (format 3)
+        font.glyphNames = font.glyphNames || new GlyphNames({ version: 3 });
+        font.glyphNames.names = font.cffEncoding.charset;
     } else if (cff2TableEntry) {
         const cffTable2 = uncompressTable(data, cff2TableEntry);
         cff.parse(cffTable2.data, cffTable2.offset, font, opt);

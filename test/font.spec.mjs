@@ -181,6 +181,29 @@ describe('font.mjs', function() {
             assert.equal(tables.tableName, 'sfnt');
         });
     });
+
+    describe('glyph names', function() {
+        // the post table of the CFF fonts has no glyph names (format 3): they are in the charset
+        it('finds the glyphs of a CFF font by the names of its charset', function() {
+            const cffFont = loadSync('./test/fonts/SourceSansPro-Regular.otf');
+            assert.equal(cffFont.tables.post.version, 3);
+            const index = cffFont.nameToGlyphIndex('A');
+            assert.equal(cffFont.glyphs.get(index).name, 'A');
+            assert.equal(cffFont.glyphIndexToName(index), 'A');
+            assert.equal(cffFont.nameToGlyph('B').name, 'B');
+            assert.equal(cffFont.nameToGlyphIndex('missing.glyph'), -1);
+        });
+
+        it('finds the glyphs of a CFF font by name with the low memory option', function() {
+            const cffFont = loadSync('./test/fonts/SourceSansPro-Regular.otf', { lowMemory: true });
+            assert.equal(cffFont.glyphs.get(cffFont.nameToGlyphIndex('A')).name, 'A');
+        });
+
+        it('keeps the names of the post table of a TrueType font', function() {
+            const trueTypeFont = loadSync('./test/fonts/Changa-Regular.ttf');
+            assert.equal(trueTypeFont.glyphs.get(trueTypeFont.nameToGlyphIndex('A')).name, 'A');
+        });
+    });
 });
 
 describe('glyphset.mjs', function() {
