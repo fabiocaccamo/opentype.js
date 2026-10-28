@@ -600,6 +600,23 @@ export class VariationProcessor {
     }
 
     /**
+     * Calculates the variable adjustment of a font-wide metric from the MVAR table,
+     * e.g. 'hcrs' and 'hcrn' (the caret slope rise and run of hhea), 'xhgt' (the
+     * x-height of OS/2): the value to add to the value of the metric in its table.
+     * @param {string} tag - The value tag of the metric.
+     * @param {Object} coords - Variation coordinates.
+     * @returns {number} - The calculated adjustment, 0 when the font does not vary the metric.
+     */
+    getMetricAdjustment(tag, coords) {
+        const table = this.mvar();
+        const record = table && table.itemVariationStore && table.valueRecords[tag];
+        if (!record) {
+            return 0;
+        }
+        return this.getDelta(table.itemVariationStore, record.outerIndex, record.innerIndex, coords || this.font.variation.get());
+    }
+
+    /**
      * Retrieves the delta value from a variation store.
      * @param {Object} itemStore - The item variation store.
      * @param {number} outerIndex - The outer index in the variation subtables.
@@ -732,5 +749,13 @@ export class VariationProcessor {
      */
     hvar() {
         return this.font.tables.hvar;
+    }
+
+    /**
+     * Helper method that returns the font's mvar table if present
+     * @returns {Object|undefined}
+     */
+    mvar() {
+        return this.font.tables.mvar;
     }
 }

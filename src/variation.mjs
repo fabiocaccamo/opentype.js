@@ -8,6 +8,7 @@ export class VariationManager {
         this.getTransform = this.process.getTransform.bind(this.process);
         this.getAdvanceWidth = this.process.getAdvanceWidth.bind(this.process);
         this.getLeftSideBearing = this.process.getLeftSideBearing.bind(this.process);
+        this.getMetricAdjustment = this.process.getMetricAdjustment.bind(this.process);
     }
 
     /**
@@ -144,5 +145,13 @@ export class VariationManager {
      */
     hvar() {
         return this.font.tables.hvar;
+    }
+
+    /**
+     * Helper method that returns the font's mvar table if present
+     * @returns {Object|undefined}
+     */
+    mvar() {
+        return this.font.tables.mvar;
     }
 }
