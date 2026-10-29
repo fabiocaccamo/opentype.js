@@ -249,6 +249,18 @@ describe('variation.mjs', function() {
             font.variation.set({ wght: 700 });
             assert.equal(font.getAdvanceWidth('An', font.unitsPerEm, { kerning: false }), 778 + 625);
         });
+
+        it('keeps the outline of a glyph without gvar variations', function() {
+            // Changa: an HVAR table, and the "estimated" glyph has points but no gvar data
+            const font = loadSync('./test/fonts/Changa-VariableFont_wght.ttf');
+            const glyph = font.nameToGlyph('estimated');
+            assert.equal(font.variation.gvar().glyphVariations[glyph.index], undefined);
+            const defaultCommands = glyph.getPath(0, 0, font.unitsPerEm).commands;
+            assert.ok(defaultCommands.length > 0);
+            const transformedGlyph = font.variation.getTransform(glyph, { wght: 800 });
+            assert.deepEqual(transformedGlyph.path.commands, glyph.path.commands);
+            assert.deepEqual(glyph.getPath(0, 0, font.unitsPerEm, { variation: { wght: 800 } }, font).commands, defaultCommands);
+        });
     });
 
 });
