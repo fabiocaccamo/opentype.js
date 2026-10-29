@@ -398,7 +398,9 @@ export class VariationProcessor {
         // is shared and must keep its default metrics
         if(this.font.tables.hvar) {
             if (transformedGlyph === glyph) {
-                transformedGlyph = new Glyph(Object.assign({}, glyph));
+                // a glyph not varied (no gvar data): its outline as it is, the
+                // points and the path are lazy properties Object.assign skips
+                transformedGlyph = new Glyph(Object.assign({}, glyph, {points: glyph.points, path: glyph.path}));
             }
             transformedGlyph.advanceWidth = this.getAdvanceWidth(glyph, coords);
             transformedGlyph.leftSideBearing = this.getLeftSideBearing(glyph, coords);
