@@ -141,3 +141,95 @@ Zycon.ttf
     SIL Open Font License, Version 1.1
     https://opensource.org/licenses/OFL-1.1
 
+regression/EBGaramond-VF-kern-subset.ttf
+    Subset of EB Garamond (variable).
+    Copyright 2017 The EB Garamond Project Authors (https://github.com/octaviopardo/EBGaramond12)
+    SIL Open Font License, Version 1.1
+    https://openfontlicense.org
+
+regression/NotoSans-VF-composite-diacritics-subset.ttf
+    Subset of Noto Sans (variable).
+    Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)
+    SIL Open Font License, Version 1.1
+    https://openfontlicense.org
+
+regression/NotoSansJP-Regular-astral-subset.ttf
+    Subset of Noto Sans JP.
+    (c) 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+    SIL Open Font License, Version 1.1
+    http://scripts.sil.org/OFL
+
+regression/NotoSansThaiLooped-VF-gsub-chaining-subset.ttf
+    Subset of Noto Sans Thai Looped (variable).
+    Copyright 2022 The Noto Project Authors (https://github.com/notofonts/thai)
+    SIL Open Font License, Version 1.1
+    https://openfontlicense.org
+
+regression/Pacifico-Regular-calt-kern-subset.ttf
+    Subset of Pacifico.
+    Copyright 2018 The Pacifico Project Authors (https://github.com/googlefonts/Pacifico)
+    SIL Open Font License, Version 1.1
+    http://scripts.sil.org/OFL
+
+regression/PlaywriteUSTrad-VF-calt-subset.ttf
+    Subset of Playwrite US Trad (variable).
+    Copyright 2023 The Playwrite Project Authors (https://github.com/TypeTogether/Playwrite)
+    SIL Open Font License, Version 1.1
+    https://openfontlicense.org
+
+regression/ReadexPro-VF-gvar-shared-points-subset.ttf
+regression/ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf
+    Subsets of Readex Pro (variable), the second one without its HVAR table.
+    Copyright 2018 The Readex Pro Project Authors (https://github.com/ThomasJockin/readexpro), with Reserved Font Name “RevReading Lexend”.
+    The notice is the one of the OFL.txt of google/fonts ofl/readexpro (the name table of the font says
+    Copyright 2019, without the Reserved Font Name): the font does not use that name, the subsets are not renamed.
+    SIL Open Font License, Version 1.1
+    https://openfontlicense.org
+
+regression/Roboto-VF-gsub-chaining-subset.ttf
+regression/Roboto-VF-gvar-private-points-subset.ttf
+regression/Roboto-VF-gvar-private-points-noHVAR-subset.ttf
+    Subsets of Roboto (variable), the last one without its HVAR table.
+    Copyright 2011 The Roboto Project Authors (https://github.com/googlefonts/roboto-classic)
+    SIL Open Font License, Version 1.1
+    https://openfontlicense.org
+
+regression/TestCFF1-CIDKeyed-subset.otf
+    Subset of a font by Adobe, renamed because of its Reserved Font Name.
+    © 2014-2025 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+    SIL Open Font License, Version 1.1
+    http://scripts.sil.org/OFL
+
+regression/TestCFF1-EmptyPrivateDict.otf
+regression/TestCFF1-WidthMismatch.otf
+    Generated with fontTools FontBuilder for the opentype.js test suite.
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+regression/TestCFF2-HintedVariable-subset.otf
+    Subset of a variable font by Adobe, renamed because of its Reserved Font Name.
+    © 2014 - 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’.
+    SIL Open Font License, Version 1.1
+    http://scripts.sil.org/OFL
+
+regression/TestGPOS-KernTwoLookups.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite.
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+regression/TestGSUB-ChainingLigatures-subset.otf
+    Subset of a font by Pablo Impallari and Igino Marini, renamed because of its Reserved Font Names.
+    Copyright (c) 2011, Pablo Impallari (www.impallari.com|impallari@gmail.com),
+    Copyright (c) 2011, Igino Marini. (www.ikern.com|mail@iginomarini.com),
+    with Reserved Font Names "Lobster" and "Lobster Two".
+    The notice is the one of the OFL.txt of google/fonts ofl/lobstertwo (same Version 1.006): name ID 13
+    of the font has only the first copyright holder and the Reserved Font Name Lobster.
+    SIL Open Font License, Version 1.1
+    http://scripts.sil.org/OFL
+
+regression/WorkSans-VF-kern-subset.ttf
+    Subset of Work Sans (variable).
+    Copyright 2019 The Work Sans Project Authors (https://github.com/weiweihuanghuang/Work-Sans)
+    SIL Open Font License, Version 1.1
+    http://scripts.sil.org/OFL
+
