@@ -56,11 +56,16 @@ function parseHmtxTable(font, data, start, numMetrics, numGlyphs, glyphs, opt) {
         parseHmtxTableAll(data, start, numMetrics, numGlyphs, glyphs);
 }
 
+// The advance of a glyph that hmtx holds: an integer, the fraction of the advance is dropped
+function getHmtxAdvanceWidth(glyph) {
+    return Math.trunc(glyph.advanceWidth || 0);
+}
+
 function makeHmtxTable(glyphs) {
     const t = new table.Table('hmtx', []);
     for (let i = 0; i < glyphs.length; i += 1) {
         const glyph = glyphs.get(i);
-        const advanceWidth = glyph.advanceWidth || 0;
+        const advanceWidth = getHmtxAdvanceWidth(glyph);
         const leftSideBearing = glyph.leftSideBearing || 0;
         t.fields.push({name: 'advanceWidth_' + i, type: 'USHORT', value: advanceWidth});
         t.fields.push({name: 'leftSideBearing_' + i, type: 'SHORT', value: leftSideBearing});
@@ -70,3 +75,4 @@ function makeHmtxTable(glyphs) {
 }
 
 export default { parse: parseHmtxTable, make: makeHmtxTable };
+export { getHmtxAdvanceWidth };

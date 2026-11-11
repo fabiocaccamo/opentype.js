@@ -17,6 +17,7 @@ import glyphset from '../glyphset.mjs';
 import parse from '../parse.mjs';
 import Path from '../path.mjs';
 import table from '../table.mjs';
+import { getHmtxAdvanceWidth } from './hmtx.mjs';
 
 // Custom equals function that can also check lists.
 function equals(a, b) {
@@ -475,8 +476,6 @@ function gatherCFF2FontDicts(data, start, fdArray) {
 //    _subrs []        array of local CFF subroutines from Private DICT
 //    _subrsBias       bias value computed from number of subroutines
 //                      (see calcCFFSubroutineBias() and parseCFFCharstring())
-//    _defaultWidthX   default widths for CFF characters
-//    _nominalWidthX   bias added to width embedded within glyph description
 //
 //    _privateDict     saved copy of parsed Private DICT from Top DICT
 function gatherCFFTopDicts(data, start, cffIndex, strings, version) {
@@ -486,14 +485,10 @@ function gatherCFFTopDicts(data, start, cffIndex, strings, version) {
         const topDict = parseCFFTopDict(topDictData, 0, strings, version);
         topDict._subrs = [];
         topDict._subrsBias = 0;
-        topDict._defaultWidthX = 0;
-        topDict._nominalWidthX = 0;
         const privateSize = version < 2 ? topDict.private[0] : 0;
         const privateOffset = version < 2 ? topDict.private[1] : 0;
         if (privateSize !== 0 && privateOffset !== 0) {
             const privateDict = parseCFFPrivateDict(data, privateOffset + start, privateSize, strings, version);
-            topDict._defaultWidthX = privateDict.defaultWidthX;
-            topDict._nominalWidthX = privateDict.nominalWidthX;
             if (privateDict.subrs !== 0) {
                 const subrOffset = privateOffset + privateDict.subrs;
                 const subrIndex = parseCFFIndex(data, subrOffset + start, undefined, version);
@@ -629,21 +624,20 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
     const p = new Path();
     const stack = [];
     let nStems = 0;
-    let haveWidth = false;
+    // A CFF1 charstring may give its width before the arguments of its first stack-clearing
+    // operator, a CFF2 charstring never does. The advance of a glyph is the one of hmtx (and
+    // HVAR), as in the OpenType layout: the width is only taken off the stack.
+    let mayHaveWidth = version < 2;
     let open = false;
     let x = 0;
     let y = 0;
     let subrs;
     let subrsBias;
-    let defaultWidthX;
-    let nominalWidthX;
     let vsindex = 0;
     let vstore = [];
     let blendVector;
     let callDepth = 0;
     const cffTable = font.tables.cff2 || font.tables.cff;
-    defaultWidthX = cffTable.topDict._defaultWidthX;
-    nominalWidthX = cffTable.topDict._nominalWidthX;
     coords = coords || font.variation && font.variation.get();
 
     if (!glyph.getBlendPath) {
@@ -662,9 +656,6 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
             // Private DICT: both are only needed by the blend/vsindex operators
             vstore = cffTable.topDict._vstore ? cffTable.topDict._vstore.itemVariationStore : [];
             vsindex = fdDict._privateDict ? fdDict._privateDict.vsindex : 0;
-        } else {
-            defaultWidthX = fdDict._defaultWidthX;
-            nominalWidthX = fdDict._nominalWidthX;
         }
     } else {
         subrs = cffTable.topDict._subrs;
@@ -672,7 +663,15 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
     }
 
     const paintType = applyPaintType(font, p);
-    let width = defaultWidthX;
+
+    // called by each stack-clearing operator: hasWidth tells whether its stack holds one
+    // number more than its arguments
+    function removeWidth(hasWidth) {
+        if (mayHaveWidth && hasWidth) {
+            stack.shift();
+        }
+        mayHaveWidth = false;
+    }
 
     function newContour(x, y) {
         if (open && paintType !== 2) {
@@ -684,18 +683,11 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
     }
 
     function parseStems() {
-        let hasWidthArg;
-
         // The number of stem operators on the stack is always even.
         // If the value is uneven, that means a width is specified.
-        hasWidthArg = (stack.length & 1) !== 0;
-        if (hasWidthArg && !haveWidth) {
-            width = stack.shift() + nominalWidthX;
-        }
-
+        removeWidth((stack.length & 1) !== 0);
         nStems += stack.length >> 1;
         stack.length = 0;
-        haveWidth = true;
     }
 
     function parse(code) {
@@ -724,11 +716,7 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
                     parseStems();
                     break;
                 case 4: // vmoveto
-                    if (stack.length > 1 && !haveWidth) {
-                        width = stack.shift() + nominalWidthX;
-                        haveWidth = true;
-                    }
-
+                    removeWidth(stack.length > 1);
                     y += stack.pop();
                     newContour(x, y);
                     break;
@@ -929,9 +917,8 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
                             }
                             p.extend(shiftedCommands);
                         }
-                    } else if (stack.length > 0 && !haveWidth) {
-                        width = stack.shift() + nominalWidthX;
-                        haveWidth = true;
+                    } else {
+                        removeWidth(stack.length > 0);
                     }
 
                     if (open && paintType !== 2) {
@@ -988,21 +975,13 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
                     i += (nStems + 7) >> 3;
                     break;
                 case 21: // rmoveto
-                    if (stack.length > 2 && !haveWidth) {
-                        width = stack.shift() + nominalWidthX;
-                        haveWidth = true;
-                    }
-
+                    removeWidth(stack.length > 2);
                     y += stack.pop();
                     x += stack.pop();
                     newContour(x, y);
                     break;
                 case 22: // hmoveto
-                    if (stack.length > 1 && !haveWidth) {
-                        width = stack.shift() + nominalWidthX;
-                        haveWidth = true;
-                    }
-
+                    removeWidth(stack.length > 1);
                     x += stack.pop();
                     newContour(x, y);
                     break;
@@ -1182,10 +1161,6 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
             }
             return c;
         });
-    }
-    
-    if (haveWidth) {
-        glyph.advanceWidth = width;
     }
 
     return p;
@@ -1497,11 +1472,13 @@ function makeCharsets(glyphNames, strings) {
     return t;
 }
 
-function glyphToOps(glyph, version) {
+// A Type 2 charstring gives the width of its glyph as its difference from the nominalWidthX
+// of the Private DICT: the width written is the advance written in hmtx
+function glyphToOps(glyph, version, nominalWidthX) {
     const ops = [];
     const path = glyph.path;
     if ( version < 2 ) {
-        ops.push({name: 'width', type: 'NUMBER', value: glyph.advanceWidth});
+        ops.push({name: 'width', type: 'CHARSTRINGNUMBER', value: getHmtxAdvanceWidth(glyph) - nominalWidthX});
     }
     let x = 0;
     let y = 0;
@@ -1530,16 +1507,16 @@ function glyphToOps(glyph, version) {
         if (cmd.type === 'M') {
             dx = Math.round(cmd.x - x);
             dy = Math.round(cmd.y - y);
-            ops.push({name: 'dx', type: 'NUMBER', value: dx});
-            ops.push({name: 'dy', type: 'NUMBER', value: dy});
+            ops.push({name: 'dx', type: 'CHARSTRINGNUMBER', value: dx});
+            ops.push({name: 'dy', type: 'CHARSTRINGNUMBER', value: dy});
             ops.push({name: 'rmoveto', type: 'OP', value: 21});
             x = Math.round(cmd.x);
             y = Math.round(cmd.y);
         } else if (cmd.type === 'L') {
             dx = Math.round(cmd.x - x);
             dy = Math.round(cmd.y - y);
-            ops.push({name: 'dx', type: 'NUMBER', value: dx});
-            ops.push({name: 'dy', type: 'NUMBER', value: dy});
+            ops.push({name: 'dx', type: 'CHARSTRINGNUMBER', value: dx});
+            ops.push({name: 'dy', type: 'CHARSTRINGNUMBER', value: dy});
             ops.push({name: 'rlineto', type: 'OP', value: 5});
             x = Math.round(cmd.x);
             y = Math.round(cmd.y);
@@ -1550,12 +1527,12 @@ function glyphToOps(glyph, version) {
             const dy2 = Math.round(cmd.y2 - cmd.y1);
             dx = Math.round(cmd.x - cmd.x2);
             dy = Math.round(cmd.y - cmd.y2);
-            ops.push({name: 'dx1', type: 'NUMBER', value: dx1});
-            ops.push({name: 'dy1', type: 'NUMBER', value: dy1});
-            ops.push({name: 'dx2', type: 'NUMBER', value: dx2});
-            ops.push({name: 'dy2', type: 'NUMBER', value: dy2});
-            ops.push({name: 'dx', type: 'NUMBER', value: dx});
-            ops.push({name: 'dy', type: 'NUMBER', value: dy});
+            ops.push({name: 'dx1', type: 'CHARSTRINGNUMBER', value: dx1});
+            ops.push({name: 'dy1', type: 'CHARSTRINGNUMBER', value: dy1});
+            ops.push({name: 'dx2', type: 'CHARSTRINGNUMBER', value: dx2});
+            ops.push({name: 'dy2', type: 'CHARSTRINGNUMBER', value: dy2});
+            ops.push({name: 'dx', type: 'CHARSTRINGNUMBER', value: dx});
+            ops.push({name: 'dy', type: 'CHARSTRINGNUMBER', value: dy});
             ops.push({name: 'rrcurveto', type: 'OP', value: 8});
             x = Math.round(cmd.x);
             y = Math.round(cmd.y);
@@ -1570,14 +1547,24 @@ function glyphToOps(glyph, version) {
     return ops;
 }
 
-function makeCharStringsIndex(glyphs, version) {
+// The nominalWidthX that brings the width of every charstring in the range of a charstring
+// integer (-32768 to 32767): 0, unless an advance of hmtx is above 32767 (it is at most 65535)
+function getNominalWidthX(glyphs) {
+    let maxAdvanceWidth = 0;
+    for (let i = 0; i < glyphs.length; i += 1) {
+        maxAdvanceWidth = Math.max(maxAdvanceWidth, getHmtxAdvanceWidth(glyphs.get(i)));
+    }
+    return Math.max(0, maxAdvanceWidth - 32767);
+}
+
+function makeCharStringsIndex(glyphs, version, nominalWidthX) {
     const t = new table.Record('CharStrings INDEX', [
         {name: 'charStrings', type: 'INDEX', value: []}
     ]);
 
     for (let i = 0; i < glyphs.length; i += 1) {
         const glyph = glyphs.get(i);
-        const ops = glyphToOps(glyph, version);
+        const ops = glyphToOps(glyph, version, nominalWidthX);
         t.charStrings.push({name: glyph.name, type: 'CHARSTRING', value: ops});
     }
 
@@ -1632,7 +1619,9 @@ function makeCFFTable(glyphs, options) {
         attrs.strokeWidth = topDictOptions.strokeWidth || 0;
     }
 
-    const privateAttrs = {};
+    const privateAttrs = {
+        nominalWidthX: getNominalWidthX(glyphs)
+    };
 
     const glyphNames = [];
     let glyph;
@@ -1647,12 +1636,14 @@ function makeCFFTable(glyphs, options) {
 
     t.header = makeHeader();
     t.nameIndex = makeNameIndex([options.postScriptName]);
+    // the Private DICT has no strings: its size is known before the Top DICT is made
+    t.privateDict = makePrivateDict(privateAttrs, strings);
+    attrs.private[0] = t.privateDict.sizeOf();
     let topDict = makeTopDict(attrs, strings);
     t.topDictIndex = makeTopDictIndex(topDict);
     t.globalSubrIndex = makeGlobalSubrIndex();
     t.charsets = makeCharsets(glyphNames, strings);
-    t.charStringsIndex = makeCharStringsIndex(glyphs, cffVersion);
-    t.privateDict = makePrivateDict(privateAttrs, strings);
+    t.charStringsIndex = makeCharStringsIndex(glyphs, cffVersion, privateAttrs.nominalWidthX);
 
     // Needs to come at the end, to encode all custom strings used in the font.
     t.stringIndex = makeStringIndex(strings);

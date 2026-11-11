@@ -191,6 +191,35 @@ describe('types.mjs', function() {
         assert.equal(sizeOf.NUMBER32(0xDEADBEEF), 5);
     });
 
+    it('can handle CHARSTRINGNUMBER', function() {
+        // the integers like encodeIntT2 of fontTools encodes them
+        // (Type 2 Charstring Format, table 3: byte 28 and a 16-bit integer):
+        // python -c "from fontTools.misc.psCharStrings import encodeIntT2; print([encodeIntT2(value).hex(' ') for value in (0, 107, 108, 1131, -1131, -1132, 32767, -32768)])"
+        // ['8b', 'f6', 'f7 00', 'fa ff', 'fe ff', '1c fb 94', '1c 7f ff', '1c 80 00']
+        assert.equal(hex(encode.CHARSTRINGNUMBER(0)), '8B');
+        assert.equal(hex(encode.CHARSTRINGNUMBER(107)), 'F6');
+        assert.equal(hex(encode.CHARSTRINGNUMBER(108)), 'F7 00');
+        assert.equal(hex(encode.CHARSTRINGNUMBER(1131)), 'FA FF');
+        assert.equal(hex(encode.CHARSTRINGNUMBER(-1131)), 'FE FF');
+        assert.equal(hex(encode.CHARSTRINGNUMBER(-1132)), '1C FB 94');
+        assert.equal(hex(encode.CHARSTRINGNUMBER(32767)), '1C 7F FF');
+        assert.equal(hex(encode.CHARSTRINGNUMBER(-32768)), '1C 80 00');
+
+        // A charstring integer is below 32768 and at least -32768: an integer outside that range has
+        // no encoding (byte 29, a 32-bit integer in a DICT, is the callgsubr operator in a charstring;
+        // fontTools writes 32768 as 'ff 00 00 80 00', which reads back as 0.5)
+        const notCharstringInteger = /is not a charstring integer \(-32768 to 32767\)/;
+        assert.throws(() => encode.CHARSTRINGNUMBER(32768), notCharstringInteger);
+        assert.throws(() => encode.CHARSTRINGNUMBER(-32769), notCharstringInteger);
+        // the writer rounds every operand: a number that is not an integer is not encoded
+        assert.throws(() => encode.CHARSTRINGNUMBER(0.5), notCharstringInteger);
+        assert.throws(() => encode.CHARSTRINGNUMBER(32767.5), notCharstringInteger);
+        assert.throws(() => encode.CHARSTRINGNUMBER(-32767.5), notCharstringInteger);
+        assert.throws(() => encode.CHARSTRINGNUMBER(NaN), notCharstringInteger);
+        assert.throws(() => encode.CHARSTRINGNUMBER(Infinity), notCharstringInteger);
+        assert.throws(() => encode.CHARSTRINGNUMBER(-Infinity), notCharstringInteger);
+    });
+
     it('can handle REAL', function() {
         // FIXME: It would be good if somebody who actually understands
         // how REAL.encode() works could write tests for edge cases.

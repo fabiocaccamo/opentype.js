@@ -253,9 +253,9 @@ sizeOf.OffSize = sizeOf.BYTE;
 encode.SID = encode.USHORT;
 sizeOf.SID = sizeOf.USHORT;
 
-// Convert a numeric operand or charstring number to a variable-size list of bytes.
 /**
- * Convert a numeric operand or charstring number to a variable-size list of bytes.
+ * Convert an integer operand of a CFF DICT to a variable-size list of bytes.
+ * A number of a Type 2 charstring is encoded by encode.CHARSTRINGNUMBER.
  * @param {number}
  * @returns {Array}
  */
@@ -315,6 +315,20 @@ encode.NUMBER32 = function(v) {
  * @type {number}
  */
 sizeOf.NUMBER32 = constant(5);
+
+/**
+ * Convert an integer operand of a Type 2 charstring to a variable-size list of bytes,
+ * in the shortest form. A charstring has no 32-bit integer: byte 29, its form in a DICT,
+ * is the callgsubr operator. Throws for a value that is not an integer of -32768 to 32767.
+ * @param {number}
+ * @returns {Array}
+ */
+encode.CHARSTRINGNUMBER = function(v) {
+    if (!Number.isInteger(v) || v < -32768 || v > 32767) {
+        throw new Error(`Value ${v} is not a charstring integer (-32768 to 32767)`);
+    }
+    return encode.NUMBER(v);
+};
 
 /**
  * @param {number}
