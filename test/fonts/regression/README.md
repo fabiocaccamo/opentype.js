@@ -13,19 +13,19 @@ Each section below has the commands that rebuild its file. They run from the roo
 mkdir -p download
 ```
 
-With these versions, and a download that has the sha256 of its section, each recipe gives the committed file byte for byte: after a rebuild `git diff` is empty. The URLs of google/fonts and adobe-fonts point to a branch, not to a commit: a download with another sha256 is a later version of the font, and its subset differs.
+With these versions, and a download that has the sha256 of its section, each recipe gives the committed file byte for byte: after a rebuild `git diff` is empty. The URLs of google/fonts and adobe-fonts are pinned to the commit whose file has the sha256 of the section, so they keep giving the same file when the branch of the repository moves on: a download with another sha256 is another version of the font, and its subset differs.
 
 `fontTools.subset` and `hb-subset` keep the dates of the source. fontTools sets `head.modified` to the time of the build when a font is saved by a script (`test/rename-reserved-font-name.py`, the correction of the names of Noto Sans JP): those recipes set `SOURCE_DATE_EPOCH` to the `head.modified` of the committed file. Without it the result differs in the `head` table only (`modified` and `checkSumAdjustment`).
 
 ## EBGaramond-VF-kern-subset.ttf
 
 - Source: EB Garamond, variable (wght), `Version 1.003`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/ebgaramond/EBGaramond%5Bwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/f8c1d3d6cc75e30d77130bdcbfbff27e3b6233fe/ofl/ebgaramond/EBGaramond%5Bwght%5D.ttf
 - sha256 of the download: `ef9512f92f6d579e5dc75af59a5a4b1b8b47d2eda89e00b954d44520e5369027`
 - Used by: `kerningExtensionLookups.spec.mjs` (GPOS kerning in an Extension lookup next to a plain Pair Adjustment lookup, upstream issue #515) and `helpers.spec.mjs`
 
 ```sh
-curl -sSL -o download/EBGaramond-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/ebgaramond/EBGaramond%5Bwght%5D.ttf'
+curl -sSL -o download/EBGaramond-wght.ttf 'https://raw.githubusercontent.com/google/fonts/f8c1d3d6cc75e30d77130bdcbfbff27e3b6233fe/ofl/ebgaramond/EBGaramond%5Bwght%5D.ttf'
 python -m fontTools.subset download/EBGaramond-wght.ttf \
     --unicodes=U+0041,U+0056,U+0054,U+006F,U+0079,U+004C,U+0050,U+002E,U+002C,U+0058,U+002D,U+0067,U+006A,U+003A \
     --glyphs=a.01 --layout-features='*' --no-layout-closure --no-hinting \
@@ -38,12 +38,12 @@ python -m fontTools.subset download/EBGaramond-wght.ttf \
 ## NotoSans-VF-composite-diacritics-subset.ttf
 
 - Source: Noto Sans, variable (wdth, wght), `Version 2.015`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/2984c575fdce412ee02b2baaba67672b9a9434d8/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf
 - sha256 of the download: `bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d`
 - Used by: `compositeDiacritics.spec.mjs` (gvar deltas of the component offsets of composite glyphs, upstream issue #783)
 
 ```sh
-curl -sSL -o download/NotoSans-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf'
+curl -sSL -o download/NotoSans-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/2984c575fdce412ee02b2baaba67672b9a9434d8/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf'
 hb-subset download/NotoSans-wdth-wght.ttf \
     --unicodes=U+00C1,U+00E4,U+00E7,U+00F6,U+0160 \
     --layout-features='*' --name-IDs='*' --glyph-names \
@@ -53,12 +53,12 @@ hb-subset download/NotoSans-wdth-wght.ttf \
 ## NotoSansJP-Regular-astral-subset.ttf
 
 - Source: Noto Sans JP, variable (wght), `Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/295d98a7a0c17c68f1341eaeea354e7960ea70d3/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf
 - sha256 of the download: `c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f`
 - Used by: `surrogatePairClusters.spec.mjs` (clusters of characters outside the BMP and of variation sequences: cmap formats 12 and 14)
 
 ```sh
-curl -sSL -o download/NotoSansJP-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf'
+curl -sSL -o download/NotoSansJP-wght.ttf 'https://raw.githubusercontent.com/google/fonts/295d98a7a0c17c68f1341eaeea354e7960ea70d3/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf'
 hb-subset download/NotoSansJP-wght.ttf \
     --unicodes=20,61,62,66,69,AD,E1,301,2000B,29E3D,242EE,1F21A,FE00,E0100,E0101 \
     --layout-features='*' --variations=wght=400 --no-hinting --name-IDs='*' --glyph-names \
@@ -81,12 +81,12 @@ font.save('test/fonts/regression/NotoSansJP-Regular-astral-subset.ttf')
 ## NotoSansThaiLooped-VF-gsub-chaining-subset.ttf
 
 - Source: Noto Sans Thai Looped, variable (wdth, wght), `Version 2.000`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/notosansthailooped/NotoSansThaiLooped%5Bwdth%2Cwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/e1652b5bc0a863e8a239f0a1bf19d07d816e85e5/ofl/notosansthailooped/NotoSansThaiLooped%5Bwdth%2Cwght%5D.ttf
 - sha256 of the download: `a6d220ea215bc2c4bfcd5c5efc4103e20302443f87f6dca7a9ce733a11f2cfbd`
 - Used by: `robotoGsubChaining.spec.mjs` (GSUB chaining context format 3 with a nested Single substitution format 1, upstream issue #860 and PR #870)
 
 ```sh
-curl -sSL -o download/NotoSansThaiLooped-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosansthailooped/NotoSansThaiLooped%5Bwdth%2Cwght%5D.ttf'
+curl -sSL -o download/NotoSansThaiLooped-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/e1652b5bc0a863e8a239f0a1bf19d07d816e85e5/ofl/notosansthailooped/NotoSansThaiLooped%5Bwdth%2Cwght%5D.ttf'
 python -m fontTools.subset download/NotoSansThaiLooped-wdth-wght.ttf \
     --unicodes=U+0E01,U+0E2C,U+0E34,U+0E38,U+0E49 \
     --layout-features='*' --name-IDs='*' --notdef-outline --no-hinting \
@@ -96,12 +96,12 @@ python -m fontTools.subset download/NotoSansThaiLooped-wdth-wght.ttf \
 ## Pacifico-Regular-calt-kern-subset.ttf
 
 - Source: Pacifico Regular, `Version 3.001`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/pacifico/Pacifico-Regular.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/34ce35e2b6d7a1467c0ecfd9cd13082a87ffd23e/ofl/pacifico/Pacifico-Regular.ttf
 - sha256 of the download: `5b6c0d5334a7bf77dea52b975c5a0c408878c0f7115ed5b6fb151f634b7bf701`
 - Used by: `pacificoContextualAlternates.spec.mjs` (final forms of the calt feature and GPOS pair kerning, upstream issues #372 and #253)
 
 ```sh
-curl -sSL -o download/Pacifico-Regular.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/pacifico/Pacifico-Regular.ttf'
+curl -sSL -o download/Pacifico-Regular.ttf 'https://raw.githubusercontent.com/google/fonts/34ce35e2b6d7a1467c0ecfd9cd13082a87ffd23e/ofl/pacifico/Pacifico-Regular.ttf'
 python -m fontTools.subset download/Pacifico-Regular.ttf \
     --text='nn n Hello Pacifico os off a,b (H)' --unicodes=U+0301 \
     --layout-features='*' --no-hinting --glyph-names --notdef-outline \
@@ -112,12 +112,12 @@ python -m fontTools.subset download/Pacifico-Regular.ttf \
 ## PlaywriteUSTrad-VF-calt-subset.ttf
 
 - Source: Playwrite US Trad, variable (wght), `Version 1.003`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/playwriteustrad/PlaywriteUSTrad%5Bwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/7f36bed59352c1b52752f8fbbcd6da7643f5b02c/ofl/playwriteustrad/PlaywriteUSTrad%5Bwght%5D.ttf
 - sha256 of the download: `6f2b0ba3c262a4d23bc06ea78ff5eccd45ebf324635d81bac25165eb2a2f1960`
 - Used by: `playwriteCursive.spec.mjs` (calt of a connected cursive font, upstream PR #848 and issue #801)
 
 ```sh
-curl -sSL -o download/PlaywriteUSTrad-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/playwriteustrad/PlaywriteUSTrad%5Bwght%5D.ttf'
+curl -sSL -o download/PlaywriteUSTrad-wght.ttf 'https://raw.githubusercontent.com/google/fonts/7f36bed59352c1b52752f8fbbcd6da7643f5b02c/ofl/playwriteustrad/PlaywriteUSTrad%5Bwght%5D.ttf'
 hb-subset download/PlaywriteUSTrad-wght.ttf \
     --unicodes=2E,37,50,65,68,69,6C,6D,6E,6F,75,77,E9 \
     --gids=0,70,79,278,419,556,558,588,590,591,614,616,617,654,657,807,808,809,810,839,840,884,907,908,936,937,938,944,946,948,956,957,958,959,960,961,962,964,966,1010,1012,1207 \
@@ -131,12 +131,12 @@ The glyph ids are .notdef and the glyphs of the buffers of `hb-shape --trace` (t
 ## ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf
 
 - Source: Readex Pro, variable (HEXP, wght), `Version 1.205`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/d81dbc630ed0e3cfd8d1af36893674157c2e6b88/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf
 - sha256 of the download: `268bba7e1e8f3b14d798b3fb0e40ebaa3fc39308c9ac0020e2faf6df181cc30e`
 - Used by: `readexProVariable.spec.mjs` (the subset below without HVAR: the advance widths vary through the gvar phantom points, upstream issue #754)
 
 ```sh
-curl -sSL -o download/ReadexPro-HEXP-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf'
+curl -sSL -o download/ReadexPro-HEXP-wght.ttf 'https://raw.githubusercontent.com/google/fonts/d81dbc630ed0e3cfd8d1af36893674157c2e6b88/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf'
 python -m fontTools.subset download/ReadexPro-HEXP-wght.ttf \
     --unicodes=U+0020,U+0048,U+0065,U+0069,U+006C,U+006F,U+013A,U+066A \
     --layout-features='*' --glyph-names --notdef-outline --name-IDs='*' --name-languages='*' \
@@ -149,12 +149,12 @@ The Reserved Font Name of the license ('RevReading Lexend') is not in the name o
 ## ReadexPro-VF-gvar-shared-points-subset.ttf
 
 - Source: Readex Pro, variable (HEXP, wght), `Version 1.205`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/d81dbc630ed0e3cfd8d1af36893674157c2e6b88/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf
 - sha256 of the download: `268bba7e1e8f3b14d798b3fb0e40ebaa3fc39308c9ac0020e2faf6df181cc30e`
 - Used by: `readexProVariable.spec.mjs` (gvar tuples with private point numbers for all points in a glyph that has shared point numbers, upstream issue #754)
 
 ```sh
-curl -sSL -o download/ReadexPro-HEXP-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf'
+curl -sSL -o download/ReadexPro-HEXP-wght.ttf 'https://raw.githubusercontent.com/google/fonts/d81dbc630ed0e3cfd8d1af36893674157c2e6b88/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf'
 python -m fontTools.subset download/ReadexPro-HEXP-wght.ttf \
     --unicodes=U+0020,U+0048,U+0065,U+0069,U+006C,U+006F,U+013A,U+066A \
     --layout-features='*' --glyph-names --notdef-outline --name-IDs='*' --name-languages='*' \
@@ -166,12 +166,12 @@ The Reserved Font Name of the license ('RevReading Lexend') is not in the name o
 ## Roboto-VF-gsub-chaining-subset.ttf
 
 - Source: Roboto, variable (wdth, wght), `Version 3.015; 2026`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf
 - sha256 of the download: `d7598e12c5dbef095ff8272cfc55da0250bd07fbdecbac8a530b9b277872a134`
 - Used by: `robotoGsubChaining.spec.mjs` (GSUB chaining context formats 2 and 3, upstream PRs #816 and #861, issue #874)
 
 ```sh
-curl -sSL -o download/Roboto-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf'
+curl -sSL -o download/Roboto-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf'
 python -m fontTools.subset download/Roboto-wdth-wght.ttf \
     --unicodes=U+0061,U+0066,U+0069,U+006A,U+006E,U+0074,U+0079,U+002F,U+0031,U+0032,U+00ED,U+012F,U+0301,U+0323 \
     --layout-features=ccmp,locl,liga,dlig,frac,kern,mark,mkmk \
@@ -184,12 +184,12 @@ The features are listed to keep the file small: `--layout-features='*'` adds the
 ## Roboto-VF-gvar-private-points-noHVAR-subset.ttf
 
 - Source: Roboto, variable (wdth, wght), `Version 3.015; 2026`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf
 - sha256 of the download: `d7598e12c5dbef095ff8272cfc55da0250bd07fbdecbac8a530b9b277872a134`
 - Used by: `gvarPrivatePoints.spec.mjs` (the subset below without HVAR: the advance widths vary through the gvar phantom points)
 
 ```sh
-curl -sSL -o download/Roboto-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf'
+curl -sSL -o download/Roboto-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf'
 python -m fontTools.subset download/Roboto-wdth-wght.ttf \
     --unicodes=U+002D,U+002E,U+003A,U+0048,U+007A,U+00C9 \
     --layout-features='*' --name-IDs='*' --no-hinting --notdef-outline \
@@ -200,12 +200,12 @@ python -m fontTools.subset download/Roboto-wdth-wght.ttf \
 ## Roboto-VF-gvar-private-points-subset.ttf
 
 - Source: Roboto, variable (wdth, wght), `Version 3.015; 2026`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf
 - sha256 of the download: `d7598e12c5dbef095ff8272cfc55da0250bd07fbdecbac8a530b9b277872a134`
 - Used by: `gvarPrivatePoints.spec.mjs` (gvar tuples with private point numbers for all points in a glyph that has shared point numbers, upstream PR #856)
 
 ```sh
-curl -sSL -o download/Roboto-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf'
+curl -sSL -o download/Roboto-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf'
 python -m fontTools.subset download/Roboto-wdth-wght.ttf \
     --unicodes=U+002D,U+002E,U+003A,U+0048,U+007A,U+00C9 \
     --layout-features='*' --name-IDs='*' --no-hinting --notdef-outline \
@@ -215,12 +215,12 @@ python -m fontTools.subset download/Roboto-wdth-wght.ttf \
 ## TestCFF1-CIDKeyed-subset.otf
 
 - Source: Source Han Sans KR Regular (the region specific subset OTF), `Version 2.005;addfeatures 5.0.0b21`
-- URL: https://raw.githubusercontent.com/adobe-fonts/source-han-sans/release/SubsetOTF/KR/SourceHanSansKR-Regular.otf
+- URL: https://raw.githubusercontent.com/adobe-fonts/source-han-sans/6c709ca72d3d7c46ab42ebecc1a26e7d69595a37/SubsetOTF/KR/SourceHanSansKR-Regular.otf
 - sha256 of the download: `d8299926a5284f7461b46fa0617cc05d4f1fce8f034ffff78084225ce8b38071`
 - Used by: `cffAdvanceWidth.spec.mjs` (CID-keyed CFF: Font DICTs with their own nominalWidthX and defaultWidthX)
 
 ```sh
-curl -sSL -o download/SourceHanSansKR-Regular.otf 'https://raw.githubusercontent.com/adobe-fonts/source-han-sans/release/SubsetOTF/KR/SourceHanSansKR-Regular.otf'
+curl -sSL -o download/SourceHanSansKR-Regular.otf 'https://raw.githubusercontent.com/adobe-fonts/source-han-sans/6c709ca72d3d7c46ab42ebecc1a26e7d69595a37/SubsetOTF/KR/SourceHanSansKR-Regular.otf'
 python -m fontTools.subset download/SourceHanSansKR-Regular.otf \
     --unicodes=U+0020,U+0041,U+0056,U+004F,U+AC00,U+4E00,U+02C7,U+00B1,U+31B4,U+3105,U+FF76 \
     --layout-features='*' --name-IDs='*' --notdef-outline \
@@ -253,12 +253,12 @@ python test/generate-cff-width-fonts.py test/fonts/regression/TestCFF1-WidthMism
 ## TestCFF2-HintedVariable-subset.otf
 
 - Source: Source Serif 4 Variable Roman, variable (opsz, wght), `Version 4.005;hotconv 1.1.0;makeotfexe 2.6.0`
-- URL: https://github.com/adobe-fonts/source-serif/raw/release/VAR/SourceSerif4Variable-Roman.otf
+- URL: https://github.com/adobe-fonts/source-serif/raw/2823e993c53fca27c5c8749f529b56a5a7c77b6b/VAR/SourceSerif4Variable-Roman.otf
 - sha256 of the download: `867b73c6a954a4a64616906d179f94572a748790a1d022ebeeff07f56ea0221a`
 - Used by: `cffAdvanceWidth.spec.mjs` (CFF2 with hint operators, HVAR and GPOS pair kerning with variations)
 
 ```sh
-curl -sSL -o download/SourceSerif4Variable-Roman.otf 'https://github.com/adobe-fonts/source-serif/raw/release/VAR/SourceSerif4Variable-Roman.otf'
+curl -sSL -o download/SourceSerif4Variable-Roman.otf 'https://github.com/adobe-fonts/source-serif/raw/2823e993c53fca27c5c8749f529b56a5a7c77b6b/VAR/SourceSerif4Variable-Roman.otf'
 python -m fontTools.subset download/SourceSerif4Variable-Roman.otf \
     --unicodes=U+0020,U+0041,U+0056,U+006F \
     --layout-features='*' --no-layout-closure --name-IDs='*' --notdef-outline \
@@ -303,12 +303,12 @@ Renamed: the license embedded in the source reserves the font name 'Lobster', th
 ## WorkSans-VF-kern-subset.ttf
 
 - Source: Work Sans, variable (wght), `Version 2.012`
-- URL: https://raw.githubusercontent.com/google/fonts/main/ofl/worksans/WorkSans%5Bwght%5D.ttf
+- URL: https://raw.githubusercontent.com/google/fonts/f9a520d3956150b929616354dc7ec915be39e3b4/ofl/worksans/WorkSans%5Bwght%5D.ttf
 - sha256 of the download: `f50f61f2ba738e239442d40bf1069adb195c224b6a5a73a581fc2f3ed62a9f63`
 - Used by: `kerningExtensionLookups.spec.mjs` (GPOS kerning in an Extension lookup only, upstream PR #491)
 
 ```sh
-curl -sSL -o download/WorkSans-wght.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/worksans/WorkSans%5Bwght%5D.ttf'
+curl -sSL -o download/WorkSans-wght.ttf 'https://raw.githubusercontent.com/google/fonts/f9a520d3956150b929616354dc7ec915be39e3b4/ofl/worksans/WorkSans%5Bwght%5D.ttf'
 python -m fontTools.subset download/WorkSans-wght.ttf \
     --unicodes=U+0041,U+0056,U+0054,U+006F,U+0079,U+004C,U+0050,U+002E,U+0024 \
     --glyphs=dollar.BRACKET.202 --layout-features='*' --no-layout-closure --no-hinting \
