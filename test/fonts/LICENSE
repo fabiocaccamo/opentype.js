@@ -202,6 +202,7 @@ regression/TestCFF1-CIDKeyed-subset.otf
 
 regression/TestCFF1-EmptyPrivateDict.otf
 regression/TestCFF1-WidthMismatch.otf
+regression/TestCFF1-WidthOperators.otf
     Generated with fontTools FontBuilder for the opentype.js test suite.
     Public domain (CC0 1.0 Universal)
     https://creativecommons.org/publicdomain/zero/1.0/

@@ -4,9 +4,77 @@ import Glyph from '../../src/glyph.mjs';
 import glyphset from '../../src/glyphset.mjs';
 import Path from '../../src/path.mjs';
 import cff from '../../src/tables/cff.mjs';
-import { parse } from '../../src/opentype.mjs';
+import sfnt from '../../src/tables/sfnt.mjs';
+import { encode } from '../../src/types.mjs';
+import { Font, parse } from '../../src/opentype.mjs';
 import { readFileSync } from 'fs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
+
+const loadModes = [{}, { lowMemory: true }];
+
+// the ways of reading the outline of a glyph, each of them parses its charstring
+const outlineReaders = [
+    glyph => glyph.path,
+    (glyph, font) => glyph.getPath(0, 0, 72, undefined, font),
+    glyph => glyph.getBoundingBox()
+];
+
+// the advance widths of the glyphs of a font once all their outlines are read
+function getAdvanceWidthsAfterOutlines(font, readOutline) {
+    const glyphs = [];
+    for (let i = 0; i < font.numGlyphs; i += 1) {
+        glyphs.push(font.glyphs.get(i));
+    }
+    for (const glyph of glyphs) {
+        readOutline(glyph, font);
+    }
+    return glyphs.map(glyph => glyph.advanceWidth);
+}
+
+// the bounds of the outlines of the glyphs of a font like the BoundsPen of fontTools gives
+// them: null for a glyph without outline (getBoundingBox gives it a box of zeros)
+function getOutlineBounds(font) {
+    const bounds = [];
+    for (let i = 0; i < font.numGlyphs; i += 1) {
+        const glyph = font.glyphs.get(i);
+        const boundingBox = glyph.getBoundingBox();
+        bounds.push(glyph.path.commands.length === 0 ? null : [boundingBox.x1, boundingBox.y1, boundingBox.x2, boundingBox.y2]);
+    }
+    return bounds;
+}
+
+// the commands of the outline of a square
+const squareCommands = [
+    { type: 'M', x: 100, y: 0 },
+    { type: 'L', x: 400, y: 0 },
+    { type: 'L', x: 400, y: 300 },
+    { type: 'L', x: 100, y: 300 },
+    { type: 'Z' }
+];
+
+// a font of a .notdef glyph without outline and a glyph with the outline commands given, with
+// the advance widths given
+function makeFont(advanceWidths, commands) {
+    const path = new Path();
+    path.extend(commands);
+    return new Font({
+        familyName: 'Square',
+        styleName: 'Regular',
+        unitsPerEm: 1000,
+        ascender: 800,
+        descender: -200,
+        glyphs: [
+            new Glyph({ name: '.notdef', path: new Path(), advanceWidth: advanceWidths[0] }),
+            new Glyph({ name: 'square', unicode: 0x25A1, path, advanceWidth: advanceWidths[1] })
+        ]
+    });
+}
+
+// the charstrings of the CFF table that toArrayBuffer writes for a font
+function getWrittenCharStrings(font) {
+    const cffTable = sfnt.fontToTable(font).tables.find(table => table.tableName === 'CFF ');
+    return cffTable.charStringsIndex.charStrings;
+}
 
 describe('tables/cff.mjs', function () {
     const data =
@@ -251,5 +319,184 @@ describe('tables/cff.mjs', function () {
                 .flat(),
             transformedPoints
         );
+    });
+
+    describe('advance widths', function() {
+        // TestCFF1-WidthMismatch.otf (test/generate-cff-width-fonts.py --hmtx-mismatch): each glyph gives
+        // its charstring width with another operator (rmoveto, endchar, hmoveto, vmoveto, hstem, hstemhm
+        // and hintmask, none), and the hmtx advances of A and V differ from those widths
+        const widthMismatchFont = './test/fonts/regression/TestCFF1-WidthMismatch.otf';
+        // the bounds of its outlines, apart from the width operands:
+        // python -c "from fontTools.ttLib import TTFont; from fontTools.pens.boundsPen import BoundsPen; font = TTFont('TestCFF1-WidthMismatch.otf'); glyphSet = font.getGlyphSet(); pens = {name: BoundsPen(glyphSet) for name in font.getGlyphOrder()}; [glyphSet[name].draw(pens[name]) for name in pens]; print([pens[name].bounds for name in pens])"
+        // [(100, 0, 400, 700), None, (40, 0, 640, 700), (0, 0, 600, 700), (110, 0, 190, 700), (90, 0, 723, 700), (-200, 600, -100, 750)]
+        const widthMismatchBounds = [[100, 0, 400, 700], null, [40, 0, 640, 700], [0, 0, 600, 700], [110, 0, 190, 700], [90, 0, 723, 700], [-200, 600, -100, 750]];
+        // TestCFF1-WidthOperators.otf (test/generate-cff-width-operators-font.py): nominalWidthX 100,
+        // defaultWidthX 450, the width before rmoveto, hmoveto, a seac endchar (Aacute), pushed by a
+        // local subroutine (I), before a global subroutine that holds hmoveto (H), and none before a
+        // hintmask with implicit vstems (O), an hmoveto (E) or a vmoveto (T)
+        const widthOperatorsFont = './test/fonts/regression/TestCFF1-WidthOperators.otf';
+        // TestCFF2-HintedVariable-subset.otf: CFF2 charstrings with hint operators, HVAR
+        const hintedVariableFont = './test/fonts/regression/TestCFF2-HintedVariable-subset.otf';
+
+        it('takes the advance of a CFF glyph from hmtx, never from the width of its charstring, once its outline is read (also in lowMemory mode)', function() {
+            // python -c "from fontTools.ttLib import TTFont; font = TTFont('TestCFF1-WidthMismatch.otf'); print([font['hmtx'][name][0] for name in font.getGlyphOrder()])"
+            // [500, 250, 600, 720, 300, 813, 0]
+            // (the widths of the charstrings are [500, 250, 749, 680, 300, 813, 0])
+            for (const options of loadModes) {
+                for (const readOutline of outlineReaders) {
+                    const font = loadSync(widthMismatchFont, options);
+                    assert.deepEqual(getAdvanceWidthsAfterOutlines(font, readOutline), [500, 250, 600, 720, 300, 813, 0]);
+                }
+            }
+        });
+
+        it('takes the width off the stack of the first stack-clearing operator of a CFF charstring (also in lowMemory mode)', function() {
+            for (const options of loadModes) {
+                assert.deepEqual(getOutlineBounds(loadSync(widthMismatchFont, options)), widthMismatchBounds);
+            }
+        });
+
+        it('takes the width off the stack before a seac endchar and through subroutines, counts the implicit vstems of a first hintmask, and takes no width off a first hmoveto or vmoveto with one operand (also in lowMemory mode)', function() {
+            // python -c "from fontTools.ttLib import TTFont; from fontTools.pens.boundsPen import BoundsPen; font = TTFont('TestCFF1-WidthOperators.otf'); glyphSet = font.getGlyphSet(); pens = {name: BoundsPen(glyphSet) for name in font.getGlyphOrder()}; [glyphSet[name].draw(pens[name]) for name in pens]; print([pens[name].bounds for name in pens], [font['hmtx'][name][0] for name in font.getGlyphOrder()])"
+            // [(100, 0, 400, 700), (40, 0, 560, 700), (150, 750, 250, 900), (40, 0, 560, 1020), (110, 0, 190, 700), (90, 0, 723, 700), (90, 0, 170, 700), (110, 0, 190, 700), (0, 120, 100, 700)] [500, 600, 450, 600, 300, 813, 450, 450, 450]
+            const bounds = [
+                [100, 0, 400, 700], [40, 0, 560, 700], [150, 750, 250, 900], [40, 0, 560, 1020], [110, 0, 190, 700],
+                [90, 0, 723, 700], [90, 0, 170, 700], [110, 0, 190, 700], [0, 120, 100, 700]
+            ];
+            for (const options of loadModes) {
+                const font = loadSync(widthOperatorsFont, options);
+                assert.deepEqual(getOutlineBounds(font), bounds);
+                assert.deepEqual(getAdvanceWidthsAfterOutlines(font, outlineReaders[2]), [500, 600, 450, 600, 300, 813, 450, 450, 450]);
+            }
+        });
+
+        it('counts the stems of a first hint operator without a width before its hintmask (also in lowMemory mode)', function() {
+            // FDArrayTest257.otf: the first hint operator of cid00020, cid00025 and cid00050 has an even
+            // stack (no width) and a hintmask follows it
+            // python -c "from fontTools.ttLib import TTFont; from fontTools.pens.boundsPen import BoundsPen; font = TTFont('FDArrayTest257.otf'); glyphSet = font.getGlyphSet(); pens = {name: BoundsPen(glyphSet) for name in ('cid00020', 'cid00025', 'cid00050')}; [glyphSet[name].draw(pens[name]) for name in pens]; print([pens[name].bounds for name in pens])"
+            // [(82, -12, 926, 716), (82, -12, 938, 716), (46, -12, 940, 716)]
+            for (const options of loadModes) {
+                const font = loadSync('./test/fonts/FDArrayTest257.otf', options);
+                const bounds = [20, 25, 50].map(index => {
+                    const boundingBox = font.glyphs.get(index).getBoundingBox();
+                    return [boundingBox.x1, boundingBox.y1, boundingBox.x2, boundingBox.y2];
+                });
+                assert.deepEqual(bounds, [[82, -12, 926, 716], [82, -12, 938, 716], [46, -12, 940, 716]]);
+            }
+        });
+
+        it('keeps the hmtx and HVAR advances of a CFF2 glyph with hint operators once its outline is read (also in lowMemory mode)', function() {
+            // python -c "from fontTools.ttLib import TTFont; font = TTFont('TestCFF2-HintedVariable-subset.otf'); print([font['hmtx'][name][0] for name in font.getGlyphOrder()])"
+            // [640, 233, 664, 674, 549]
+            // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900 TestCFF2-HintedVariable-subset.otf -u 0041
+            // [2=0+680]
+            // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=200,opsz=60 TestCFF2-HintedVariable-subset.otf -u 006F
+            // [4=0+480]
+            for (const options of loadModes) {
+                for (const readOutline of outlineReaders) {
+                    const font = loadSync(hintedVariableFont, options);
+                    assert.deepEqual(getAdvanceWidthsAfterOutlines(font, readOutline), [640, 233, 664, 674, 549]);
+                }
+                const font = loadSync(hintedVariableFont, options);
+                assert.equal(font.variation.getTransform(2, { wght: 900 }).advanceWidth, 680);
+                assert.equal(font.variation.getTransform(4, { wght: 200, opsz: 60 }).advanceWidth, 480);
+                assert.equal(font.glyphs.get(2).advanceWidth, 664);
+                assert.equal(font.glyphs.get(4).advanceWidth, 549);
+            }
+        });
+
+        it('writes the width of a charstring as the difference of its hmtx advance from a nominalWidthX, 0 unless an advance is above 32767', function() {
+            // each font written by toArrayBuffer and read with fontTools: the Private DICT, the hmtx
+            // advances, the width operands of the charstrings and their widths
+            // python -c "from fontTools.ttLib import TTFont; from fontTools.pens.basePen import NullPen; font = TTFont('Square.otf'); top = font['CFF '].cff.topDictIndex[0]; charStrings = top.CharStrings; [charStrings[name].draw(NullPen()) for name in font.getGlyphOrder()]; print(top.Private.rawDict, [font['hmtx'][name][0] for name in font.getGlyphOrder()], [charStrings[name].program[0] for name in font.getGlyphOrder()], [charStrings[name].width for name in font.getGlyphOrder()])"
+            // [500, 32767]: {} [500, 32767] [500, 32767] [500, 32767]
+            // [500, 32768]: {'nominalWidthX': 1} [500, 32768] [499, 32767] [500, 32768]
+            // [0, 65535]: {'nominalWidthX': 32768} [0, 65535] [-32768, 32767] [0, 65535]
+            // hmtx holds the integer part of a fractional advance, and so does the charstring:
+            // [250.5, 500.75]: {} [250, 500] [250, 500] [250, 500]
+            // [500, 32767.5]: {} [500, 32767] [500, 32767] [500, 32767]
+            // [500, 40000.5]: {'nominalWidthX': 7233} [500, 40000] [-6733, 32767] [500, 40000]
+            // the widest advance on .notdef, the first glyph:
+            // [40000, 500]: {'nominalWidthX': 7233} [40000, 500] [32767, -6733] [40000, 500]
+            // and the outline of the square:
+            // python -c "from fontTools.ttLib import TTFont; from fontTools.pens.recordingPen import RecordingPen; font = TTFont('Square.otf'); pen = RecordingPen(); font.getGlyphSet()['square'].draw(pen); print(pen.value)"
+            // [('moveTo', ((100, 0),)), ('lineTo', ((400, 0),)), ('lineTo', ((400, 300),)), ('lineTo', ((100, 300),)), ('closePath', ())]
+            const cases = [
+                { advanceWidths: [500, 32767], hmtxAdvanceWidths: [500, 32767], nominalWidthX: 0, widthOperands: [500, 32767] },
+                { advanceWidths: [500, 32768], hmtxAdvanceWidths: [500, 32768], nominalWidthX: 1, widthOperands: [499, 32767] },
+                { advanceWidths: [0, 65535], hmtxAdvanceWidths: [0, 65535], nominalWidthX: 32768, widthOperands: [-32768, 32767] },
+                { advanceWidths: [250.5, 500.75], hmtxAdvanceWidths: [250, 500], nominalWidthX: 0, widthOperands: [250, 500] },
+                { advanceWidths: [500, 32767.5], hmtxAdvanceWidths: [500, 32767], nominalWidthX: 0, widthOperands: [500, 32767] },
+                { advanceWidths: [500, 40000.5], hmtxAdvanceWidths: [500, 40000], nominalWidthX: 7233, widthOperands: [-6733, 32767] },
+                { advanceWidths: [40000, 500], hmtxAdvanceWidths: [40000, 500], nominalWidthX: 7233, widthOperands: [32767, -6733] }
+            ];
+            for (const { advanceWidths, hmtxAdvanceWidths, nominalWidthX, widthOperands } of cases) {
+                const sourceFont = makeFont(advanceWidths, squareCommands);
+                const charStrings = getWrittenCharStrings(sourceFont);
+                assert.deepEqual(charStrings.map(charString => charString.value[0].value), widthOperands);
+                const font = parse(sourceFont.toArrayBuffer());
+                assert.equal(font.nominalWidthX, nominalWidthX);
+                assert.deepEqual(getAdvanceWidthsAfterOutlines(font, outlineReaders[0]), hmtxAdvanceWidths);
+                assert.deepEqual(font.glyphs.get(1).path.commands, squareCommands);
+            }
+        });
+
+        it('writes the coordinate deltas of an outline as charstring integers, from -32768 to 32767', function() {
+            // a moveto, a lineto and a curveto whose deltas are 32767, -32768 and -32767, written by
+            // toArrayBuffer and read with fontTools:
+            // python -c "from fontTools.ttLib import TTFont; from fontTools.pens.recordingPen import RecordingPen; font = TTFont('Square.otf'); print(font['CFF '].cff.topDictIndex[0].CharStrings['square'].bytecode.hex(' ').upper()); pen = RecordingPen(); font.getGlyphSet()['square'].draw(pen); print(pen.value)"
+            // F8 88 1C 7F FF 1C 80 00 15 1C 80 00 1C 7F FF 05 1C 7F FF 1C 80 01 1C 80 00 1C 7F FF 1C 7F FF 1C 80 00 08 0E
+            // [('moveTo', ((32767, -32768),)), ('lineTo', ((-1, -1),)), ('curveTo', ((32766, -32768), (-2, -1), (32765, -32769))), ('closePath', ())]
+            const commands = [
+                { type: 'M', x: 32767, y: -32768 },
+                { type: 'L', x: -1, y: -1 },
+                { type: 'C', x1: 32766, y1: -32768, x2: -2, y2: -1, x: 32765, y: -32769 },
+                { type: 'Z' }
+            ];
+            const sourceFont = makeFont([500, 500], commands);
+            const charStrings = getWrittenCharStrings(sourceFont);
+            assert.equal(hex(encode.CHARSTRING(charStrings[1].value)),
+                'F8 88 1C 7F FF 1C 80 00 15 1C 80 00 1C 7F FF 05 1C 7F FF 1C 80 01 1C 80 00 1C 7F FF 1C 7F FF 1C 80 00 08 0E');
+            const font = parse(sourceFont.toArrayBuffer());
+            assert.deepEqual(font.glyphs.get(1).path.commands, commands);
+        });
+
+        it('throws for a coordinate delta of an outline that a charstring integer cannot hold', function() {
+            // a charstring integer is from -32768 to 32767 (Type 2 Charstring Format, 3.2): each outline
+            // has one delta of 32768, in another operand
+            const origin = { type: 'M', x: 0, y: 0 };
+            const outlines = [
+                [{ type: 'M', x: 32768, y: 0 }],
+                [{ type: 'M', x: 0, y: 32768 }],
+                [origin, { type: 'L', x: 32768, y: 0 }],
+                [origin, { type: 'L', x: 0, y: 32768 }],
+                [origin, { type: 'C', x1: 32768, y1: 0, x2: 32768, y2: 0, x: 32768, y: 0 }],
+                [origin, { type: 'C', x1: 0, y1: 32768, x2: 0, y2: 32768, x: 0, y: 32768 }],
+                [origin, { type: 'C', x1: 0, y1: 0, x2: 32768, y2: 0, x: 32768, y: 0 }],
+                [origin, { type: 'C', x1: 0, y1: 0, x2: 0, y2: 32768, x: 0, y: 32768 }],
+                [origin, { type: 'C', x1: 0, y1: 0, x2: 0, y2: 0, x: 32768, y: 0 }],
+                [origin, { type: 'C', x1: 0, y1: 0, x2: 0, y2: 0, x: 0, y: 32768 }]
+            ];
+            for (const commands of outlines) {
+                assert.throws(() => makeFont([500, 500], commands).toArrayBuffer(), /Value 32768 is not a charstring integer/, JSON.stringify(commands));
+            }
+        });
+
+        it('throws for an outline with a coordinate that is not a number', function() {
+            const commands = [{ type: 'M', x: NaN, y: 0 }, { type: 'L', x: 200, y: 0 }, { type: 'L', x: 200, y: 10 }, { type: 'Z' }];
+            assert.throws(() => makeFont([500, 500], commands).toArrayBuffer(), /Value NaN is not a charstring integer/);
+        });
+
+        it('writes a font whose hmtx advances and outlines are the ones of the source, read with fontTools', function() {
+            // TestCFF1-WidthMismatch.otf written by toArrayBuffer once its outlines are read, and read with fontTools:
+            // python -c "from fontTools.ttLib import TTFont; from fontTools.pens.basePen import NullPen; font = TTFont('Written.otf'); charStrings = font['CFF '].cff.topDictIndex[0].CharStrings; [charStrings[name].draw(NullPen()) for name in font.getGlyphOrder()]; print([font['hmtx'][name][0] for name in font.getGlyphOrder()], [charStrings[name].width for name in font.getGlyphOrder()])"
+            // [500, 250, 600, 720, 300, 813, 0] [500, 250, 600, 720, 300, 813, 0]
+            // its outlines drawn with a RecordingPen are the ones of the source, so are their bounds
+            const font = loadSync(widthMismatchFont);
+            getAdvanceWidthsAfterOutlines(font, outlineReaders[2]);
+            const writtenFont = parse(font.toArrayBuffer());
+            assert.deepEqual(getAdvanceWidthsAfterOutlines(writtenFont, outlineReaders[2]), [500, 250, 600, 720, 300, 813, 0]);
+            assert.deepEqual(getOutlineBounds(writtenFont), widthMismatchBounds);
+        });
     });
 });

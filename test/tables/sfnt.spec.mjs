@@ -1,5 +1,7 @@
 import assert from 'assert';
+import { readFileSync } from 'fs';
 import Font from '../../src/font.mjs';
+import { parse } from '../../src/opentype.mjs';
 import name from '../../src/tables/name.mjs';
 import sfnt from '../../src/tables/sfnt.mjs';
 import { encode } from '../../src/types.mjs';
@@ -153,6 +155,22 @@ describe('tables/sfnt.mjs', function () {
 
             assert.deepEqual(parsedNameTable.macintosh.preferredSubfamily, { en: preferredSubfamily });
             assert.deepEqual(parsedNameTable.windows.preferredSubfamily, { en: preferredSubfamily });
+        });
+
+        it('writes the hmtx advances of a CFF font, not the widths of its charstrings, once the outlines are read', ()=>{
+            // TestCFF1-WidthMismatch.otf: the hmtx advances of A and V differ from the widths of their charstrings
+            // python -c "from fontTools.ttLib import TTFont; font = TTFont('TestCFF1-WidthMismatch.otf'); print([font['hmtx'][name][0] for name in font.getGlyphOrder()])"
+            // [500, 250, 600, 720, 300, 813, 0]
+            const cffFont = parse(readFileSync('./test/fonts/regression/TestCFF1-WidthMismatch.otf'));
+            for (let i = 0; i < cffFont.numGlyphs; i++) {
+                cffFont.glyphs.get(i).getBoundingBox();
+            }
+            const sfntTable = sfnt.fontToTable(cffFont);
+            const hmtxTable = sfntTable.tables.find(table => table.tableName === 'hmtx');
+            const advanceWidths = hmtxTable.fields
+                .filter(field => field.name.startsWith('advanceWidth_'))
+                .map(field => field.value);
+            assert.deepEqual(advanceWidths, [500, 250, 600, 720, 300, 813, 0]);
         });
     });
 });

@@ -5,8 +5,8 @@
  * outline of a glyph (getBoundingBox, getPath, path) parses its charstring, and
  * parseCFFCharstring (src/tables/cff.mjs) assigns the width of the charstring to
  * glyph.advanceWidth, over the advance of the hmtx table. With an empty Private DICT (size 0,
- * no nominalWidthX and no defaultWidthX: the font of #417, and every font written by
- * opentype.js, the scenario of #440 and #397) that width was NaN.
+ * no nominalWidthX and no defaultWidthX: the font of #417, and every font that opentype.js
+ * wrote, the scenario of #440 and #397) that width was NaN.
  *
  * With the 1.3.3 build the advances are NaN once an outline is read, on the empty Private DICT
  * fixture and on the subsets of #397. The two WOFF fonts of the #440 test cannot be written by
@@ -14,14 +14,15 @@
  * are NaN too. The 1.3.4 build gives the hmtx advances in the three cases. A CID-keyed font
  * was never the trigger (its advances are right with 1.3.3).
  *
- * The assignment is still there, in upstream master too, and it has three open bugs, the known
- * failures of this file. They fail on upstream master as well; the regular tests that do not
- * shape a text pass there (shapeText needs stringToGlyphClusters, an API of this fork):
+ * The assignment is still there in upstream master, with three bugs that this fork fixes (the
+ * tests that cover them fail on upstream master; the tests that do not shape a text pass there,
+ * shapeText needs stringToGlyphClusters, an API of this fork):
  * - CFF: an hmtx advance that differs from the width of the charstring is replaced by that
  *   width, also in the hmtx table written by toArrayBuffer
  * - CFF2: a charstring never has a width, but a glyph with hint operators gets an advance of 0
  * - written fonts: a charstring width above 32767 is written with the number encoding of a
  *   DICT, the charstring is invalid and another width is read back
+ * The fork never assigns the width of a charstring: the advances are the ones of hmtx and HVAR.
  *
  * Fixtures (test/fonts/regression/README.md says how they were built):
  * - TestCFF1-EmptyPrivateDict.otf: synthetic CFF, Top DICT Private of size 0, each glyph gives
@@ -34,7 +35,8 @@
  * - TestCFF2-HintedVariable-subset.otf: a subset of Source Serif 4 Variable, CFF2 with hint
  *   operators, HVAR, avar, GPOS pair kerning with variations
  * - ../Vibur.woff (TrueType outlines) and ../FiraSansMedium.woff (CFF outlines): written by
- *   font.toArrayBuffer(), as CFF with an empty Private DICT
+ *   font.toArrayBuffer() as CFF, with an empty Private DICT unless an advance does not fit a
+ *   charstring width (Vibur, rs 64001: nominalWidthX 31234)
  *
  * The reference advances are the ones of the hmtx table (fontTools) and of hb-shape, which
  * takes the advances from hmtx and HVAR, never from the width of a charstring (and gives 0 to
@@ -49,7 +51,7 @@
 
 import assert from 'assert';
 import { Font, parse } from '../../src/opentype.mjs';
-import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './helpers.mjs';
+import { loadFont, shapeText, assertShape } from './helpers.mjs';
 
 const emptyPrivateDictFixture = 'TestCFF1-EmptyPrivateDict.otf';
 const widthMismatchFixture = 'TestCFF1-WidthMismatch.otf';
@@ -161,9 +163,9 @@ function writeAndParse(font) {
     return parse(font.toArrayBuffer());
 }
 
-// The known failures of a fixture whose hmtx advances are replaced once an outline is read,
-// one per load mode
-function itKeepsHmtxAdvanceWidthsUntilFixed(fixture, hmtxAdvanceWidths, reason) {
+// The tests of a fixture whose hmtx advances were replaced once an outline was read, one per
+// load mode
+function itKeepsHmtxAdvanceWidths(fixture, hmtxAdvanceWidths) {
     for (const loadMode of loadModes) {
         describe(`glyph.advanceWidth, ${loadMode.name}`, function() {
             let font;
@@ -172,7 +174,7 @@ function itKeepsHmtxAdvanceWidthsUntilFixed(fixture, hmtxAdvanceWidths, reason) 
                 font = loadFont(fixture, undefined, loadMode.options);
             });
 
-            itFailsUntilFixed('keeps the hmtx advance of every glyph after getBoundingBox', reason, function() {
+            it('keeps the hmtx advance of every glyph after getBoundingBox', function() {
                 const advanceWidths = getAdvanceWidthsAroundOutlines(font, getAllGlyphs(font), outlineReaders.getBoundingBox);
                 assert.deepStrictEqual(advanceWidths.after, hmtxAdvanceWidths);
             });
@@ -267,13 +269,6 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
                 // CFF outlines, the Private DICT of the source has 65 bytes
                 { fixture: firaSansFixture, numGlyphs: 1147, glyphs: [36, 20, 57], advanceWidths: [579, 400, 585], wideGlyphs: [] }
             ];
-            const wideGlyphReason = 'glyphToOps (src/tables/cff.mjs): writes a charstring width above 32767 with encode.NUMBER ' +
-                '(src/types.mjs) as byte 29 and a 32 bit integer, a number of a DICT, which is callgsubr in a charstring; ' +
-                'parseCFFCharstring then assigns another width to glyph.advanceWidth, over the advance of hmtx';
-            const wideGlyphWriterReason = 'glyphToOps (src/tables/cff.mjs): writes a charstring width above 32767 with ' +
-                'encode.NUMBER (src/types.mjs) as byte 29 and a 32 bit integer, a number of a DICT, which is callgsubr in a ' +
-                'charstring, so the written charstring is invalid (a charstring number is below 32768, such a width needs a ' +
-                'nominalWidthX, which the writer leaves at 0)';
             let writtenFonts;
 
             beforeEach(function() {
@@ -304,20 +299,21 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
                 }
             });
 
-            itFailsUntilFixed('keeps the advance of the glyph wider than 32767 units after getBoundingBox (rs of Vibur.woff)', wideGlyphReason, function() {
+            it('keeps the advance of the glyph wider than 32767 units after getBoundingBox (rs of Vibur.woff)', function() {
                 const glyph = writtenFonts.get(viburFixture).glyphs.get(wideGlyph.index);
-                // the unknown operators that the reading logs are the known failure below
-                getConsoleLogMessages(() => glyph.getBoundingBox());
+                glyph.getBoundingBox();
                 assert.strictEqual(glyph.advanceWidth, wideGlyph.advanceWidth);
             });
 
             // The writer alone, whatever parseCFFCharstring does with the width: a valid charstring is
-            // read without an unknown operator. The font written from Vibur.woff, saved and read with
-            // fontTools (charStrings[name].draw(NullPen()) for every glyph), has one charstring that
-            // cannot be drawn, rs, whose bytecode starts with 1d 00 00 fa 01 (IndexError: list index
-            // out of range). Today parseCFFCharstring logs 'Glyph 241: unknown operator 0' twice,
-            // for the two first bytes of the 32 bit integer.
-            itFailsUntilFixed('writes charstrings that are read without an unknown operator (rs of Vibur.woff, wider than 32767 units)', wideGlyphWriterReason, function() {
+            // read without an unknown operator. The writer of the fonto branch wrote the width of rs,
+            // 64001, with the number encoding of a DICT, byte 29 and a 32 bit integer (1d 00 00 fa 01),
+            // which is callgsubr in a charstring: fontTools could not draw it (IndexError: list index
+            // out of range) and parseCFFCharstring logged 'Glyph 241: unknown operator 0' twice, for
+            // the two first bytes of the integer. The font written now, saved and read with fontTools
+            // (charStrings[name].draw(NullPen()) for every glyph), draws every charstring, and the
+            // width of each one is its hmtx advance (Private DICT: {'nominalWidthX': 31234}).
+            it('writes charstrings that are read without an unknown operator (rs of Vibur.woff, wider than 32767 units)', function() {
                 const writtenFont = writtenFonts.get(viburFixture);
                 const messages = getConsoleLogMessages(() => {
                     for (const glyph of getAllGlyphs(writtenFont)) {
@@ -375,11 +371,9 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
     });
 
     // The family of the font of #397, not its bug: a CID-keyed font has the Private DICTs of its
-    // Font DICTs and its advances are right with the 1.3.3 build too. As long as the width of the
-    // charstring is assigned to glyph.advanceWidth, the advances after an outline is read guard
-    // its decoding per Font DICT. Once the assignment is fixed (the known failures below) they
-    // only say that the hmtx advances are kept: the first test is then to be retitled, nothing
-    // public gives the width of a charstring any more.
+    // Font DICTs and its advances are right with the 1.3.3 build too. Nothing public gives the
+    // width of a charstring any more: the advances after an outline is read say that the hmtx
+    // advances are kept, with the widths of the Private DICT of each Font DICT parsed.
     describe('CID-keyed CFF, a subset of Source Han Sans KR (the font of #397)', function() {
         let fontsPerOutlineReader;
         let fontsPerLoadMode;
@@ -389,7 +383,7 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
             fontsPerLoadMode = loadFontPerLoadMode(cidKeyedFixture);
         });
 
-        it('decodes the width of every glyph with the nominalWidthX and defaultWidthX of its Font DICT (also in lowMemory mode)', function() {
+        it('parses the nominalWidthX and defaultWidthX of every Font DICT and keeps the hmtx advance of every glyph after getBoundingBox, getPath and path (also in lowMemory mode)', function() {
             // nominalWidthX and defaultWidthX of the 10 Font DICTs, and the Font DICT of each glyph:
             // python -c "from fontTools.ttLib import TTFont; top = TTFont('TestCFF1-CIDKeyed-subset.otf')['CFF '].cff.topDictIndex[0]; print([(fontDict.Private.nominalWidthX, fontDict.Private.defaultWidthX) for fontDict in top.FDArray], [top.FDSelect[index] for index in range(22)])"
             // [(0, 1000), (707, 1000), (107, 1000), (0, 1000), (0, 500), (0, 500), (107, 920), (0, 1000), (617, 742), (386, 279)] [3, 8, 8, 8, 8, 2, 2, 2, 2, 1, 1, 7, 6, 0, 0, 0, 4, 9, 5, 5, 5, 5]
@@ -397,7 +391,7 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
             const fontDictIndexes = [3, 8, 8, 8, 8, 2, 2, 2, 2, 1, 1, 7, 6, 0, 0, 0, 4, 9, 5, 5, 5, 5];
             for (const { name, font } of fontsPerLoadMode) {
                 const topDict = font.tables.cff.topDict;
-                assert.deepStrictEqual(topDict._fdArray.map(fontDict => [fontDict._nominalWidthX, fontDict._defaultWidthX]), fontDictWidths, name);
+                assert.deepStrictEqual(topDict._fdArray.map(fontDict => [fontDict._privateDict.nominalWidthX, fontDict._privateDict.defaultWidthX]), fontDictWidths, name);
                 assert.deepStrictEqual(Array.from(topDict._fdSelect), fontDictIndexes, name);
             }
             // the hmtx advances of TestCFF1-CIDKeyed-subset.otf, equal to the widths of its charstrings
@@ -438,8 +432,6 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
         // (the widths of its charstrings: [500, 250, 749, 680, 300, 813, 0])
         const hmtxAdvanceWidths = [500, 250, 600, 720, 300, 813, 0];
         const text = 'AVIH A';
-        const reason = 'parseCFFCharstring (src/tables/cff.mjs): assigns the width of the charstring to glyph.advanceWidth, ' +
-            'over the advance of hmtx';
         let font;
 
         beforeEach(function() {
@@ -457,9 +449,9 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
             assert.strictEqual(font.getAdvanceWidth(text, font.unitsPerEm), 3283);
         });
 
-        itKeepsHmtxAdvanceWidthsUntilFixed(widthMismatchFixture, hmtxAdvanceWidths, reason);
+        itKeepsHmtxAdvanceWidths(widthMismatchFixture, hmtxAdvanceWidths);
 
-        itFailsUntilFixed('keeps the pen positions of hmtx when a text is drawn', reason, function() {
+        it('keeps the pen positions of hmtx when a text is drawn', function() {
             const drawnText = drawText(font, text);
             // the pen positions of the hb-shape advances above
             assert.deepStrictEqual(drawnText, {
@@ -468,10 +460,9 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
             });
         });
 
+        // fontToSfntTable (src/tables/sfnt.mjs) reads the outlines (glyph.getMetrics) before it
+        // writes hmtx: the advances it writes are the ones of the glyphs once their outlines are read
         describe('written with toArrayBuffer and parsed again', function() {
-            const writerReason = 'fontToSfntTable (src/tables/sfnt.mjs): reads the outlines (glyph.getMetrics) before it writes hmtx, ' +
-                'when parseCFFCharstring (src/tables/cff.mjs) has replaced the hmtx advances with the widths of the charstrings, ' +
-                'so the hmtx table and the charstrings of the written font have those widths';
             let advanceWidths;
 
             beforeEach(function() {
@@ -479,9 +470,9 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
                 advanceWidths = getAdvanceWidthsAroundOutlines(writtenFont, getAllGlyphs(writtenFont), outlineReaders.getBoundingBox);
             });
 
-            itFailsUntilFixed('keeps the hmtx advance of every glyph', writerReason, function() {
+            it('keeps the hmtx advance of every glyph', function() {
                 // the hmtx advances of the source above: a font that is read and written keeps its hmtx table
-                // (today the hmtx advances of the written font are [500, 250, 749, 680, 300, 813, 0])
+                // (the fonto branch wrote the widths of the charstrings, [500, 250, 749, 680, 300, 813, 0])
                 assert.deepStrictEqual(advanceWidths, {
                     before: hmtxAdvanceWidths,
                     after: hmtxAdvanceWidths
@@ -503,8 +494,6 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
         // and a variation device (the format 2 subtable of V has V V too, 0 without a device: the
         // format 1 subtable comes first in the lookup); A A has +10 and a variation device
         const zeroDefaultPairsText = 'VVooAA';
-        const reason = 'parseCFFCharstring (src/tables/cff.mjs): its parseStems sets haveWidth although a CFF2 charstring ' +
-            'has no width, and the default width, 0, is assigned to glyph.advanceWidth, over the advance of hmtx';
 
         const instances = [
             {
@@ -627,7 +616,7 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
                     font = loadFont(hintedVariableFixture, instance.variation);
                 });
 
-                itFailsUntilFixed('keeps the pen positions and the advances of a text once it is drawn', reason, function() {
+                it('keeps the pen positions and the advances of a text once it is drawn', function() {
                     const drawnText = drawText(font, text);
                     const advancesOnceDrawn = shapeText(font, text).advances;
                     assert.deepStrictEqual({ ...drawnText, advancesOnceDrawn }, {
@@ -641,7 +630,7 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
 
         // the hmtx advances of TestCFF2-HintedVariable-subset.otf (.notdef, space, A, V, o)
         // [640, 233, 664, 674, 549]
-        itKeepsHmtxAdvanceWidthsUntilFixed(hintedVariableFixture, [640, 233, 664, 674, 549], reason);
+        itKeepsHmtxAdvanceWidths(hintedVariableFixture, [640, 233, 664, 674, 549]);
 
         describe('glyph without hint operators', function() {
             let font;
