@@ -1,6 +1,7 @@
 // Parsing utility functions
 
 import check from './check.mjs';
+import { getGlyphVariationPointCount, getTuplePointNumbers } from './util.mjs';
 
 // Retrieve an unsigned byte from the DataView.
 function getByte(dataView, offset) {
@@ -1041,15 +1042,10 @@ Parser.prototype.parseTupleVariationStore = function(tableOffset, axisCount, fla
                 if(flavor === 'gvar') {
                     // if the tuple had private points flag, use that list length (even if empty = all points).
                     // if no flag, fall back to shared points length.
-                    pointsCount = header.privatePoints ? header.privatePoints.length : sharedPoints.length;
+                    pointsCount = getTuplePointNumbers(header, sharedPoints).length;
                     if(!pointsCount) {
-                        const glyph = glyphs.get(glyphIndex);
-                        // make sure the path is available
-                        glyph.path;
-                        // composite glyphs have one gvar point per component (offset deltas),
-                        // not per resolved outline point; empty glyphs (eg. space) have no
-                        // points but still have phantom points
-                        pointsCount = glyph.isComposite ? glyph.components.length : (glyph.points ? glyph.points.length : 0);
+                        // empty glyphs (eg. space) have no points but still have phantom points
+                        pointsCount = getGlyphVariationPointCount(glyphs.get(glyphIndex));
                         // add 4 phantom points, see https://learn.microsoft.com/en-us/typography/opentype/spec/tt_instructing_glyphs#phantoms
                         // @TODO: actually generate these points from glyph.getBoundingBox() and glyph.getMetrics(),
                         // as they may be influenced by variation as well

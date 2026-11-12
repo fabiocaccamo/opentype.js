@@ -6,6 +6,11 @@
  * Conventions of the specs of this folder:
  * - References: HarfBuzz for glyphs, clusters and advances (hb-shape 11.3.2), fontTools
  *   for the outlines and the metrics of variable fonts (varLib.instancer) and for the tables.
+ *   The exception: the fork normalizes the coordinates with the OpenType algorithm in 16.16,
+ *   varLib.instancer in floats rounded once to F2Dot14, so where the two locations differ by
+ *   1/16384 the outlines come from HarfBuzz (hb-subset --variations) or the spec. HarfBuzz
+ *   normalizes in 16.16 too, from the user value read as a 32-bit float: the user values of
+ *   these specs give the same location in the fork and in HarfBuzz.
  * - Each expected value comes with the command that produced it, run from
  *   test/fonts/regression/, one command and its output per value:
  *     // hb-shape --no-glyph-names --cluster-level=1 <fixture> -u 0041,0056

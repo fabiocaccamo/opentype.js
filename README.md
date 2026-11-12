@@ -396,14 +396,26 @@ Gets the current variation settings from the font's default render options.
 ###### `Font.variation.getMetricAdjustment(tag, coords)`
 Just a shortcut for [`Font.variation.process.getMetricAdjustment()`](#fontvariationprocessgetmetricadjustmenttag-coords).
 
+###### `Font.variation.getAdvanceWidth(glyph, coords)`
+Returns the advance width of a glyph at the given variation coordinates, without modifying the glyph: from the `HVAR` table when the font has one, otherwise from the `gvar` phantom points.
+* `glyph`: Glyph or index of glyph.
+* `coords`: Variation coords object (or the variation coords in the font's `defaultRenderOptions` by default)
+* Returns: Advance width in font units.
+
+###### `Font.variation.getLeftSideBearing(glyph, coords)`
+Returns the left side bearing of a glyph at the given variation coordinates, without modifying the glyph: from the LSB map of the `HVAR` table when it has one, otherwise in a `gvar` font from the varied outline and the varied left phantom point, otherwise the one of `hmtx`.
+* `glyph`: Glyph or index of glyph.
+* `coords`: Variation coords object (or the variation coords in the font's `defaultRenderOptions` by default)
+* Returns: Left side bearing in font units.
+
 
 ##### The `Font.variation.process` object (`VariationProcessor`)
 The `VariationProcessor` is a component of the `VariationManager`, used mainly internally for computing and applying variations to the glyphs in a variable font. It handles transformations and adjustments based on the font's variable axes and instances.
 
 ###### `Font.variation.process.getNormalizedCoords(coords)`
-Returns normalized coordinates for the variation axes based on the current settings.
+Returns normalized coordinates for the variation axes based on the current settings, with the precision and rounding requirements of the OpenType normalization (steps 1 to 5, on the user value as given): each value is converted to 16.16, clamped to the range of its axis (a value out of the range gives the coordinate of the minimum or of the maximum), normalized to -1..0..1 in 16.16, mapped through the `avar` table in 16.16 and converted once to F2Dot14 (add 2, shift right by 2). A missing axis gets its default value. Like HarfBuzz, the `avar` result is not clamped to -1..1 and a segment map lacking its -1, 0 or 1 entry is applied all the same (the specification clamps, and leaves such an axis unmapped), so only a malformed map gives a value out of -1..1. HarfBuzz also normalizes in 16.16 and converts once to F2Dot14, but it reads the user value as a 32-bit float, so at some user values the two differ by 1/16384 (for example a `wght` of 650.316615 on 100..400..900 gives 8203/16384 here and 8202/16384 in HarfBuzz).
 * `coords`: The coordinates object to normalize (or the variation coords in the font's `defaultRenderOptions` by default)
-* Returns: Normalized coordinates as an object mapping axis tags to normalized values.
+* Returns: Array of the normalized coordinates, in the order of the axes of the `fvar` table.
 
 ###### `Font.variation.process.interpolatePoints(points, deltas, scalar)`
 Interpolates points based on provided deltas and a scalar value.
@@ -432,7 +444,7 @@ Transforms components of a glyph using a specified transformation matrix.
 * Returns: Transformed components.
 
 ###### `Font.variation.process.getTransform(glyph, coords)`
-Retrieves a transformed copy of a glyph based on the provided variation coordinates, or the glyph itself if no variation was applied
+Retrieves a transformed copy of a glyph based on the provided variation coordinates: its varied outline (the deltas of all the active `gvar` tuples added up and rounded once) and, in a font with `HVAR` or `gvar`, its varied `advanceWidth` and `leftSideBearing`, also for a glyph without points. Returns the glyph itself when the font varies neither its outline nor its metrics.
 * `glyph`: Glyph or index of glyph to transform.
 * `coords`: Variation coords object (or the variation coords in the font's `defaultRenderOptions` by default)
 * Returns: `opentype.Glyph`

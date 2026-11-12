@@ -120,6 +120,11 @@ TestHVARTwo.ttf
     SIL Open Font License
     http://scripts.sil.org/OFL
 
+TestHVARLsbMap.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-hvar-lsb-map-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 TestRVRN-CFF2.otf
     © 2020 Unicode, Inc.
     SIL Open Font License, Version 1.1
@@ -130,7 +135,12 @@ TestSVGmultiGlyphs.otf
     Copyright (c) 2019 by Unicode, Inc.
     SIL Open Font License, Version 1.1
     https://opensource.org/licenses/OFL-1.1
-    
+
+TestVariationPrecision.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-variation-precision-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 Vibur.woff
     Copyright (c) 2010, Johan Kallas (johan.kallas@gmail.com).
     SIL Open Font License, Version 1.1

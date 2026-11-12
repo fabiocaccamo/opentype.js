@@ -492,9 +492,8 @@ FeatureQuery.prototype.getFeatureVariationSubstitutions = function () {
     const substitutions = new Map();
     const featureVariations = this.font.tables.gsub && this.font.tables.gsub.variations;
     if (!featureVariations || !featureVariations.length || !this.font.variation) return substitutions;
-    // normalized coordinates, rounded to the F2DOT14 precision of the condition values
-    const coordinates = this.font.variation.process.getNormalizedCoords()
-        .map(coordinate => Math.round(coordinate * 16384) / 16384);
+    // normalized coordinates, in the F2DOT14 precision of the condition values
+    const coordinates = this.font.variation.process.getNormalizedCoords();
     for (let i = 0; i < featureVariations.length; i++) {
         const record = featureVariations[i];
         const conditionsMet = (record.conditions || []).every(condition => {

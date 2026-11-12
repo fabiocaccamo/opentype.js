@@ -263,8 +263,8 @@ describe('tables/gvar.mjs', function() {
     it('interpolates untouched points (IUP) from the default outline when multiple tuples are active', function() {
         const font = loadSync('./test/fonts/Zycon.ttf');
         const coords = { 'T1  ': 1, 'T2  ': 1, 'T3  ': 1, 'T4  ': 1, 'M1  ': 1, 'M2  ': 1 };
-        // expected points from fontTools.varLib.instancer at the same location;
-        // the tolerance covers the per-tuple rounding of opentype.js
+        // expected points from fontTools.varLib.instancer at the same location, not rounded:
+        // the varied points are within half a unit of them
         const expectedPoints = [
             [1038, 1786], [-727.06, 1318], [985, -900], [1859, 965], [1485, 2674.06], [-806, 1095],
             [1038, 144], [2731.06, 595], [1097, 2810], [217, 965], [595, -727.06], [2842, 815]
@@ -272,8 +272,8 @@ describe('tables/gvar.mjs', function() {
         const points = font.variation.process.getTransform(font.glyphs.get(16), coords).points;
         assert.equal(points.length, expectedPoints.length);
         expectedPoints.forEach(([x, y], index) => {
-            assert.ok(Math.abs(points[index].x - x) <= 2, `point ${index} x: ${points[index].x} != ${x}`);
-            assert.ok(Math.abs(points[index].y - y) <= 2, `point ${index} y: ${points[index].y} != ${y}`);
+            assert.ok(Math.abs(points[index].x - x) <= 0.5, `point ${index} x: ${points[index].x} != ${x}`);
+            assert.ok(Math.abs(points[index].y - y) <= 0.5, `point ${index} y: ${points[index].y} != ${y}`);
         });
     });
 
@@ -296,10 +296,11 @@ describe('tables/gvar.mjs', function() {
         assert.equal(glyph.isComposite, true);
         const points = font.variation.getTransform(glyph, { opsz: 32, wght: 900 }).points;
         assert.equal(points.length, expectedPoints.length);
-        // the tolerance covers the per-tuple rounding of opentype.js
+        // the expected points are not rounded: the deltas of all the tuples are rounded once,
+        // in the points of the components and in their offsets, half a unit at most each
         expectedPoints.forEach(([x, y], index) => {
-            assert.ok(Math.abs(points[index].x - x) <= 2, `point ${index} x: ${points[index].x} != ${x}`);
-            assert.ok(Math.abs(points[index].y - y) <= 2, `point ${index} y: ${points[index].y} != ${y}`);
+            assert.ok(Math.abs(points[index].x - x) <= 1, `point ${index} x: ${points[index].x} != ${x}`);
+            assert.ok(Math.abs(points[index].y - y) <= 1, `point ${index} y: ${points[index].y} != ${y}`);
         });
     });
 });

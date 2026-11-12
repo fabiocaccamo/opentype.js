@@ -297,20 +297,16 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
             assert.strictEqual(extraBoldFont.getKerningValue(1, 5), -120);
         });
 
-        itFailsUntilFixed(
-            'kerns V g by -15 at wght 450, where the F2Dot14 rounding of the coordinate mapped by avar decides the value',
-            'getNormalizedCoords (src/variationprocessor.mjs): does not round the coordinate mapped by avar to F2Dot14 ' +
-            '(0.144989 instead of 2376/16384 = 0.145020): V g, a class record of 0 with a delta of -100, is -14.4989, ' +
-            'rounded to -14',
-            function() {
-                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=450 EBGaramond-VF-kern-subset.ttf -u 0056,0067
-                // [5=0+663|7=1+446]
-                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=450 --features=-kern EBGaramond-VF-kern-subset.ttf -u 0056,0067
-                // [5=0+678|7=1+446]
-                const kerning = font.getKerningValue(5, 7, { wght: 450 });
-                assert.strictEqual(kerning, -15);
-            }
-        );
+        // The coordinate mapped by avar is 2376/16384 = 0.145020 in F2Dot14, 0.144989 unrounded: V g, a
+        // class record of 0 with a delta of -100, is -14.502 there, -14.4989 (rounded to -14) unrounded.
+        it('kerns V g by -15 at wght 450, where the F2Dot14 rounding of the coordinate mapped by avar decides the value', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=450 EBGaramond-VF-kern-subset.ttf -u 0056,0067
+            // [5=0+663|7=1+446]
+            // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=450 --features=-kern EBGaramond-VF-kern-subset.ttf -u 0056,0067
+            // [5=0+678|7=1+446]
+            const kerning = font.getKerningValue(5, 7, { wght: 450 });
+            assert.strictEqual(kerning, -15);
+        });
 
         it('still reads the plain pair adjustment lookup, with its deltas: period and comma before a.01, a glyph without code point', function() {
             // a.01 (glyph 12) is not in the cmap and the fixture has no substitution: the reference is a copy of the
@@ -351,24 +347,20 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
             }
         });
 
-        itFailsUntilFixed(
-            'kerns o T by 0 at the default instance, not by a negative zero',
-            'VariationProcessor.getNormalizedCoords and VariationProcessor.getBlendVector (src/variationprocessor.mjs): ' +
-            'both add Number.EPSILON, so at the default instance the normalized coordinate and the scalar of a region ' +
-            'are not 0 and the delta is a tiny negative number, that Position.getValueRecordXAdvance (src/position.mjs) ' +
-            'rounds to -0',
-            function() {
-                // hb-shape --no-glyph-names --cluster-level=1 EBGaramond-VF-kern-subset.ttf -u 006F,0054
-                // [9=0+495|4=1+670]
-                // hb-shape --no-glyph-names --cluster-level=1 --features=-kern EBGaramond-VF-kern-subset.ttf -u 006F,0054
-                // [9=0+495|4=1+670]
-                // The record of o T is 0 with a delta of -105 at wght 800. strictEqual tells 0 and -0 apart.
-                // A getKerningValue that adds the values of the kern lookups to 0 returns 0 too (0 + -0 is 0):
-                // this test then passes with the cause above still there.
-                const kerning = font.getKerningValue(9, 4);
-                assert.strictEqual(kerning, 0);
-            }
-        );
+        // With Number.EPSILON added to the normalized coordinate and to the scalar of a region, the delta
+        // at the default instance is a tiny negative number, that Position.getValueRecordXAdvance
+        // (src/position.mjs) rounds to -0.
+        it('kerns o T by 0 at the default instance, not by a negative zero', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 EBGaramond-VF-kern-subset.ttf -u 006F,0054
+            // [9=0+495|4=1+670]
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern EBGaramond-VF-kern-subset.ttf -u 006F,0054
+            // [9=0+495|4=1+670]
+            // The record of o T is 0 with a delta of -105 at wght 800. strictEqual tells 0 and -0 apart.
+            // A getKerningValue that adds the values of the kern lookups to 0 returns 0 too (0 + -0 is 0):
+            // this test then passes whatever the delta.
+            const kerning = font.getKerningValue(9, 4);
+            assert.strictEqual(kerning, 0);
+        });
 
         describe('pairs after period and comma, the glyphs that both kern lookups cover', function() {
             it('kerns P period and V comma, whose left glyph only the extension lookup covers, and maps the texts of the known failures below', function() {

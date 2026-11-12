@@ -312,15 +312,11 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         // [1=0+803]
         // fontTools: varLib.instancer.instantiateVariableFont(TTFont('Roboto-VF-gsub-chaining-subset.ttf'),
         // {'wght': 400, 'wdth': 87.5})['hmtx']['slash'] is (803, 26)
-        itFailsUntilFixed(
-            'rounds the advance of the slash at wdth=87.5 (an HVAR delta of exactly -42.5) like HarfBuzz',
-            'getNormalizedCoords (src/variationprocessor.mjs): adds Number.EPSILON in the avar mapping, the default wght ' +
-            'is normalized to 1.1e-15 instead of 0 and a region of wght gets a scalar: the HVAR delta is ' +
-            '-42.50000000000016 instead of -42.5 and the advance 802',
-            function() {
-                assert.deepStrictEqual(shapeText(halfNarrowFont, '/').advances, [803]);
-            }
-        );
+        // With Number.EPSILON in the avar mapping the default wght is normalized to 1.1e-15 instead of
+        // 0 and a region of wght gets a scalar: the HVAR delta is -42.50000000000016 and the advance 802.
+        it('rounds the advance of the slash at wdth=87.5 (an HVAR delta of exactly -42.5) like HarfBuzz', function() {
+            assert.deepStrictEqual(shapeText(halfNarrowFont, '/').advances, [803]);
+        });
 
         // hb-shape --no-glyph-names --cluster-level=1 --language=tr Roboto-VF-gsub-chaining-subset.ttf -u 0061,0066,0066,0069,006E,0069,0074,0079
         // [4=0+1114|5=1+712|5=2+712|6=3+498|8=4+1131|6=5+498|9=6+670|10=7+969]
