@@ -1,6 +1,8 @@
 import assert from 'assert';
 import { readFileSync } from 'fs';
 import { Font, Glyph, Path, parse } from '../src/opentype.mjs';
+import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
+import { itFailsUntilFixed } from './regression/helpers.mjs';
 
 // a pair adjustment subtable (format 1) kerning leftGlyph + rightGlyph by xAdvance
 function pairPosSubtable(leftGlyph, rightGlyph, xAdvance) {
@@ -126,7 +128,10 @@ describe('position.mjs', function() {
                 extensionLookup([{ lookupType: 2, extension: pairPosSubtable(1, 2, -100) }])
             ], [0]);
             // the font has no cmap: map the text to the kerned glyphs directly
-            font.stringToGlyphClusters = () => [{ glyph: font.glyphs.get(1), start: 0, end: 1 }, { glyph: font.glyphs.get(2), start: 1, end: 2 }];
+            font._stringToDirectionalGlyphClusters = () => [
+                { glyph: font.glyphs.get(1), start: 0, end: 1, rightToLeft: false },
+                { glyph: font.glyphs.get(2), start: 1, end: 2, rightToLeft: false }
+            ];
             assert.equal(font.getAdvanceWidth('AB', 1000), 900);
             assert.equal(font.getAdvanceWidth('AB', 1000, { kerning: false }), 1000);
         });
@@ -235,7 +240,10 @@ describe('position.mjs', function() {
             assert.equal(font.position.getKerningValue(font.position.getKerningTables('cyrl'), 1, 2), -10);
             font.kerningPairs = { '1,2': -50 };
             assert.equal(font.position.getKerningValue(font.position.getKerningTables('hebr'), 1, 2), -50);
-            font.stringToGlyphClusters = () => [{ glyph: font.glyphs.get(1), start: 0, end: 1 }, { glyph: font.glyphs.get(2), start: 1, end: 2 }];
+            font._stringToDirectionalGlyphClusters = () => [
+                { glyph: font.glyphs.get(1), start: 0, end: 1, rightToLeft: false },
+                { glyph: font.glyphs.get(2), start: 1, end: 2, rightToLeft: false }
+            ];
             assert.equal(font.getAdvanceWidth('אא', font.unitsPerEm, { script: 'hebr' }), 1000 - 50);
             const hebrewFont = createFontWithScripts(['DFLT', 'hebr', 'latn']);
             assert.equal(hebrewFont.position.getKerningValue(hebrewFont.position.getKerningTables('hebr'), 1, 2), -20);
@@ -329,6 +337,97 @@ describe('position.mjs', function() {
             font.kerningPairs = { '1,2': -50 };
             assert.equal(font.position.getKerningValue([], 1, 2), 0);
             assert.equal(font.position.getKerningValue(undefined, 1, 2), -50);
+        });
+
+        it('applies no variation delta when the layout ignores the GDEF table, whose item variation store has the deltas', function() {
+            // HarfBuzz replaces a blocklisted GDEF table with an empty one (GDEF::accelerator_t), so the device
+            // tables of GPOS have no variation store: the value at the default location, wght 200 of Changa
+            // hb-shape --no-glyph-names --cluster-level=1 Changa-VariableFont_wght.ttf -u 41,56: [1=0+503|113=1+486],
+            // with --features=-kern [1=0+520|113=1+486]; with --variations=wght=800 the font.spec reference is -30
+            const variableFont = parse(readFileSync('./test/fonts/Changa-VariableFont_wght.ttf'));
+            const kerningTables = variableFont.position.getKerningTables('latn');
+            const left = variableFont.charToGlyphIndex('A');
+            const right = variableFont.charToGlyphIndex('V');
+            variableFont.isGdefIgnoredByLayout = true;
+            assert.equal(variableFont.position.getKerningValue(kerningTables, left, right, { wght: 800 }), 503 - 520);
+        });
+    });
+
+    // the font of test/lookup-flags-font.mjs with the pairs of a, b and acute of its kern feature (feaLib):
+    //   lookup KERN_IGNORE_MARKS { lookupflag IgnoreMarks; pos a b -50; pos a acute -40; pos acute b -30; } KERN_IGNORE_MARKS;
+    //   lookup KERN_NO_FLAG { pos a acute -20; } KERN_NO_FLAG;
+    // hb-shape --no-glyph-names --cluster-level=1 LookupFlags.ttf -u <code points>
+    describe('the lookupFlag of the kern lookups', function() {
+        const { a: glyphA, b: glyphB, c: glyphC, acute, dotbelow } = glyphIndexes;
+        let font;
+        let kerningLookups;
+
+        beforeEach(function() {
+            const lookups = [
+                {
+                    lookupType: 2,
+                    lookupFlag: 0x0008,
+                    subtables: [pairPosSubtable(glyphA, glyphB, -50), pairPosSubtable(glyphA, acute, -40), pairPosSubtable(acute, glyphB, -30)]
+                },
+                pairPosLookup([pairPosSubtable(glyphA, acute, -20)])
+            ];
+            font = createLookupFlagsFont({ gpos: createLayoutTable('latn', 'kern', [0, 1], lookups) });
+            kerningLookups = font.position.getKerningTables('latn');
+        });
+
+        it('kerns a glyph with the next glyph that each lookup does not ignore, across the marks', function() {
+            // -u 0061,0301,0062: [1=0+430|5=1+0|2=2+500], the -50 of a b across the mark and the -20 of a acute
+            assert.equal(font.position.getGlyphRunKerningValue(kerningLookups, [glyphA, acute, glyphB], 0), -70);
+            assert.equal(font.position.getGlyphRunKerningValue(kerningLookups, [glyphA, acute, dotbelow, glyphB], 0), -70);
+            // -u 0061,0301,0062: [1=0+430|5=1+0|2=2+500], no lookup applies at a mark it ignores: not the acute b -30
+            assert.equal(font.position.getGlyphRunKerningValue(kerningLookups, [glyphA, acute, glyphB], 1), 0);
+            // the last glyph of the run, and a glyph followed by ignored glyphs only
+            assert.equal(font.position.getGlyphRunKerningValue(kerningLookups, [glyphA, acute, glyphB], 2), 0);
+            assert.equal(font.position.getGlyphRunKerningValue(kerningLookups, [glyphB, glyphA, acute], 1), -20);
+            assert.equal(font.position.getGlyphRunKerningValue(kerningLookups, [glyphA, glyphC, glyphB], 0), 0);
+        });
+
+        it('adds nothing for a lookup that ignores one of the two glyphs of a pair', function() {
+            // -u 0061,0301: [1=0+480|5=1+0], the a acute of the lookup without a flag only
+            assert.equal(font.position.getKerningValue(kerningLookups, glyphA, acute), -20);
+            // -u 0061,0062: [1=0+450|2=1+500]
+            assert.equal(font.position.getKerningValue(kerningLookups, glyphA, glyphB), -50);
+            // -u 0301,0062: [5=0+0|2=1+500], not the acute b -30 of the lookup with IgnoreMarks
+            assert.equal(font.position.getKerningValue(kerningLookups, acute, glyphB), 0);
+        });
+
+        it('reads the lookupFlag of an extension kern lookup, not of its subtables', function() {
+            // LookupFlagsExtension.ttf: KERN_IGNORE_MARKS in an extension lookup
+            // hb-shape --no-glyph-names --cluster-level=1 LookupFlagsExtension.ttf -u 0061,0301,0062: [1=0+430|5=1+0|2=2+500]
+            const pairSubtables = [pairPosSubtable(glyphA, glyphB, -50), pairPosSubtable(glyphA, acute, -40), pairPosSubtable(acute, glyphB, -30)];
+            const lookups = [
+                { ...extensionLookup(pairSubtables.map(extension => ({ lookupType: 2, extension }))), lookupFlag: 0x0008 },
+                pairPosLookup([pairPosSubtable(glyphA, acute, -20)])
+            ];
+            const extensionFont = createLookupFlagsFont({ gpos: createLayoutTable('latn', 'kern', [0, 1], lookups) });
+            const extensionKerningLookups = extensionFont.position.getKerningTables('latn');
+            assert.equal(extensionFont.position.getGlyphRunKerningValue(extensionKerningLookups, [glyphA, acute, glyphB], 0), -70);
+        });
+
+        describe('the kern table', function() {
+            // the kern table of the reference font LookupFlagsKernTable.ttf (no GPOS table, a kern table of format 0
+            // with the pairs a acute -15 and a b -60), here the kerningPairs of the font read with kerningLookups undefined
+            // hb-shape --no-glyph-names --cluster-level=1 LookupFlagsKernTable.ttf -u <code points>
+            beforeEach(function() {
+                font.kerningPairs = { [`${glyphA},${acute}`]: -15, [`${glyphA},${glyphB}`]: -60 };
+            });
+
+            it('gives no kerning to the last glyph of the run', function() {
+                assert.equal(font.position.getGlyphRunKerningValue(undefined, [glyphA, acute, glyphB], 2), 0);
+            });
+
+            itFailsUntilFixed('kerns a glyph with the next glyph that is not a mark, like HarfBuzz',
+                'getGlyphRunKerningValue (src/position.mjs): kerns the glyph with the glyph right after it in the kern table, ' +
+                'HarfBuzz skips the marks of GDEF (hb_kern_machine_t, IgnoreMarks): a acute b gives the -15 of a acute',
+                function() {
+                    // -u 0061,0301,0062: [1=0+470|5=1@-470,562+0|2=2@-30,0+470], the -60 of a b split between the two glyphs
+                    assert.equal(font.position.getGlyphRunKerningValue(undefined, [glyphA, acute, glyphB], 0), -60);
+                });
         });
     });
 });

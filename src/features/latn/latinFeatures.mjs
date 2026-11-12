@@ -7,6 +7,7 @@
 import { ContextParams } from '../../tokenizer.mjs';
 import applySubstitution from '../applySubstitution.mjs';
 import { isArabicChar, isThaiChar } from '../../char.mjs';
+import { getFirstGlyphIndex } from '../../layout.mjs';
 
 /**
  * Check if a character belongs to the runs the latin features apply to
@@ -102,7 +103,7 @@ function applyLookup(lookupTable, tag, runTokens) {
     // a glyph no subtable covers cannot start a substitution: skip it without building its context
     const isCovered = value => {
         if (!coverages) return true;
-        const glyphIndex = Array.isArray(value) ? value[0] : value;
+        const glyphIndex = getFirstGlyphIndex(value);
         return coverages.some(coverage => layout.getCoverageIndex(coverage, glyphIndex) >= 0);
     };
     let activeTokens = runTokens.filter(token => !token.state.deleted);

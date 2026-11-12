@@ -143,6 +143,8 @@ function Font(options) {
     this.substitution = new Substitution(this);
     // the pairs of the kern table, set by parse
     this.kerningPairs = {};
+    // whether the layout ignores the GDEF table, one of the broken GDEF tables HarfBuzz ignores, set by parse
+    this.isGdefIgnoredByLayout = false;
     this.tables = this.tables || {};
 
     this.tables = new Proxy(this.tables, {
@@ -283,12 +285,26 @@ Font.prototype._createBidi = function(options) {
  * [start, end) of their characters in the text (text.slice(start, end) are the characters of the glyph)
  */
 Font.prototype.stringToGlyphClusters = function(s, options) {
-    const clusters = this._createBidi(options).getTextGlyphClusters(s);
+    return this._stringToDirectionalGlyphClusters(s, options).map(({ glyph, start, end }) => ({ glyph, start, end }));
+};
+
+/**
+ * Convert the given text to a list of glyph clusters (see stringToGlyphClusters), each one with the direction of
+ * its run.
+ * @param  {string} text
+ * @param  {GlyphRenderOptions} [options]
+ * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean}>} the glyphs in visual
+ * order, rightToLeft for the glyphs of a right-to-left run
+ * @private
+ */
+Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
+    const clusters = this._createBidi(options).getTextGlyphClusters(text);
     const notdef = this.glyphs.get(0);
     return clusters.map(cluster => ({
         glyph: this.glyphs.get(cluster.index) || notdef,
         start: cluster.start,
-        end: cluster.end
+        end: cluster.end,
+        rightToLeft: cluster.rightToLeft
     }));
 };
 
@@ -367,6 +383,8 @@ Font.prototype.glyphIndexToName = function(gid) {
  * the order of the text. For another script or language, use
  * font.position.getKerningValue(font.position.getKerningTables(script, language), leftIndex, rightIndex),
  * or lay out the text (getAdvanceWidth, forEachGlyph), which takes the script of the text.
+ * A GPOS lookup whose lookupFlag ignores one of the two glyphs (e.g. a mark with IgnoreMarks) adds nothing:
+ * the text layout, or font.position.getGlyphRunKerningValue, kerns the glyphs across the ignored ones.
  * The kern table is used when the GPOS table has no kern feature for that script, like HarfBuzz.
  * @param  {opentype.Glyph|number} leftGlyph
  * @param  {opentype.Glyph|number} rightGlyph
@@ -468,14 +486,48 @@ function getGlyphKerningScript(glyph) {
 }
 
 /**
- * Two adjacent glyph clusters in the order of the text, the order of the kerning pairs of HarfBuzz:
- * stringToGlyphClusters gives a right-to-left run in visual order, so its right cluster comes first.
- * @param  {{start: number}} leftCluster - the cluster of the left glyph (see stringToGlyphClusters)
- * @param  {{start: number}} rightCluster - the cluster of the right glyph
- * @return {Array<{start: number}>} the first and the second cluster of the pair
+ * Reverse a sequence of glyph clusters in visual order, keeping the glyphs of one cluster (the glyphs of a multiple
+ * substitution, which have the same start) in the order of the substitution: the order of the text of a
+ * right-to-left run, the order of the kerning pairs of HarfBuzz.
+ * @param  {Array<{start: number}>} glyphClusters - see _stringToDirectionalGlyphClusters
+ * @return {Array<{start: number}>} the clusters in reverse order, the glyphs of each cluster in their order
  */
-function getLogicalPair(leftCluster, rightCluster) {
-    return rightCluster.start < leftCluster.start ? [rightCluster, leftCluster] : [leftCluster, rightCluster];
+function reverseGlyphClusters(glyphClusters) {
+    const clusterGlyphs = [];
+    for (const glyphCluster of glyphClusters) {
+        const lastClusterGlyphs = clusterGlyphs[clusterGlyphs.length - 1];
+        if (lastClusterGlyphs && lastClusterGlyphs[0].start === glyphCluster.start) {
+            lastClusterGlyphs.push(glyphCluster);
+        } else {
+            clusterGlyphs.push([glyphCluster]);
+        }
+    }
+    return clusterGlyphs.reverse().flat();
+}
+
+/**
+ * Split a sequence of glyph clusters into its direction runs: a cluster continues the run of the cluster before it
+ * when both are left-to-right or both right-to-left. Given in visual order, the glyphs of a left-to-right run are in
+ * the order of the text, given by reverseGlyphClusters the glyphs of a right-to-left run, so a GPOS kern lookup that
+ * skips the glyphs it ignores stops at the end of a direction run, like HarfBuzz, which shapes each direction run on
+ * its own.
+ * @param  {Array<{glyph: opentype.Glyph, rightToLeft: boolean}>} glyphClusters - see _stringToDirectionalGlyphClusters
+ * @return {Array<{glyphIndexes: number[], position: number}>} for each cluster, the glyph indexes of its run and its
+ * position in the run
+ */
+function getDirectionGlyphRuns(glyphClusters) {
+    const clusterRuns = [];
+    let glyphIndexes = [];
+    for (let i = 0; i < glyphClusters.length; i++) {
+        const cluster = glyphClusters[i];
+        const previousCluster = glyphClusters[i - 1];
+        if (previousCluster && cluster.rightToLeft !== previousCluster.rightToLeft) {
+            glyphIndexes = [];
+        }
+        clusterRuns.push({ glyphIndexes, position: glyphIndexes.length });
+        glyphIndexes.push(cluster.glyph.index);
+    }
+    return clusterRuns;
 }
 
 /**
@@ -499,7 +551,11 @@ function getLogicalPair(leftCluster, rightCluster) {
  *                                        do not use it yet (see script).
  *                                        See https://www.microsoft.com/typography/developers/opentype/languagetags.aspx
  * @property {boolean} [kerning=true] - whether to include kerning values: the values of all the lookups of the GPOS kern
- *                                      feature, or the values of the kern table when GPOS has no kern feature for the script
+ *                                      feature, each lookup kerning a glyph with the next glyph its lookupFlag does not
+ *                                      ignore (e.g. across the marks with IgnoreMarks) in the same direction run, or the
+ *                                      values of the kern table when GPOS has no kern feature for the script. Like
+ *                                      HarfBuzz, which shapes each direction run on its own, two glyphs of a
+ *                                      left-to-right run and of a right-to-left run are never kerned together
  * @property {object} [features] - OpenType Layout feature tags (e.g. `{ liga: false, ss01: true }`), enabling or disabling them over the default ones
  *                                 (for latin text: ccmp, locl, rlig, rclt, calt, liga and clig).
  *                                 See https://www.microsoft.com/typography/otspec/featuretags.htm
@@ -542,7 +598,7 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
     fontSize = fontSize !== undefined ? fontSize : 72;
     options = Object.assign({}, this.defaultRenderOptions, options);
     const fontScale = 1 / this.unitsPerEm * fontSize;
-    const glyphClusters = this.stringToGlyphClusters(text, options);
+    const glyphClusters = this._stringToDirectionalGlyphClusters(text, options);
     const kerningLookupsByScript = new Map();
     const getKerningLookups = script => {
         if (!kerningLookupsByScript.has(script)) {
@@ -554,6 +610,9 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
         glyphClusters.map(cluster => getClusterKerningScript(text.slice(cluster.start, cluster.end))) :
         [];
     const hasScript = clusterScripts.some(script => script !== undefined);
+    // the direction runs of the glyphs in visual order, and in the order of the text for the pairs of right-to-left text
+    const glyphRuns = getDirectionGlyphRuns(glyphClusters);
+    const reversedGlyphRuns = getDirectionGlyphRuns(reverseGlyphClusters(glyphClusters));
     for (let i = 0; i < glyphClusters.length; i += 1) {
         const glyph = glyphClusters[i].glyph;
         callback.call(this, glyph, x, y, fontSize, options);
@@ -567,12 +626,14 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
             // Here we only use the xAdvance value.
             const script = options.script || selectKerningScript([clusterScripts[i], clusterScripts[i + 1]], hasScript);
             const kerningLookups = getKerningLookups(script);
-            // the GPOS pairs are in the order of the text; the kern table has no direction, HarfBuzz looks its
-            // pairs up in visual order
-            const [firstCluster, secondCluster] = kerningLookups ?
-                getLogicalPair(glyphClusters[i], glyphClusters[i + 1]) :
-                [glyphClusters[i], glyphClusters[i + 1]];
-            const kerningValue = this.position.getKerningValue(kerningLookups, firstCluster.glyph.index, secondCluster.glyph.index, options.variation);
+            // like HarfBuzz, which shapes each direction run on its own, a glyph is kerned with the glyphs of its run
+            // only. The GPOS pairs are in the order of the text, where the first glyph of a right-to-left pair is its
+            // right glyph, and each lookup kerns it with the next glyph of its run it does not ignore; the kern table
+            // has no direction, HarfBuzz looks its pairs up in visual order
+            const glyphRun = kerningLookups && glyphClusters[i].rightToLeft ?
+                reversedGlyphRuns[glyphClusters.length - i - 2] :
+                glyphRuns[i];
+            const kerningValue = this.position.getGlyphRunKerningValue(kerningLookups, glyphRun.glyphIndexes, glyphRun.position, options.variation);
             x += kerningValue * fontScale;
         }
 

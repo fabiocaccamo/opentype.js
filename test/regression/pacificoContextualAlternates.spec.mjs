@@ -24,8 +24,9 @@
  * (ignoreMarks): lookup 0 has one subtable of format 2 covering comma and parenleft, lookup 1
  * has subtables of format 1, 2, 2, 2, 2. The scripts of GPOS (DFLT, latn) have only the default
  * language system. The forEachGlyph of upstream master kerns these pairs too (the H of "Hello"
- * is 1003 wide there): the kerning tests are guards and known failures, except the regression
- * tests of the fork's fixes, the sum of the two kern lookups and the kerning with the language TRK.
+ * is 1003 wide there): the kerning tests are guards, except the regression tests of the fork's
+ * fixes, the sum of the two kern lookups, the kerning with the language TRK and the kerning
+ * across a mark (lookupFlag ignoreMarks).
  *
  * Glyph ids: 1 space, 2 H, 3 P, 4 H.ss01, 6 a, 8 c, 9 e, 10 f, 11 i, 13 i.loclTRK, 14 l, 15 n,
  * 16 o, 17 s, 18 a.fina, 19 b.fina, 21 e.fina, 22 i.fina, 23 dotlessi.fina, 26 n.fina,
@@ -231,7 +232,7 @@ describe('regression: calt final forms and GPOS class kerning of Pacifico (#372,
                 // H, U+0301 COMBINING ACUTE ACCENT, U+0301 COMBINING ACUTE ACCENT, e: lookup 2
                 // subtable 2 (acutecomb after an uppercase letter) gives the first mark its
                 // uppercase form, then lookup 3 subtable 1 (acutecomb after acutecomb.case) the
-                // second one. Without kerning: the kerning across a mark is a known failure below.
+                // second one. Without kerning: the kerning across a mark is tested below.
                 // hb-shape --no-glyph-names --cluster-level=1 --language=en --features=-kern Pacifico-Regular-calt-kern-subset.ttf -u 0048,0301,0301,0065
                 // [2=0+873|45=1@-38,380+0|45=2@0,688+0|21=3+411]
                 assertShape(shapeText(font, 'H\u{301}\u{301}e', { kerning: false }), {
@@ -404,7 +405,7 @@ describe('regression: calt final forms and GPOS class kerning of Pacifico (#372,
             }, 'kerning off');
             // The sum of these advances: 873 + 0 + 411.
             assert.strictEqual(font.getAdvanceWidth(text, font.unitsPerEm, { kerning: false }), 1284);
-            // The glyphs and the clusters with kerning, its advances are the known failure below.
+            // The glyphs and the clusters with kerning, its advances are tested below.
             // hb-shape --no-glyph-names --cluster-level=1 --language=en Pacifico-Regular-calt-kern-subset.ttf -u 0048,0301,0065
             // [2=0+1003|45=1@-168,380+0|21=2+411]
             const shaped = shapeText(font, text);
@@ -413,17 +414,12 @@ describe('regression: calt final forms and GPOS class kerning of Pacifico (#372,
             assert.deepStrictEqual(shaped.ends, [1, 2, 3]);
         });
 
-        itFailsUntilFixed(
-            'kerns the H and the e across the mark (+130, lookupFlag ignoreMarks)',
-            'forEachGlyph (src/font.mjs): kerns each glyph with the next one, here the H with the mark, ' +
-            'without reading the lookupFlag of the kern lookups',
-            function() {
-                const shaped = shapeText(font, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --language=en Pacifico-Regular-calt-kern-subset.ttf -u 0048,0301,0065
-                // [2=0+1003|45=1@-168,380+0|21=2+411]
-                assert.deepStrictEqual(shaped.advances, [1003, 0, 411]);
-            }
-        );
+        it('kerns the H and the e across the mark (+130, lookupFlag ignoreMarks)', function() {
+            const shaped = shapeText(font, text);
+            // hb-shape --no-glyph-names --cluster-level=1 --language=en Pacifico-Regular-calt-kern-subset.ttf -u 0048,0301,0065
+            // [2=0+1003|45=1@-168,380+0|21=2+411]
+            assert.deepStrictEqual(shaped.advances, [1003, 0, 411]);
+        });
     });
 
     describe('language system TRK of latn (locl in GSUB, no language system in GPOS)', function() {

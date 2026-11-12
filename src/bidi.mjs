@@ -27,6 +27,8 @@ function Bidi(baseDir) {
     this.baseDir = baseDir || 'ltr';
     this.tokenizer = new Tokenizer();
     this.featuresTags = {};
+    // the tokens of the runs laid out from right to left (see reverseArabicSentences)
+    this.rightToLeftTokens = new Set();
 }
 
 /**
@@ -79,9 +81,13 @@ function tokenizeText() {
  */
 function reverseArabicSentences() {
     const ranges = this.tokenizer.getContextRanges('arabicSentence');
+    this.rightToLeftTokens = new Set();
     for(let i = 0; i < ranges.length; i++) {
         const range = ranges[i];
         let rangeTokens = this.tokenizer.getRangeTokens(range);
+        for (const token of rangeTokens) {
+            this.rightToLeftTokens.add(token);
+        }
         this.tokenizer.replaceRange(
             range.startIndex,
             range.endOffset,
@@ -311,8 +317,9 @@ Bidi.prototype.getTextGlyphs = function (text) {
  * (its cluster): the characters of the deleted tokens (e.g. ligature components, variation selectors)
  * belong to the glyph of the previous token in the text.
  * @param {string} text an input text
- * @returns {Array<{index: number, start: number, end: number}>} glyph indexes in the glyph order,
- * with the UTF-16 range [start, end) of their characters in the text
+ * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean}>} glyph indexes in the glyph
+ * order, with the UTF-16 range [start, end) of their characters in the text, and whether their run is laid out
+ * from right to left (the arabic sentences, in reverse order of the text)
  */
 Bidi.prototype.getTextGlyphClusters = function (text) {
     this.processText(text);
@@ -325,10 +332,12 @@ Bidi.prototype.getTextGlyphClusters = function (text) {
         // a multiple substitution replaces the glyph of a token with a sequence of glyphs,
         // all of them representing the characters of the token
         const value = token.activeState.value;
+        const rightToLeft = this.rightToLeftTokens.has(token);
         const tokenGlyphClusters = (Array.isArray(value) ? value : [value]).map(index => ({
             index,
             start: token.charOffset,
-            end: token.charOffset + token.char.length
+            end: token.charOffset + token.char.length,
+            rightToLeft
         }));
         clusters.push(...tokenGlyphClusters);
         tokenClusters.set(token, tokenGlyphClusters);

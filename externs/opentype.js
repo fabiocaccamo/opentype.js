@@ -91,7 +91,8 @@ opentype.Font.prototype.glyphIndexToName = function(gid) {};
  * glyph shared by characters of several scripts, a character of no script counting as latn. The pair
  * takes the first of thai, arab, hebr, cyrl and grek that one of its glyphs has, otherwise latn, or
  * DFLT when neither glyph has a script. The pair is the left glyph then the right glyph:
- * for a GPOS pair of right-to-left text, pass the glyphs in the order of the text.
+ * for a GPOS pair of right-to-left text, pass the glyphs in the order of the text. A GPOS lookup whose
+ * lookupFlag ignores one of the two glyphs adds nothing (see opentype.Position.prototype.getGlyphRunKerningValue).
  * The kern table is used when the GPOS table has no kern feature for that script.
  * @param  {opentype.Glyph|number} leftGlyph
  * @param  {opentype.Glyph|number} rightGlyph
@@ -532,7 +533,8 @@ opentype.Position.prototype.getKerningTables = function(script, language) {};
 /**
  * Get the xAdvance kerning value of a glyph pair, in the order of the text, in a list of kerning lookup tables:
  * in each lookup the first subtable that applies to the pair gives the value of the lookup, and the values of
- * the lookups add up. Without lookup tables (undefined, see getKerningTables), the value of the kern table.
+ * the lookups add up. A lookup whose lookupFlag ignores one of the two glyphs adds nothing (see
+ * getGlyphRunKerningValue). Without lookup tables (undefined, see getKerningTables), the value of the kern table.
  * @param {Array<Object>|undefined} kerningLookups - the result of getKerningTables
  * @param {number} leftIndex
  * @param {number} rightIndex
@@ -540,6 +542,20 @@ opentype.Position.prototype.getKerningTables = function(script, language) {};
  * @return {number}
  */
 opentype.Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIndex, variation) {};
+
+/**
+ * Get the xAdvance kerning value of a glyph of a run of glyphs, in a list of kerning lookup tables: each lookup
+ * that does not ignore the glyph (its lookupFlag and the GDEF classes) kerns it with the next glyph of the run
+ * that the lookup does not ignore, e.g. across the marks of a lookup with IgnoreMarks, and the values of the
+ * lookups add up. Without lookup tables (undefined, see getKerningTables), the value of the kern table for the
+ * glyph and the glyph right after it (HarfBuzz skips the GDEF marks there too, not yet supported).
+ * @param {Array<Object>|undefined} kerningLookups - the result of getKerningTables
+ * @param {Array<number>} glyphIndexes - the glyph indexes of the run, in the order of the text
+ * @param {number} position - the position of the glyph in the run
+ * @param {Object=} variation - variation coordinates, the current font variation if omitted
+ * @return {number}
+ */
+opentype.Position.prototype.getGlyphRunKerningValue = function(kerningLookups, glyphIndexes, position, variation) {};
 
 /**
  * @extends opentype.Layout

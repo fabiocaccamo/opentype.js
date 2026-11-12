@@ -90,6 +90,179 @@ function searchRange(ranges, value) {
 }
 
 /**
+ * Find a glyph in a class definition table
+ * https://docs.microsoft.com/en-us/typography/opentype/spec/chapter2#class-definition-table
+ * @param {object} classDefTable - an OpenType Layout class definition table
+ * @param {number} glyphIndex - the index of the glyph to find
+ * @returns {number} 0 if not found
+ */
+function getGlyphClass(classDefTable, glyphIndex) {
+    switch (classDefTable.format) {
+        case 1: {
+            if (classDefTable.startGlyph <= glyphIndex && glyphIndex < classDefTable.startGlyph + classDefTable.classes.length) {
+                return classDefTable.classes[glyphIndex - classDefTable.startGlyph];
+            }
+            return 0;
+        }
+        case 2: {
+            const range = searchRange(classDefTable.ranges, glyphIndex);
+            return range ? range.classId : 0;
+        }
+    }
+}
+
+/**
+ * Find a glyph in a coverage table
+ * https://docs.microsoft.com/en-us/typography/opentype/spec/chapter2#coverage-table
+ * @param {object} coverageTable - an OpenType Layout coverage table
+ * @param {number} glyphIndex - the index of the glyph to find
+ * @returns {number} -1 if not found
+ */
+function getCoverageIndex(coverageTable, glyphIndex) {
+    switch (coverageTable.format) {
+        case 1: {
+            const index = binSearch(coverageTable.glyphs, glyphIndex);
+            return index >= 0 ? index : -1;
+        }
+        case 2: {
+            const range = searchRange(coverageTable.ranges, glyphIndex);
+            return range ? range.index + glyphIndex - range.start : -1;
+        }
+    }
+}
+
+// the lookupFlag bits (OpenType Layout Common Table Formats, LookupFlag bit enumeration)
+const IGNORE_BASE_GLYPHS = 0x0002;
+const IGNORE_LIGATURES = 0x0004;
+const IGNORE_MARKS = 0x0008;
+const USE_MARK_FILTERING_SET = 0x0010;
+const MARK_ATTACHMENT_TYPE = 0xFF00;
+const IGNORING_FLAGS = IGNORE_BASE_GLYPHS | IGNORE_LIGATURES | IGNORE_MARKS | USE_MARK_FILTERING_SET | MARK_ATTACHMENT_TYPE;
+
+// the glyph classes of the GDEF GlyphClassDef
+const BASE_GLYPH_CLASS = 1;
+const LIGATURE_GLYPH_CLASS = 2;
+const MARK_GLYPH_CLASS = 3;
+
+/**
+ * The GDEF table the layout uses: none for one of the broken GDEF tables HarfBuzz ignores (font.isGdefIgnoredByLayout),
+ * which font.tables.gdef still holds.
+ * @param {opentype.Font} font
+ * @returns {object|undefined}
+ */
+function getLayoutGdefTable(font) {
+    return font.isGdefIgnoredByLayout ? undefined : font.tables.gdef;
+}
+
+/**
+ * Whether a lookup ignores a mark, like HarfBuzz (check_glyph_property and match_properties_mark): with IgnoreMarks,
+ * every mark, otherwise with UseMarkFilteringSet, a mark the mark glyph set of the lookup does not cover (all the
+ * marks when the GDEF table has no such set), otherwise with a MarkAttachmentType, a mark of another mark attachment class.
+ * @param {object} gdef - the GDEF table
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
+ * @param {number} glyphIndex - the index of a glyph of the mark class
+ * @returns {boolean}
+ */
+function isMarkIgnoredByLookup(gdef, lookupTable, glyphIndex) {
+    const lookupFlag = lookupTable.lookupFlag;
+    if (lookupFlag & IGNORE_MARKS) {
+        return true;
+    }
+    if (lookupFlag & USE_MARK_FILTERING_SET) {
+        const markGlyphSet = gdef.markGlyphSets && gdef.markGlyphSets[lookupTable.markFilteringSet];
+        return !markGlyphSet || getCoverageIndex(markGlyphSet, glyphIndex) < 0;
+    }
+    const markAttachmentType = (lookupFlag & MARK_ATTACHMENT_TYPE) >> 8;
+    if (markAttachmentType) {
+        const markAttachmentClass = gdef.markAttachClassDef ? getGlyphClass(gdef.markAttachClassDef, glyphIndex) : 0;
+        return markAttachmentClass !== markAttachmentType;
+    }
+    return false;
+}
+
+/**
+ * Whether a lookup ignores a glyph, from the lookupFlag of the lookup and the GDEF class of the glyph: a base glyph
+ * with IgnoreBaseGlyphs, a ligature with IgnoreLigatures, a mark with IgnoreMarks, a mark outside of the mark
+ * filtering set with UseMarkFilteringSet or of another mark attachment class with a MarkAttachmentType.
+ * An ignored glyph is skipped when a lookup matches its glyphs (input, backtrack and lookahead sequences, ligature
+ * components, pairs), and the lookup does not apply at it. Without the GlyphClassDef of GDEF no glyph is ignored,
+ * unlike HarfBuzz, which then synthesizes the classes from the Unicode general category (a nonspacing mark is a mark).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - a GSUB or GPOS lookup table
+ * @param {number} glyphIndex
+ * @returns {boolean}
+ */
+function isGlyphIgnoredByLookup(gdef, lookupTable, glyphIndex) {
+    if (!gdef || !gdef.classDef || !(lookupTable.lookupFlag & IGNORING_FLAGS)) {
+        return false;
+    }
+    switch (getGlyphClass(gdef.classDef, glyphIndex)) {
+        case BASE_GLYPH_CLASS:
+            return Boolean(lookupTable.lookupFlag & IGNORE_BASE_GLYPHS);
+        case LIGATURE_GLYPH_CLASS:
+            return Boolean(lookupTable.lookupFlag & IGNORE_LIGATURES);
+        case MARK_GLYPH_CLASS:
+            return isMarkIgnoredByLookup(gdef, lookupTable, glyphIndex);
+        default:
+            // no class, the component class and the values the specification does not define are never ignored
+            return false;
+    }
+}
+
+/**
+ * The glyph index of an item of a context: the glyph index itself, or the first glyph of the glyphs of a multiple substitution
+ * @param {number|number[]} glyph
+ * @returns {number}
+ */
+function getFirstGlyphIndex(glyph) {
+    return Array.isArray(glyph) ? glyph[0] : glyph;
+}
+
+/**
+ * The position of the first glyph of a sequence after a position (before it with a step of -1) that a lookup does
+ * not ignore (see isGlyphIgnoredByLookup).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
+ * @param {Array<number|number[]>} glyphs - glyph indexes; an item that holds the glyphs of a multiple substitution
+ * counts as its first glyph
+ * @param {number} position - the position the search starts from, excluded
+ * @param {number} step - 1 for the next glyph, -1 for the previous one
+ * @returns {number} -1 if there is none
+ */
+function findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphs, position, step) {
+    for (let i = position + step; i >= 0 && i < glyphs.length; i += step) {
+        if (!isGlyphIgnoredByLookup(gdef, lookupTable, getFirstGlyphIndex(glyphs[i]))) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * The positions of the glyphs of a sequence that a lookup does not ignore, after a position (before it with a step
+ * of -1), at most count of them (see findNextNotIgnoredGlyphPosition).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
+ * @param {Array<number|number[]>} glyphs - glyph indexes, or the glyphs of a multiple substitution
+ * @param {number} position - the position the search starts from, excluded
+ * @param {number} step - 1 for the next glyphs, -1 for the previous ones
+ * @param {number} count
+ * @returns {number[]} fewer than count positions when the sequence ends before
+ */
+function getNotIgnoredGlyphPositions(gdef, lookupTable, glyphs, position, step, count) {
+    const positions = [];
+    let nextPosition = position;
+    while (positions.length < count) {
+        nextPosition = findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphs, nextPosition, step);
+        if (nextPosition < 0) {
+            break;
+        }
+        positions.push(nextPosition);
+    }
+    return positions;
+}
+
+/**
  * @exports opentype.Layout
  * @class
  */
@@ -316,44 +489,26 @@ Layout.prototype = {
     /**
      * Find a glyph in a class definition table
      * https://docs.microsoft.com/en-us/typography/opentype/spec/chapter2#class-definition-table
+     * @instance
+     * @function getGlyphClass
+     * @memberof opentype.Layout
      * @param {object} classDefTable - an OpenType Layout class definition table
      * @param {number} glyphIndex - the index of the glyph to find
-     * @returns {number} -1 if not found
+     * @returns {number} 0 if not found
      */
-    getGlyphClass: function(classDefTable, glyphIndex) {
-        switch (classDefTable.format) {
-            case 1: {
-                if (classDefTable.startGlyph <= glyphIndex && glyphIndex < classDefTable.startGlyph + classDefTable.classes.length) {
-                    return classDefTable.classes[glyphIndex - classDefTable.startGlyph];
-                }
-                return 0;
-            }
-            case 2: {
-                const range = searchRange(classDefTable.ranges, glyphIndex);
-                return range ? range.classId : 0;
-            }
-        }
-    },
+    getGlyphClass: getGlyphClass,
 
     /**
      * Find a glyph in a coverage table
      * https://docs.microsoft.com/en-us/typography/opentype/spec/chapter2#coverage-table
+     * @instance
+     * @function getCoverageIndex
+     * @memberof opentype.Layout
      * @param {object} coverageTable - an OpenType Layout coverage table
      * @param {number} glyphIndex - the index of the glyph to find
      * @returns {number} -1 if not found
      */
-    getCoverageIndex: function(coverageTable, glyphIndex) {
-        switch (coverageTable.format) {
-            case 1: {
-                const index = binSearch(coverageTable.glyphs, glyphIndex);
-                return index >= 0 ? index : -1;
-            }
-            case 2: {
-                const range = searchRange(coverageTable.ranges, glyphIndex);
-                return range ? range.index + glyphIndex - range.start : -1;
-            }
-        }
-    },
+    getCoverageIndex: getCoverageIndex,
 
     /**
      * Returns the list of glyph indexes of a coverage table.
@@ -384,3 +539,4 @@ Layout.prototype = {
 };
 
 export default Layout;
+export { getLayoutGdefTable, getFirstGlyphIndex, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, getNotIgnoredGlyphPositions };

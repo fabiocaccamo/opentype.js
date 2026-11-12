@@ -388,6 +388,10 @@ function parseBuffer(buffer, opt={}) {
     if (gdefTableEntry) {
         const gdefTable = uncompressTable(data, gdefTableEntry);
         font.tables.gdef = gdef.parse(gdefTable.data, gdefTable.offset);
+        // like HarfBuzz, the layout ignores the broken GDEF tables of a few known fonts
+        const gsubLength = gsubTableEntry ? gsubTableEntry.length : 0;
+        const gposLength = gposTableEntry ? gposTableEntry.length : 0;
+        font.isGdefIgnoredByLayout = gdef.isBlocklisted(gdefTableEntry.length, gsubLength, gposLength);
     }
 
     if (gposTableEntry) {

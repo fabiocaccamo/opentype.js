@@ -203,7 +203,7 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             // the hb-shape outputs quoted above, without the glyphs of GDEF class mark. When lookup 17 runs,
             // the accent of the multiple substitution is still in the token of e and the context is matched
             // on the first glyph of each token: the initial e of accentedShape does not depend on the
-            // IgnoreMarks flag (a mark typed in the text is the known failure of the combining mark)
+            // IgnoreMarks flag (a mark typed in the text is the test of the combining mark below)
             for (const reference of [helloShape, minimumShape, phoneShape, whoShape, accentedShape]) {
                 assert.deepStrictEqual(getLetters(shapeText(fonts[400], reference.text)), getLetters(reference), reference.text);
             }
@@ -310,20 +310,15 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             }, 'h, combining acute, e');
         });
 
-        itFailsUntilFixed(
-            'joins the letters around a combining mark',
-            'chainingSubstitutionFormat3 (src/features/featureQuery.mjs): matches the context on the glyphs next to each other, the ' +
-            'lookupFlag is not read and the marks of a lookup with IgnoreMarks are not skipped: the letters stay isolated',
-            function() {
-                // h, combining acute accent (U+0301), e: h.lop.ini cnct.ful_n_e acutecomb e.ful.fin
-                // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 0068,0301,0065
-                // [29=0+676|26=0+0|8=1@-297,455+0|22=2+444]
-                // the letters only (h.lop.ini and e.ful.fin, clusters 0 and 2): the connector is a known failure above
-                const reference = { glyphs: [29, 26, 8, 22], clusters: [0, 0, 1, 2], advances: [676, 0, 0, 444] };
-                const letters = getLetters(shapeText(fonts[400], 'h\u{301}e'));
-                assert.deepStrictEqual(letters, getLetters(reference));
-            }
-        );
+        it('joins the letters around a combining mark', function() {
+            // h, combining acute accent (U+0301), e: h.lop.ini cnct.ful_n_e acutecomb e.ful.fin
+            // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 0068,0301,0065
+            // [29=0+676|26=0+0|8=1@-297,455+0|22=2+444]
+            // the letters only (h.lop.ini and e.ful.fin, clusters 0 and 2): the connector is a known failure above
+            const reference = { glyphs: [29, 26, 8, 22], clusters: [0, 0, 1, 2], advances: [676, 0, 0, 444] };
+            const letters = getLetters(shapeText(fonts[400], 'h\u{301}e'));
+            assert.deepStrictEqual(letters, getLetters(reference));
+        });
 
         itFailsUntilFixed(
             'composes a letter and a combining mark into the precomposed glyph of the font',
@@ -340,8 +335,7 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
 
         itFailsUntilFixed(
             'decomposes and joins a composed letter with calt, its accent in the cluster of the two characters',
-            '_createBidi (src/font.mjs): does not compose e and U+0301 into eacute, acutecomb stays in a cluster of its own and, as ' +
-            'the IgnoreMarks flag of lookup 17 is not read (src/features/featureQuery.mjs), keeps e, l and u from joining; the ' +
+            '_createBidi (src/font.mjs): does not compose e and U+0301 into eacute, acutecomb stays in a cluster of its own; the ' +
             'composed letter then loses its accent like the precomposed one (chainingSubstitutionFormat3, src/features/applySubstitution.mjs)',
             function() {
                 // e, combining acute accent (U+0301), l, u: e.ful.ini cnct.ful_e_f acutecomb l.lop.med cnct.mod_n_n u.mod.fin,
@@ -394,7 +388,7 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             itFailsUntilFixed(
                 `widens the advance of a letter before the next joined letter, ${reference.name}`,
                 'forEachGlyph (src/font.mjs): adds only the pairs of the kern feature (getKerningTables, src/position.mjs), the pairs of ' +
-                'dist are never applied; once the connectors are there, each pair is also across a GDEF mark (lookupFlag IgnoreMarks)',
+                'dist are never applied',
                 function() {
                     const letters = layOutLetters(fonts[reference.weight], reference.shape.text);
                     assert.deepStrictEqual(letters, getLetterOrigins(reference.shape));
@@ -469,31 +463,25 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             });
         }
 
-        itFailsUntilFixed(
-            'kerns a letter and the next letter across the accent that calt adds, at each instance',
-            'forEachGlyph (src/font.mjs): kerns each glyph with the glyph right after it without reading the lookupFlag of the kern ' +
-            'lookups, e.ful with acutecomb (0 in getKerningValue, src/position.mjs): the pair e.ful period of lookup 2 (IgnoreMarks) ' +
-            'is never looked up',
-            function() {
-                // e with acute (U+00E9), period: e.ful acutecomb period, the pair e.ful period of lookup 2 (see 'e.' above)
-                // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9,002E
-                // [19=0+484|8=0@-307,0+0|6=1+313]
-                // hb-shape --no-glyph-names --cluster-level=1 --features=-kern PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9,002E
-                // [19=0+444|8=0@-267,0+0|6=1+313]
-                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=100 PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9,002E
-                // [19=0+472|8=0@-289,0+0|6=1+313]
-                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=100 --features=-kern PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9,002E
-                // [19=0+444|8=0@-261,0+0|6=1+313]
-                const shapesByWeight = {};
-                for (const weight of [400, 100]) {
-                    shapesByWeight[weight] = getGlyphsClustersAndAdvances(shapeText(fonts[weight], '\u{E9}.', { script: 'latn' }));
-                }
-                assert.deepStrictEqual(shapesByWeight, {
-                    400: { glyphs: [19, 8, 6], clusters: [0, 0, 1], advances: [484, 0, 313] },
-                    100: { glyphs: [19, 8, 6], clusters: [0, 0, 1], advances: [472, 0, 313] }
-                });
+        it('kerns a letter and the next letter across the accent that calt adds, at each instance', function() {
+            // e with acute (U+00E9), period: e.ful acutecomb period, the pair e.ful period of lookup 2 (see 'e.' above)
+            // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9,002E
+            // [19=0+484|8=0@-307,0+0|6=1+313]
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9,002E
+            // [19=0+444|8=0@-267,0+0|6=1+313]
+            // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=100 PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9,002E
+            // [19=0+472|8=0@-289,0+0|6=1+313]
+            // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=100 --features=-kern PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9,002E
+            // [19=0+444|8=0@-261,0+0|6=1+313]
+            const shapesByWeight = {};
+            for (const weight of [400, 100]) {
+                shapesByWeight[weight] = getGlyphsClustersAndAdvances(shapeText(fonts[weight], '\u{E9}.', { script: 'latn' }));
             }
-        );
+            assert.deepStrictEqual(shapesByWeight, {
+                400: { glyphs: [19, 8, 6], clusters: [0, 0, 1], advances: [484, 0, 313] },
+                100: { glyphs: [19, 8, 6], clusters: [0, 0, 1], advances: [472, 0, 313] }
+            });
+        });
 
         it('gives Font.getKerningValue a pair of the kern lookup that only latn has', function() {
             // P.dec (45) and h.lop.ini (29): 845 - 855, the two outputs quoted above phoneShape

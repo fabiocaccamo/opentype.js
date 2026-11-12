@@ -1,6 +1,7 @@
 import assert  from 'assert';
 import { Font, Path, Glyph } from '../src/opentype.mjs';
-import Layout  from '../src/layout.mjs';
+import Layout, { getLayoutGdefTable, getFirstGlyphIndex, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, getNotIgnoredGlyphPositions } from '../src/layout.mjs';
+import { glyphIndexes, createLookupFlagsGdef } from './lookup-flags-font.mjs';
 
 describe('layout.mjs', function() {
     let font;
@@ -242,6 +243,113 @@ describe('layout.mjs', function() {
             assert.equal(layout.getCoverageIndex(cov2, 8), -1);
             assert.equal(layout.getCoverageIndex(cov2, 55), -1);
             assert.equal(layout.getCoverageIndex(cov2, 70), -1);
+        });
+    });
+
+    describe('getLayoutGdefTable', function() {
+        it('gives the GDEF table of the font, none when the layout ignores it like HarfBuzz', function() {
+            const gdef = createLookupFlagsGdef();
+            font.tables.gdef = gdef;
+            assert.strictEqual(getLayoutGdefTable(font), gdef);
+            // a GDEF table of the blocklist of HarfBuzz (OT::GDEF::is_blocklisted), see opentype.spec.mjs
+            font.isGdefIgnoredByLayout = true;
+            assert.strictEqual(getLayoutGdefTable(font), undefined);
+            assert.strictEqual(font.tables.gdef, gdef);
+        });
+    });
+
+    // the glyphs and the GDEF table of test/lookup-flags-font.mjs; the lookups of the hb-shape lines are chaining
+    // context rules with the flag under test (e.g. lookupflag IgnoreMarks; sub a' b by a.alt;), see latinFeatures.spec.mjs
+    describe('isGlyphIgnoredByLookup', function() {
+        const gdef = createLookupFlagsGdef();
+        const { a: glyphA, ff, acute, dotbelow, fatha } = glyphIndexes;
+        const isIgnored = (lookupFlag, glyphIndex, markFilteringSet) => isGlyphIgnoredByLookup(gdef, { lookupFlag, markFilteringSet }, glyphIndex);
+
+        it('ignores the base glyphs with IgnoreBaseGlyphs (0x0002)', function() {
+            // lookupflag IgnoreBaseGlyphs; sub a by a.alt; -u 0061: [1=0+500], the lookup does not apply at a
+            assert.deepStrictEqual([glyphA, ff, acute].map(glyphIndex => isIgnored(0x0002, glyphIndex)), [true, false, false]);
+        });
+
+        it('ignores the ligatures with IgnoreLigatures (0x0004)', function() {
+            // lookupflag IgnoreLigatures; sub a' b by a.alt; -u 0061,FB00,0062: [7=0+500|4=1+500|2=2+500]
+            assert.deepStrictEqual([glyphA, ff, acute].map(glyphIndex => isIgnored(0x0004, glyphIndex)), [false, true, false]);
+        });
+
+        it('ignores the marks with IgnoreMarks (0x0008)', function() {
+            // lookupflag IgnoreMarks; sub a' b by a.alt; -u 0061,0301,0062: [7=0+500|5=1+0|2=2+500]
+            assert.deepStrictEqual([glyphA, ff, acute, dotbelow].map(glyphIndex => isIgnored(0x0008, glyphIndex)), [false, false, true, true]);
+        });
+
+        it('ignores the marks of another mark attachment class with MarkAttachmentType (high byte)', function() {
+            // lookupflag MarkAttachmentType @ACUTES; sub a' b by a.alt; (class 1)
+            // -u 0061,0323,0062: [7=0+500|6=1+0|2=2+500], -u 0061,0301,0062: [1=0+500|5=1+0|2=2+500]
+            assert.deepStrictEqual([glyphA, ff, acute, dotbelow].map(glyphIndex => isIgnored(0x0100, glyphIndex)), [false, false, false, true]);
+            // a mark of no mark attachment class (fatha, no MarkAttachClassDef entry) is ignored too, like HarfBuzz
+            // (match_properties_mark): -u 0061,064E,0062: [7=0+500|14=1+0|2=2+500]
+            assert.equal(isIgnored(0x0100, fatha), true);
+            // lookupflag MarkAttachmentType @DOTS; sub b' a by b.alt; (class 2)
+            // -u 0062,0301,0061: [8=0+500|5=1+0|1=2+500], -u 0062,0323,0061: [2=0+500|6=1+0|1=2+500]
+            assert.deepStrictEqual([acute, dotbelow].map(glyphIndex => isIgnored(0x0200, glyphIndex)), [true, false]);
+        });
+
+        it('ignores the marks outside of the mark filtering set with UseMarkFilteringSet (0x0010)', function() {
+            // lookupflag UseMarkFilteringSet @DOTS; sub a' b by a.alt; (set 0)
+            // -u 0061,0301,0062: [7=0+500|5=1+0|2=2+500], -u 0061,0323,0062: [1=0+500|6=1+0|2=2+500]
+            assert.deepStrictEqual([glyphA, ff, acute, dotbelow].map(glyphIndex => isIgnored(0x0010, glyphIndex, 0)), [false, false, true, false]);
+            // a set the GDEF table has not covers no mark (mark_set_covers of HarfBuzz)
+            assert.deepStrictEqual([glyphA, acute, dotbelow].map(glyphIndex => isIgnored(0x0010, glyphIndex, 1)), [false, true, true]);
+        });
+
+        it('takes the mark filtering set before the mark attachment type, and IgnoreMarks before both, like HarfBuzz', function() {
+            // lookupflag MarkAttachmentType @ACUTES UseMarkFilteringSet @DOTS; sub a' b by a.alt; (0x0110, set 0)
+            // -u 0061,0323,0062: [1=0+500|6=1+0|2=2+500], -u 0061,0301,0062: [7=0+500|5=1+0|2=2+500]
+            assert.equal(isIgnored(0x0110, dotbelow, 0), false);
+            assert.equal(isIgnored(0x0110, acute, 0), true);
+            assert.equal(isIgnored(0x0018, dotbelow, 0), true);
+        });
+
+        it('ignores no glyph without a flag, nor a glyph without a class', function() {
+            assert.deepStrictEqual([glyphA, ff, acute].map(glyphIndex => isIgnored(0, glyphIndex)), [false, false, false]);
+            // .notdef has no class in this GDEF table, the component class (4) is never ignored
+            assert.equal(isIgnored(0x000E, 0), false);
+            const componentGdef = { classDef: { format: 2, ranges: [{ start: glyphA, end: glyphA, classId: 4 }] } };
+            assert.equal(isGlyphIgnoredByLookup(componentGdef, { lookupFlag: 0x000E }, glyphA), false);
+        });
+
+        it('ignores no glyph without the GlyphClassDef of GDEF', function() {
+            // the classes come from GDEF only (HarfBuzz synthesizes them from the Unicode general categories, not done here)
+            assert.equal(isGlyphIgnoredByLookup(undefined, { lookupFlag: 0x0008 }, acute), false);
+            assert.equal(isGlyphIgnoredByLookup({ version: 1 }, { lookupFlag: 0x0008 }, acute), false);
+        });
+    });
+
+    describe('getFirstGlyphIndex, findNextNotIgnoredGlyphPosition and getNotIgnoredGlyphPositions', function() {
+        const gdef = createLookupFlagsGdef();
+        const { a: glyphA, b: glyphB, c: glyphC, acute, dotbelow } = glyphIndexes;
+        const ignoreMarks = { lookupFlag: 0x0008 };
+
+        it('finds the next and the previous glyph that the lookup does not ignore', function() {
+            const glyphs = [glyphA, acute, dotbelow, glyphB];
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, glyphs, 0, 1), 3);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, glyphs, 3, -1), 0);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, glyphs, 3, 1), -1);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, glyphs, 0, -1), -1);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, { lookupFlag: 0 }, glyphs, 0, 1), 1);
+        });
+
+        it('takes the first glyph of the glyphs of a multiple substitution', function() {
+            assert.equal(getFirstGlyphIndex(glyphB), glyphB);
+            assert.equal(getFirstGlyphIndex([acute, glyphB]), acute);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, [glyphA, [acute, glyphB], glyphC], 0, 1), 2);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, [glyphA, [glyphB, acute], glyphC], 0, 1), 1);
+        });
+
+        it('lists the positions of the glyphs that the lookup does not ignore, at most the count given', function() {
+            const glyphs = [glyphA, acute, glyphB, dotbelow, glyphC, acute];
+            assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 0, 1, 2), [2, 4]);
+            assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 0, 1, 3), [2, 4]);
+            assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 4, -1, 2), [2, 0]);
+            assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 0, 1, 0), []);
         });
     });
 });

@@ -90,4 +90,22 @@ describe('tables/gdef.mjs', function() {
             { format: 1, glyphs: [7, 8] }
         ]);
     });
+
+    describe('isBlocklisted', function() {
+        // the GDEF, GSUB and GPOS table lengths of OT::GDEF::is_blocklisted (hb-ot-layout.cc, HarfBuzz 11.3.2)
+        it('recognizes the GDEF tables HarfBuzz ignores by the lengths of the GDEF, GSUB and GPOS tables', function() {
+            // OS X 10.11.3 Times New Roman Italic.ttf and Bold Italic.ttf, Windows 8 tahoma.ttf, macOS 15 Courier New.ttf
+            assert.equal(gdef.isBlocklisted(490, 3046, 41638), true);
+            assert.equal(gdef.isBlocklisted(478, 3046, 41902), true);
+            assert.equal(gdef.isBlocklisted(898, 12554, 46470), true);
+            assert.equal(gdef.isBlocklisted(588, 5078, 14418), true);
+        });
+
+        it('does not recognize the other lengths', function() {
+            assert.equal(gdef.isBlocklisted(490, 3046, 41639), false);
+            assert.equal(gdef.isBlocklisted(492, 3046, 41638), false);
+            assert.equal(gdef.isBlocklisted(490, 0, 41638), false);
+            assert.equal(gdef.isBlocklisted(490, 3046, 0), false);
+        });
+    });
 });
