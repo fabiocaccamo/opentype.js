@@ -43,7 +43,7 @@
  */
 
 import assert from 'assert';
-import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './helpers.mjs';
+import { loadFont, shapeText, assertShape } from './helpers.mjs';
 
 const fixture = 'Pacifico-Regular-calt-kern-subset.ttf';
 
@@ -243,10 +243,8 @@ describe('regression: calt final forms and GPOS class kerning of Pacifico (#372,
                 }, 'after an uppercase letter');
             });
 
-            itFailsUntilFixed(
+            it(
                 'keeps the dotted i, in its final form, before the mark with ccmp turned off',
-                'applyFeaturesToContexts (src/bidi.mjs): applies ccmp to every text (applyCcmpReplacement), ' +
-                'also when the ccmp feature is turned off',
                 function() {
                     const shaped = shapeText(font, dotlessText, { features: { ccmp: false } });
                     // hb-shape --no-glyph-names --cluster-level=1 --language=en --features=-ccmp Pacifico-Regular-calt-kern-subset.ttf -u 0069,0301,006E
@@ -450,11 +448,8 @@ describe('regression: calt final forms and GPOS class kerning of Pacifico (#372,
             // [10=0+351|13=1+246|26=2+484]
             { name: '"fin" the localized i, which makes no fi ligature', text: 'fin', glyphs: [10, 13, 26] }
         ]) {
-            itFailsUntilFixed(
+            it(
                 `gives ${reference.name}, with the language TRK`,
-                '_createBidi (src/font.mjs): gives the Bidi the features only, not the script and language options, and ' +
-                'getScriptFeaturesIndexes (src/features/featureQuery.mjs) reads the default language system of a script: ' +
-                'the locl of a language system is never applied',
                 function() {
                     const shaped = shapeText(font, reference.text, turkishOptions);
                     assert.deepStrictEqual(shaped.glyphs, reference.glyphs);

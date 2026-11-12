@@ -5,15 +5,17 @@
 
 import Tokenizer from './tokenizer.mjs';
 import FeatureQuery from './features/featureQuery.mjs';
-import { getTokenGlyphIndexes, getGlyphSequence } from './features/applySubstitution.mjs';
-import arabicWordCheck from './features/arab/contextCheck/arabicWord.mjs';
+import {
+    getTokenGlyphIndexes,
+    applyFeaturesToTokens,
+    getRequiredFeatureStage,
+    REQUIRED_VARIATION_ALTERNATES_TAG
+} from './features/applySubstitution.mjs';
+import { getScriptRuns } from './char.mjs';
+import { getOpenTypeScriptTags, selectScriptTag } from './layout.mjs';
 import arabicSentenceCheck from './features/arab/contextCheck/arabicSentence.mjs';
 import arabicPresentationForms from './features/arab/arabicPresentationForms.mjs';
-import arabicRequiredLigatures from './features/arab/arabicRequiredLigatures.mjs';
-import ccmpReplacementCheck from './features/ccmp/contextCheck/ccmpReplacement.mjs';
-import ccmpReplacement from './features/ccmp/ccmpReplacementLigatures.mjs';
 import latinFeatures from './features/latn/latinFeatures.mjs';
-import thaiWordCheck from './features/thai/contextCheck/thaiWord.mjs';
 import thaiFeatures from './features/thai/thaiFeatures.mjs';
 import unicodeVariationSequenceCheck from './features/unicode/contextCheck/variationSequenceCheck.mjs';
 import unicodeVariationSequences from './features/unicode/variationSequences.mjs';
@@ -28,6 +30,9 @@ function Bidi(baseDir) {
     this.featuresTags = {};
     // the tokens of the runs laid out from right to left (see reverseArabicSentences)
     this.rightToLeftTokens = new Set();
+    // the script runs of the text (see getTokenScriptRuns), and the run of each token
+    this.scriptRuns = [];
+    this.tokenScriptRuns = new Map();
 }
 
 /**
@@ -40,19 +45,16 @@ Bidi.prototype.setText = function (text) {
 
 /**
  * Store essential context checks:
- * arabic word check for applying gsub features
  * arabic sentence check for adjusting arabic layout
+ * unicode variation sequence check for applying the variation sequences
  */
 Bidi.prototype.contextChecks = ({
-    ccmpReplacementCheck,
-    arabicWordCheck,
     arabicSentenceCheck,
-    thaiWordCheck,
     unicodeVariationSequenceCheck
 });
 
 /**
- * Register arabic word check
+ * Register a context check
  */
 function registerContextChecker(checkId) {
     const check = this.contextChecks[`${checkId}Check`];
@@ -66,10 +68,7 @@ function registerContextChecker(checkId) {
  * tokenize text input
  */
 function tokenizeText() {
-    registerContextChecker.call(this, 'ccmpReplacement');
-    registerContextChecker.call(this, 'arabicWord');
     registerContextChecker.call(this, 'arabicSentence');
-    registerContextChecker.call(this, 'thaiWord');
     registerContextChecker.call(this, 'unicodeVariationSequence');
     return this.tokenizer.tokenize(this.text);
 }
@@ -96,36 +95,42 @@ function reverseArabicSentences() {
 }
 
 /**
- * Register supported features tags
- * @param {script} script script tag
+ * Register the tags of the features of a shaper
+ * @param {string} shaper the shaper of the features: arab for the arabic script runs, thai for the thai script runs,
+ * latn for the other ones (see getScriptRunShaper)
  * @param {Array} tags features tags list
  */
-Bidi.prototype.registerFeatures = function (script, tags) {
-    const supportedTags = tags.filter(
-        tag => this.query.supports({script, tag})
-    );
-    if (!Object.prototype.hasOwnProperty.call(this.featuresTags, script)) {
-        this.featuresTags[script] = supportedTags;
+Bidi.prototype.registerFeatures = function (shaper, tags) {
+    if (!Object.prototype.hasOwnProperty.call(this.featuresTags, shaper)) {
+        this.featuresTags[shaper] = tags;
     } else {
-        this.featuresTags[script] =
-        this.featuresTags[script].concat(supportedTags);
+        this.featuresTags[shaper] = this.featuresTags[shaper].concat(tags);
     }
 };
 
 /**
  * Apply GSUB features
- * @param {Array} tagsList a list of features tags
- * @param {string} script a script tag
  * @param {Font} font opentype font instance
+ * @param {Array<{script: string, tags: string[]}>} features the feature tags of each shaper (see registerFeatures)
+ * @param {Object} [layoutOptions]
+ * @param {string} [layoutOptions.script] the OpenType script tag of the whole text, shaped as one script run, the
+ * script runs of the Unicode script of the text if omitted (see getTokenScriptRuns)
+ * @param {string} [layoutOptions.language] the OpenType language tag of the features, the default language system
+ * of the script if omitted
+ * @param {Object} [layoutOptions.variation] the variation coordinates of the GSUB feature variations, the current
+ * variation of the font if omitted
  */
-Bidi.prototype.applyFeatures = function (font, features) {
+Bidi.prototype.applyFeatures = function (font, features, layoutOptions) {
     if (!font) throw new Error(
         'No valid font was provided to apply features'
     );
-    if (!this.query) this.query = new FeatureQuery(font);
-    for (let f = 0; f < features.length; f++) {
-        const feature = features[f];
-        if (!this.query.supports({script: feature.script})) continue;
+    const { script, language, variation } = layoutOptions || {};
+    if (!this.query) {
+        this.query = new FeatureQuery(font, variation);
+    }
+    this.script = script;
+    this.language = language;
+    for (const feature of features) {
         this.registerFeatures(feature.script, feature.tags);
     }
 };
@@ -153,51 +158,115 @@ function checkGlyphIndexStatus() {
 }
 
 /**
- * Apply arabic presentation forms features
+ * Split the tokens of the text into its script runs, each one with its OpenType script tags: like HarfBuzz with the
+ * script of a buffer, the whole text is one run with the script option if given, otherwise the runs of its Unicode
+ * scripts (see getScriptRuns) take the tags of their script (see getOpenTypeScriptTags)
+ * @returns {Array<{tokens: Token[], scriptTags: string[]}>}
  */
-function applyArabicPresentationForms() {
-    const script = 'arab';
-    if (!Object.prototype.hasOwnProperty.call(this.featuresTags, script)) return;
-    checkGlyphIndexStatus.call(this);
-    const ranges = this.tokenizer.getContextRanges('arabicWord');
-    for(let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        arabicPresentationForms.call(this, range);
+function getTokenScriptRuns() {
+    const tokens = this.tokenizer.tokens;
+    if (this.script) {
+        return [{ tokens, scriptTags: [this.script] }];
+    }
+    return getScriptRuns(tokens.map(token => token.char)).map(({ start, end, script }) => ({
+        tokens: tokens.slice(start, end),
+        scriptTags: getOpenTypeScriptTags(script)
+    }));
+}
+
+// the stages of the arabic features, like the Arabic shaper of HarfBuzz (collect_features_arabic): rvrn, then ccmp and
+// locl, then each form in a stage of its own, in the order of HarfBuzz, then rlig, then calt (see
+// getArabicStagesAfterForms), then the other features (liga, clig, mset, rclt...)
+const ARABIC_STAGES_BEFORE_FORMS = [[REQUIRED_VARIATION_ALTERNATES_TAG], ['ccmp', 'locl']];
+const ARABIC_FORM_TAGS = ['isol', 'fina', 'medi', 'init'];
+
+/**
+ * The stages of the arabic features after the forms, like collect_features_arabic of HarfBuzz: rlig, then calt in a
+ * stage of its own, unless the language system of the run has rclt: calt then applies with the other features
+ * (https://github.com/harfbuzz/harfbuzz/issues/1573). HarfBuzz also looks rclt up in GPOS, which has no such feature
+ * @param {FeatureQuery} query
+ * @param {string} script the script tag of the run in the GSUB table
+ * @param {string|undefined} language the language tag of the features
+ * @returns {string[][]}
+ */
+function getArabicStagesAfterForms(query, script, language) {
+    if (query.getFeature({ tag: 'rclt', script, language })) {
+        return [['rlig']];
+    }
+    return [['rlig'], ['calt']];
+}
+
+/**
+ * Apply the enabled arabic features to an arabic script run, in the stages of the Arabic shaper of HarfBuzz: rvrn,
+ * then ccmp and locl, then each presentation form of the letters of the run, then rlig, then calt, then the other
+ * features (see getArabicStagesAfterForms), the lookups of the required feature of the language system in its stage
+ * (see getRequiredFeatureStage), at every glyph of the run, merged with the lookups of the stage in lookup list order
+ * @param {Token[]} tokens the tokens of the run
+ * @param {string} script the script tag of the run in the GSUB table
+ */
+function applyArabicFeatures(tokens, script) {
+    const tags = this.featuresTags.arab;
+    const formStages = ARABIC_FORM_TAGS.map(tag => [tag]);
+    const shaperStages = ARABIC_STAGES_BEFORE_FORMS.concat(formStages, getArabicStagesAfterForms(this.query, script, this.language));
+    const stagedTags = shaperStages.flat();
+    const stages = shaperStages
+        .map(stageTags => tags.filter(tag => stageTags.includes(tag)))
+        .concat([tags.filter(tag => !stagedTags.includes(tag))]);
+    const firstFormStage = ARABIC_STAGES_BEFORE_FORMS.length;
+    const requiredFeatureStage = getRequiredFeatureStage(stages, this.query.getRequiredFeature(script, this.language));
+    for (let i = 0; i < stages.length; i++) {
+        const isFormStage = i >= firstFormStage && i < firstFormStage + formStages.length;
+        if (isFormStage) {
+            // the required feature is in the stage of a form only when the form is enabled (see getRequiredFeatureStage)
+            if (stages[i].length) {
+                arabicPresentationForms.call(this, tokens, script, stages[i][0], i === requiredFeatureStage);
+            }
+        } else {
+            applyFeaturesToTokens(this.query, stages[i], script, this.language, tokens, i === requiredFeatureStage);
+        }
     }
 }
 
 /**
- * Apply ccmp replacement
+ * The shaper of the features of a script run, the key of its features in featuresTags, like HarfBuzz chooses its
+ * shaper from the script of a buffer: arab for the arab script tag, thai for the thai script tag, latn for the other
+ * script tags and for a text of no script
+ * @param {string[]} scriptTags the OpenType script tags of the run (see getTokenScriptRuns)
+ * @returns {string}
  */
-function applyCcmpReplacement() {
-    checkGlyphIndexStatus.call(this);
-    const ranges = this.tokenizer.getContextRanges('ccmpReplacement');
-    for(let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        ccmpReplacement.call(this, range);
+function getScriptRunShaper(scriptTags) {
+    if (scriptTags.includes('arab')) {
+        return 'arab';
     }
+    if (scriptTags.includes('thai')) {
+        return 'thai';
+    }
+    return 'latn';
 }
 
 /**
- * Apply required arabic ligatures
+ * Apply the enabled features of its shaper to a script run, with the script tag of the run that the GSUB table has
+ * (see selectScriptTag) and the language of the features
+ * @param {{tokens: Token[], scriptTags: string[]}} run
  */
-function applyArabicRequireLigatures() {
-    if (!this.hasFeatureEnabled('arab', 'rlig')) return;
-    checkGlyphIndexStatus.call(this);
-    const ranges = this.tokenizer.getContextRanges('arabicWord');
-    for(let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        arabicRequiredLigatures.call(this, range);
+function applyScriptRunFeatures(run) {
+    const shaper = getScriptRunShaper(run.scriptTags);
+    // a shaper with no registered features is skipped, an empty list of features still applies the required feature
+    if (!this.featuresTags[shaper]) {
+        return;
     }
-}
-
-/**
- * Apply the enabled latin features
- */
-function applyLatinFeatures() {
-    if (!(this.featuresTags.latn || []).length) return;
     checkGlyphIndexStatus.call(this);
-    latinFeatures.call(this);
+    const script = selectScriptTag(this.query.font.substitution, run.scriptTags);
+    switch (shaper) {
+        case 'arab':
+            applyArabicFeatures.call(this, run.tokens, script);
+            break;
+        case 'thai':
+            thaiFeatures.call(this, run.tokens, script);
+            break;
+        default:
+            latinFeatures.call(this, run.tokens, script);
+    }
 }
 
 function applyUnicodeVariationSequences() {
@@ -209,14 +278,6 @@ function applyUnicodeVariationSequences() {
 }
 
 /**
- * Apply the enabled thai features
- */
-function applyThaiFeatures() {
-    checkGlyphIndexStatus.call(this);
-    thaiFeatures.call(this);
-}
-
-/**
  * Check if a context is registered
  * @param {string} contextId context id
  */
@@ -225,41 +286,19 @@ Bidi.prototype.checkContextReady = function (contextId) {
 };
 
 /**
- * Apply features to registered contexts
- *
- * - A Glyph Composition (ccmp) feature should be always applied
- * https://learn.microsoft.com/en-us/typography/opentype/spec/features_ae#tag-ccmp
+ * Apply the features to the script runs of the text, each run on its own like HarfBuzz, then lay the arabic sentences
+ * out from right to left
  */
 Bidi.prototype.applyFeaturesToContexts = function () {
-    if (this.checkContextReady('ccmpReplacement')) {
-        applyCcmpReplacement.call(this);
+    for (const run of this.scriptRuns) {
+        applyScriptRunFeatures.call(this, run);
     }
-    if (this.checkContextReady('arabicWord')) {
-        applyArabicPresentationForms.call(this);
-        applyArabicRequireLigatures.call(this);
-    }
-    // the latin features apply to the runs of text that are not arabic or thai,
-    // with their spaces, digits and punctuation, not only to the latin words
-    applyLatinFeatures.call(this);
     if (this.checkContextReady('arabicSentence')) {
         reverseArabicSentences.call(this);
-    }
-    if (this.checkContextReady('thaiWord')) {
-        applyThaiFeatures.call(this);
     }
     if (this.checkContextReady('unicodeVariationSequence')) {
         applyUnicodeVariationSequences.call(this);
     }
-};
-
-/**
- * Check whatever feature is successfully enabled for a script
- * @param {string} script
- * @param {string} tag feature name
- * @returns {boolean}
- */
-Bidi.prototype.hasFeatureEnabled = function(script, tag) {
-    return (this.featuresTags[script] || []).indexOf(tag) !== -1;
 };
 
 /**
@@ -270,6 +309,13 @@ Bidi.prototype.processText = function(text) {
     if (!this.text || this.text !== text) {
         this.setText(text);
         tokenizeText.call(this);
+        this.scriptRuns = getTokenScriptRuns.call(this);
+        this.tokenScriptRuns = new Map();
+        for (const run of this.scriptRuns) {
+            for (const token of run.tokens) {
+                this.tokenScriptRuns.set(token, run);
+            }
+        }
         this.applyFeaturesToContexts();
     }
 };
@@ -285,14 +331,28 @@ Bidi.prototype.getBidiText = function (text) {
 };
 
 /**
- * Get the glyph indexes of the text in glyph order: each glyph of a multiple substitution its own, none for a
- * deleted token
+ * The glyph indexes of a token that is not deleted in visual order: the order of its multiple substitution, reversed
+ * for a token of a right-to-left run, whose tokens reverseArabicSentences reverses, like HarfBuzz reverses the glyphs of
+ * a right-to-left run
+ * @param {Token} token
+ * @returns {number[]}
+ */
+function getTokenVisualGlyphIndexes(token) {
+    const glyphIndexes = getTokenGlyphIndexes(token);
+    return this.rightToLeftTokens.has(token) ? glyphIndexes.slice().reverse() : glyphIndexes;
+}
+
+/**
+ * Get the glyph indexes of the text in visual order: each glyph of a multiple substitution its own (see
+ * getTokenVisualGlyphIndexes), none for a deleted token
  * @param {string} text an input text
  * @returns {number[]}
  */
 Bidi.prototype.getTextGlyphs = function (text) {
     this.processText(text);
-    return getGlyphSequence(this.tokenizer.tokens).glyphIndexes;
+    return this.tokenizer.tokens
+        .filter(token => !token.state.deleted)
+        .flatMap(token => getTokenVisualGlyphIndexes.call(this, token));
 };
 
 /**
@@ -303,10 +363,10 @@ Bidi.prototype.getTextGlyphs = function (text) {
  * substitution have the cluster of their token, a ligature merges the clusters of its components and of the
  * glyphs between them.
  * @param {string} text an input text
- * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean, tokenOffset: number}>} glyph
- * indexes in the glyph order, with the UTF-16 range [start, end) of their characters in the text, whether their run
- * is laid out from right to left (the arabic sentences, in reverse order of the text), and the UTF-16 offset of the
- * character of their token in the text, shared by the glyphs of a multiple substitution only
+ * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean, scriptRun: Object}>}
+ * glyph indexes in visual order (see getTextGlyphs), with the UTF-16 range [start, end) of their characters in the
+ * text, whether their run is laid out from right to left (the arabic sentences, in reverse order of the text), and the
+ * script run of their token, with its OpenType script tags (scriptRun.scriptTags, see getTokenScriptRuns)
  */
 Bidi.prototype.getTextGlyphClusters = function (text) {
     this.processText(text);
@@ -320,8 +380,9 @@ Bidi.prototype.getTextGlyphClusters = function (text) {
     for (const token of glyphTokens) {
         const { start, end } = clusterRanges.get(token.cluster);
         const rightToLeft = this.rightToLeftTokens.has(token);
-        for (const index of getTokenGlyphIndexes(token)) {
-            clusters.push({ index, start, end, rightToLeft, tokenOffset: token.charOffset });
+        const scriptRun = this.tokenScriptRuns.get(token);
+        for (const index of getTokenVisualGlyphIndexes.call(this, token)) {
+            clusters.push({ index, start, end, rightToLeft, scriptRun });
         }
     }
     return clusters;

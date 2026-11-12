@@ -320,10 +320,8 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
 
         // hb-shape --no-glyph-names --cluster-level=1 --language=tr Roboto-VF-gsub-chaining-subset.ttf -u 0061,0066,0066,0069,006E,0069,0074,0079
         // [4=0+1114|5=1+712|5=2+712|6=3+498|8=4+1131|6=5+498|9=6+670|10=7+969]
-        itFailsUntilFixed(
+        it(
             'keeps f, f and i apart in "affinity" with the language TRK of latn, which has no liga',
-            '_createBidi (src/font.mjs): passes only the features option to the Bidi, the script and language options ' +
-            'are ignored and the features are those of the default language system: liga still gives ffi, [4, 22, 8, 6, 9, 10]',
             function() {
                 // the language as the tag of the font, with its trailing space
                 const glyphs = shapeText(font, 'affinity', { script: 'latn', language: 'TRK ' }).glyphs;
@@ -433,11 +431,8 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         // j then the combining acute accent (U+0301), ccmp off
         // hb-shape --no-glyph-names --cluster-level=1 --language=en --features=-ccmp Roboto-VF-gsub-chaining-subset.ttf -u 006A,0301
         // [7=0+490|17=1@299,310+0]
-        itFailsUntilFixed(
+        it(
             'keeps the dot of j before a combining acute when ccmp is turned off',
-            'ccmpReplacementLigatures (src/features/ccmp/ccmpReplacementLigatures.mjs): applies the ccmp lookups ' +
-            'whatever the features option, with ccmp: false it takes them over from the latin features: j still ' +
-            'loses its dot, [25, 17]',
             function() {
                 assert.deepStrictEqual(shapeText(font, 'j\u{301}', { features: { ccmp: false } }).glyphs, [7, 17]);
             }
@@ -615,12 +610,8 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         // lo chula (U+0E2C) then sara i (U+0E34), ccmp off
         // hb-shape --no-glyph-names --cluster-level=1 --features=-ccmp NotoSansThaiLooped-VF-gsub-chaining-subset.ttf -u 0E2C,0E34
         // [2=0+703|8=1@-71,135+0]
-        itFailsUntilFixed(
+        it(
             'keeps the tail of lo chula before sara i when ccmp is turned off',
-            'updateFeatures (src/font.mjs): overrides only the features of latn, the ccmp of thai stays on ' +
-            '(thaiFeatures), and ccmpReplacementLigatures (src/features/ccmp/ccmpReplacementLigatures.mjs) ' +
-            'applies the ccmp lookups whatever the features option, to the thai text when the ccmp of thai is off: ' +
-            'lo chula still loses its tail, [3, 8]',
             function() {
                 assert.deepStrictEqual(shapeText(font, '\u{E2C}\u{E34}', { features: { ccmp: false } }).glyphs, [2, 8]);
             }

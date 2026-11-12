@@ -10,7 +10,7 @@ import {
     createMultipleLookup,
     subAcuteBLookup
 } from './lookup-flags-font.mjs';
-import { loadFont, shapeText, assertShape } from './regression/helpers.mjs';
+import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
 
 /**
  * Nested lookups of contextual substitutions (context and chaining context),
@@ -396,10 +396,22 @@ describe('nested lookups of contextual substitutions', function() {
 
         describe('a real font', function() {
             let sourceSansFont;
+            let interFont;
 
             before(function() {
                 sourceSansFont = loadFont('../SourceSansPro-Regular.otf');
+                interFont = loadFont('../InterVariable.ttf');
             });
+
+            itFailsUntilFixed('applies a nested ligature substitution: Inter, the locl of the language system CAT',
+                'applyNestedLookupRecords (src/features/featureQuery.mjs): a nested lookup of type 4 is skipped (NESTED_SUBSTITUTION_TYPES), ' +
+                'so the chaining rule l\' lookup 15 periodcentered\' l of lookup 14 keeps l periodcentered l',
+                function() {
+                    // lookup 15 is the ligature l periodcentered -> ldot (fontTools)
+                    // hb-shape --no-glyph-names --cluster-level=1 --language=ca InterVariable.ttf -u 006C,00B7,006C
+                    // [743=0+736|736=2+496]
+                    assert.deepStrictEqual(interFont.stringToGlyphIndexes('l\u{B7}l', { language: 'CAT' }), [743, 736]);
+                });
 
             it('decomposes a letter with a capital accent before a combining accent: Source Sans Pro, ccmp', function() {
                 // ccmp lookup 4, a chaining context of format 3, applies the multiple substitution of lookup 3 to Emacron before

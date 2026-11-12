@@ -12,7 +12,8 @@ import { SVGImageManager } from './svgimages.mjs';
 import { VariationManager } from './variation.mjs';
 import HintingTrueType from './hintingtt.mjs';
 import Bidi from './bidi.mjs';
-import { getCharKerningScript, KERNING_SCRIPT_TAGS } from './char.mjs';
+import { getCharTextScript } from './char.mjs';
+import { getOpenTypeScriptTags, selectScriptTag } from './layout.mjs';
 import { applyPaintType } from './tables/cff.mjs';
 
 function createDefaultNamesInfo(options) {
@@ -215,26 +216,21 @@ Font.prototype.charToGlyph = function(c) {
 };
 
 /**
- * Update features
- * @param {any} options features options
+ * Update features: the default features of every shaper (see defaultRenderOptions.features) with the features option
+ * @param {any} options features options: an object of feature tags enabling (true) or disabling (false) features
+ * over the default ones of every shaper (e.g. { liga: false, ss01: true }); the defaults when absent (or a features list)
+ * @return {Array<{script: string, tags: string[]}>}
  */
 Font.prototype.updateFeatures = function (options) {
-    // TODO: update all features options not only 'latn'.
-    // options: an object of feature tags overriding the default latin features
-    // (e.g. { liga: false, ss01: true }); the defaults when absent (or a features list)
     const overrides = options && !Array.isArray(options) ? options : {};
     return this.defaultRenderOptions.features.map(feature => {
-        if (feature.script === 'latn') {
-            const tags = feature.tags.filter(tag => overrides[tag] !== false);
-            for (const tag of Object.keys(overrides)) {
-                if (overrides[tag] && !tags.includes(tag)) {
-                    tags.push(tag);
-                }
+        const tags = feature.tags.filter(tag => overrides[tag] !== false);
+        for (const tag of Object.keys(overrides)) {
+            if (overrides[tag] && !tags.includes(tag)) {
+                tags.push(tag);
             }
-            return { script: 'latn', tags };
-        } else {
-            return feature;
         }
+        return { script: feature.script, tags };
     });
 };
 
@@ -252,24 +248,25 @@ Font.prototype.stringToGlyphIndexes = function(s, options) {
 };
 
 /**
- * Create a Bidi instance mapping the characters to glyph indexes, with the features of the given options.
+ * Create a Bidi instance mapping the characters to glyph indexes, with the features, the script, the language and
+ * the variation of the given options.
  * @param  {GlyphRenderOptions} [options]
  * @return {Bidi}
  * @private
  */
 Font.prototype._createBidi = function(options) {
+    options = options || {};
     const bidi = new Bidi();
 
     // Create and register 'glyphIndex' state modifier
     const charToGlyphIndexMod = token => this.charToGlyphIndex(token.char);
     bidi.registerModifier('glyphIndex', null, charToGlyphIndexMod);
 
-    // roll-back to default features
-    let features = options ?
-        this.updateFeatures(options.features) :
-        this.defaultRenderOptions.features;
-
-    bidi.applyFeatures(this, features);
+    bidi.applyFeatures(this, this.updateFeatures(options.features), {
+        script: options.script,
+        language: options.language,
+        variation: options.variation
+    });
 
     return bidi;
 };
@@ -295,9 +292,9 @@ Font.prototype.stringToGlyphClusters = function(s, options) {
  * its run.
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options]
- * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean, tokenOffset: number}>} the
- * glyphs in visual order, rightToLeft for the glyphs of a right-to-left run, tokenOffset shared by the glyphs of a
- * multiple substitution only (see Bidi.getTextGlyphClusters)
+ * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean, scriptRun: Object}>}
+ * the glyphs in visual order, rightToLeft for the glyphs of a right-to-left run, scriptRun the script run of the glyph
+ * (see Bidi.getTextGlyphClusters)
  * @private
  */
 Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
@@ -308,7 +305,7 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
         start: cluster.start,
         end: cluster.end,
         rightToLeft: cluster.rightToLeft,
-        tokenOffset: cluster.tokenOffset
+        scriptRun: cluster.scriptRun
     }));
 };
 
@@ -317,6 +314,8 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
  * Note that there is no strict one-to-one mapping between characters and
  * glyphs, so the list of returned glyphs can be larger or smaller than the
  * length of the given string.
+ * The glyphs are in visual order, like HarfBuzz: the glyphs of an Arabic text in reverse order, the glyphs of a
+ * multiple substitution included (e.g. a letter and the mark that ccmp decomposed it into, the mark first).
  * @param  {string}
  * @param  {GlyphRenderOptions} [options]
  * @return {opentype.Glyph[]}
@@ -377,16 +376,17 @@ Font.prototype.glyphIndexToName = function(gid) {
  * between glyphs.
  * For GPOS kerning, this method uses the kern feature of the default language of the script of the
  * characters the cmap maps to the two glyphs, with the fallbacks of font.position.getKerningTables, adding the
- * values of all its lookups. The script of a glyph is the one of its characters: thai, arab, hebr, cyrl or grek
- * for Thai, Arabic, Hebrew, Cyrillic or Greek, latn for the other scripts, none for characters of no script
- * (Common, Inherited or Unknown, like digits and punctuation), and latn for a glyph shared by characters of
- * several scripts, a character of no script counting as latn (like a micro sign that is also the Greek mu).
- * The pair takes the first of thai, arab, hebr, cyrl and grek that one of its glyphs has, otherwise latn,
- * or DFLT when neither glyph has a script (e.g. digits, or glyphs no character maps to, like alternates).
+ * values of all its lookups. The script of a glyph is the Unicode script of its characters (see getCharTextScript),
+ * none for characters of no script (Common, Inherited or Unknown, like digits and punctuation), and Latin for a glyph
+ * shared by characters of several scripts, a character of no script counting as one (like a micro sign that is also
+ * the Greek mu). The pair takes the first of Thai, Arabic, Hebrew, Cyrillic and Greek that one of its glyphs has,
+ * otherwise its first script that is not Latin, otherwise Latin, or none when neither glyph has a script (e.g. digits,
+ * or glyphs no character maps to, like alternates), and the OpenType script tag of that script that the GPOS table
+ * has (DFLT for none, see getOpenTypeScriptTags and selectScriptTag).
  * The pair is the left glyph then the right glyph: for a GPOS pair of right-to-left text, pass the glyphs in
  * the order of the text. For another script or language, use
  * font.position.getKerningValue(font.position.getKerningTables(script, language), leftIndex, rightIndex),
- * or lay out the text (getAdvanceWidth, forEachGlyph), which takes the script of the text.
+ * or lay out the text (getAdvanceWidth, forEachGlyph), which takes the script of each script run of the text.
  * A GPOS lookup whose lookupFlag ignores one of the two glyphs (e.g. a mark with IgnoreMarks) adds nothing:
  * the text layout, or font.position.getGlyphRunKerningValue, kerns the glyphs across the ignored ones.
  * The kern table is used when the GPOS table has no kern feature for that script, like HarfBuzz.
@@ -402,10 +402,9 @@ Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variation) {
     if (!leftGlyph || !rightGlyph) {
         return 0;
     }
-    const leftScript = getGlyphKerningScript(leftGlyph);
-    const rightScript = getGlyphKerningScript(rightGlyph);
-    const script = selectKerningScript([leftScript, rightScript], leftScript !== undefined || rightScript !== undefined);
-    return this.position.getKerningValue(this.position.getKerningTables(script), leftGlyph.index, rightGlyph.index, variation);
+    const script = getKerningPairScript(getGlyphScript(leftGlyph), getGlyphScript(rightGlyph));
+    const scriptTag = selectScriptTag(this.position, getOpenTypeScriptTags(script));
+    return this.position.getKerningValue(this.position.getKerningTables(scriptTag), leftGlyph.index, rightGlyph.index, variation);
 };
 
 /**
@@ -420,113 +419,79 @@ function getGlyphOfIndex(font, index) {
     return index >= 0 && index < glyphCount ? font.glyphs.get(index) : undefined;
 }
 
-/**
- * The script of the kerning of a pair when the options give no script: the first of thai, arab, hebr, cyrl and
- * grek (KERNING_SCRIPT_TAGS) in the scripts of the pair, otherwise latn, or DFLT when the text has no character
- * of a script, like HarfBuzz.
- * @param  {Array<string|undefined>} scripts - the kerning scripts of the pair (see getCharKerningScript)
- * @param  {boolean} hasScript - whether the text has a character of a script
- * @return {string}
- */
-function selectKerningScript(scripts, hasScript) {
-    const kerningScript = KERNING_SCRIPT_TAGS.find(tag => scripts.includes(tag));
-    if (kerningScript) {
-        return kerningScript;
-    }
-    return hasScript ? 'latn' : 'DFLT';
-}
+// the scripts a kerning pair of glyphs of two scripts takes first, in this order (see getKerningPairScript)
+const KERNING_PAIR_SCRIPTS = ['Thai', 'Arab', 'Hebr', 'Cyrl', 'Grek'];
 
 /**
- * The script of the kerning of a glyph cluster, from its characters (see getCharKerningScript): the one
- * selectKerningScript takes from them, or undefined when none of them has a script.
- * @param  {string} characters - the characters of the cluster
+ * The script of a kerning pair of glyphs (see getKerningValue): the first of Thai, Arabic, Hebrew, Cyrillic and
+ * Greek that the pair has, otherwise its first script that is not Latin, otherwise Latin, undefined when neither
+ * glyph has a script.
+ * @param  {string|undefined} leftScript - the ISO 15924 code of the script of the left glyph (see getGlyphScript)
+ * @param  {string|undefined} rightScript - the ISO 15924 code of the script of the right glyph
  * @return {string|undefined}
  */
-function getClusterKerningScript(characters) {
-    const scripts = [];
-    // a for...of loop: Array.from with a map function is several times slower on a string
-    for (const character of characters) {
-        scripts.push(getCharKerningScript(character));
-    }
-    return scripts.some(script => script !== undefined) ? selectKerningScript(scripts, true) : undefined;
+function getKerningPairScript(leftScript, rightScript) {
+    const scripts = [leftScript, rightScript].filter(script => script !== undefined);
+    return KERNING_PAIR_SCRIPTS.find(script => scripts.includes(script)) ||
+        scripts.find(script => script !== 'Latn') ||
+        scripts[0];
 }
 
 /**
- * The script of the kerning of a glyph, from the characters the cmap maps to it (see getCharKerningScript):
- * their script when they all have the same one, undefined when none has a script, latn otherwise (a glyph
- * shared by characters of several scripts, a character of no script counting as latn, like a micro sign
- * that is also the Greek mu), so that the other glyph of a pair chooses the script.
+ * The script of a glyph, from the characters the cmap maps to it (see getCharTextScript): their script when they
+ * all have the same one, undefined when none has a script, Latin otherwise (a glyph shared by characters of several
+ * scripts, a character of no script counting as one, like a micro sign that is also the Greek mu), so that the other
+ * glyph of a pair chooses the script.
  * @param  {number[]} unicodes - the code points of the glyph
- * @return {string|undefined}
+ * @return {string|undefined} the ISO 15924 code of the script
  */
-function getUnicodesKerningScript(unicodes) {
-    const scripts = new Set(unicodes.map(unicode => getCharKerningScript(String.fromCodePoint(unicode))));
+function getUnicodesScript(unicodes) {
+    const scripts = new Set(unicodes.map(unicode => getCharTextScript(String.fromCodePoint(unicode))));
     const hasCharacterOfNoScript = scripts.delete(undefined);
     if (scripts.size === 1 && !hasCharacterOfNoScript) {
         return scripts.values().next().value;
     }
-    return scripts.size ? 'latn' : undefined;
+    return scripts.size ? 'Latn' : undefined;
 }
 
-// the kerning script of each glyph, with the array of code points and the number of code points it was computed
-// from (Glyph.addUnicode adds to the array, glyph.unicodes can be replaced): a glyph can have thousands of code
-// points (cmap format 13)
-const glyphKerningScripts = new WeakMap();
+// the script of each glyph, with the array of code points and the number of code points it was computed from
+// (Glyph.addUnicode adds to the array, glyph.unicodes can be replaced): a glyph can have thousands of code points
+// (cmap format 13)
+const glyphScripts = new WeakMap();
 
 /**
- * The script of the kerning of a glyph (see getUnicodesKerningScript), computed once for its code points.
+ * The script of a glyph (see getUnicodesScript), computed once for its code points.
  * @param  {opentype.Glyph} glyph
- * @return {string|undefined}
+ * @return {string|undefined} the ISO 15924 code of the script
  */
-function getGlyphKerningScript(glyph) {
+function getGlyphScript(glyph) {
     const unicodes = glyph.unicodes;
-    const cachedScript = glyphKerningScripts.get(glyph);
+    const cachedScript = glyphScripts.get(glyph);
     if (cachedScript && cachedScript.unicodes === unicodes && cachedScript.unicodeCount === unicodes.length) {
         return cachedScript.script;
     }
-    const script = getUnicodesKerningScript(unicodes);
-    glyphKerningScripts.set(glyph, { unicodes, unicodeCount: unicodes.length, script });
+    const script = getUnicodesScript(unicodes);
+    glyphScripts.set(glyph, { unicodes, unicodeCount: unicodes.length, script });
     return script;
 }
 
 /**
- * Reverse a sequence of glyph clusters in visual order, keeping the glyphs of one token (the glyphs of a multiple
- * substitution, which have the same tokenOffset) in the order of the substitution: the order of the text of a
- * right-to-left run, the order of the kerning pairs of HarfBuzz. The glyphs of the tokens a ligature merged into
- * one cluster (the ligature and the marks between its components) are reversed like the other ones.
- * @param  {Array<{tokenOffset: number}>} glyphClusters - see _stringToDirectionalGlyphClusters
- * @return {Array<{tokenOffset: number}>} the clusters in reverse order, the glyphs of each token in their order
- */
-function reverseGlyphClusters(glyphClusters) {
-    const tokenGlyphs = [];
-    for (const glyphCluster of glyphClusters) {
-        const lastTokenGlyphs = tokenGlyphs[tokenGlyphs.length - 1];
-        if (lastTokenGlyphs && lastTokenGlyphs[0].tokenOffset === glyphCluster.tokenOffset) {
-            lastTokenGlyphs.push(glyphCluster);
-        } else {
-            tokenGlyphs.push([glyphCluster]);
-        }
-    }
-    return tokenGlyphs.reverse().flat();
-}
-
-/**
- * Split a sequence of glyph clusters into its direction runs: a cluster continues the run of the cluster before it
- * when both are left-to-right or both right-to-left. Given in visual order, the glyphs of a left-to-right run are in
- * the order of the text, given by reverseGlyphClusters the glyphs of a right-to-left run, so a GPOS kern lookup that
- * skips the glyphs it ignores stops at the end of a direction run, like HarfBuzz, which shapes each direction run on
- * its own.
- * @param  {Array<{glyph: opentype.Glyph, rightToLeft: boolean}>} glyphClusters - see _stringToDirectionalGlyphClusters
+ * Split a sequence of glyph clusters into the runs HarfBuzz shapes on their own: a cluster continues the run of the
+ * cluster before it when both are in the same script run and both are left-to-right or both right-to-left. Given in
+ * visual order, the glyphs of a left-to-right run are in the order of the text, given in reverse visual order the
+ * glyphs of a right-to-left run, so a GPOS kern lookup that skips the glyphs it ignores stops at the end of a run.
+ * @param  {Array<{glyph: opentype.Glyph, rightToLeft: boolean, scriptRun: Object}>} glyphClusters - see
+ * _stringToDirectionalGlyphClusters
  * @return {Array<{glyphIndexes: number[], position: number}>} for each cluster, the glyph indexes of its run and its
  * position in the run
  */
-function getDirectionGlyphRuns(glyphClusters) {
+function getShapedGlyphRuns(glyphClusters) {
     const clusterRuns = [];
     let glyphIndexes = [];
     for (let i = 0; i < glyphClusters.length; i++) {
         const cluster = glyphClusters[i];
         const previousCluster = glyphClusters[i - 1];
-        if (previousCluster && cluster.rightToLeft !== previousCluster.rightToLeft) {
+        if (previousCluster && (cluster.rightToLeft !== previousCluster.rightToLeft || cluster.scriptRun !== previousCluster.scriptRun)) {
             glyphIndexes = [];
         }
         clusterRuns.push({ glyphIndexes, position: glyphIndexes.length });
@@ -538,32 +503,64 @@ function getDirectionGlyphRuns(glyphClusters) {
 /**
  * @typedef GlyphRenderOptions
  * @type Object
- * @property {string} [script] - script of the GPOS kern feature (and of the kern table fallback). Without it, each
- *                               pair of glyphs is kerned with the script of its characters: thai for Thai, arab for
- *                               Arabic, hebr for Hebrew, cyrl for Cyrillic, grek for Greek, latn otherwise, or DFLT
- *                               when the text has no character of a script (only digits, punctuation...). Like
- *                               HarfBuzz, the GPOS pairs of a right-to-left run are looked up in the order of the text,
- *                               the kern table pairs in visual order. The value of a GPOS pair of a right-to-left run is
- *                               added between its two glyphs: right for the usual records whose x placement and x advance
- *                               are the same, not yet for a record with an x advance only. A script the font has not falls back to 'DFLT', 'dflt', then
- *                               'latn', like HarfBuzz; 'hebr' without a hebr script in the GPOS table uses the kern table,
- *                               like the Hebrew shaper of HarfBuzz. The GSUB features do not use it yet: they use the
- *                               default language system of the script of each run of text (latn, arab or thai) or of DFLT.
- *                               See https://www.microsoft.com/typography/otspec/scripttags.htm
- * @property {string} [language='dflt'] - language system of the GPOS kern feature. A language system the script has not
- *                                        falls back to the default language system of the script (see
- *                                        Layout.getLangSysTable). The GSUB features
- *                                        do not use it yet (see script).
- *                                        See https://www.microsoft.com/typography/developers/opentype/languagetags.aspx
+ * @property {string} [script] - OpenType script tag of the GSUB features and of the GPOS kern feature (and of the kern
+ *                               table fallback) of the whole text, e.g. 'latn', 'cyrl' (see
+ *                               https://learn.microsoft.com/en-us/typography/opentype/spec/scripttags), taken literally:
+ *                               'deva' selects the language systems of the first version of the Indic tags, 'dev2' those
+ *                               of the second one. Like HarfBuzz with the script of a buffer, the text is one script run,
+ *                               which takes the arabic features for 'arab', the thai features for 'thai' and the latin
+ *                               features otherwise. Without it, like
+ *                               HarfBuzz after the itemization of a browser, the text is split into script runs by the
+ *                               Unicode Script property of its characters, the characters of no script (Common,
+ *                               Inherited, Unknown: digits, punctuation, spaces, most combining marks) and the variation
+ *                               selectors in the run of the character before them (of the first character of a script at
+ *                               the start of the text), or in the run after them when their Unicode Script_Extensions have
+ *                               its script and not the one of the run before them (e.g. a tatweel or an Arabic haraka
+ *                               between a Latin word and an Arabic letter), not yet the paired brackets of the browsers
+ *                               (a closing bracket is in the run of the character before it), and each run takes the
+ *                               OpenType tag of its script: latn, cyrl, grek, armn, cham... (kana for Hiragana and Katakana; dev3, dev2, then
+ *                               deva for Devanagari and the other Indic scripts; DFLT for a text of no script). Each
+ *                               script run is shaped on
+ *                               its own: its GSUB lookups and its kerning pairs never cross the run. The arabic runs take
+ *                               the arabic features, the thai runs the thai features, the other runs the latin features
+ *                               (see features). A script the font has not falls back to 'DFLT', 'dflt', then 'latn', like
+ *                               HarfBuzz; 'hebr' without a hebr script in the GPOS table uses the kern table, like the
+ *                               Hebrew shaper of HarfBuzz. Like HarfBuzz, the GPOS pairs of a right-to-left run are looked
+ *                               up in the order of the text, the kern table pairs in visual order. The value of a GPOS
+ *                               pair of a right-to-left run is added between its two glyphs: right for the usual records
+ *                               whose x placement and x advance are the same, not yet for a record with an x advance only.
+ * @property {string} [language='dflt'] - OpenType language system tag of the GSUB features (their locl included) and of
+ *                                        the GPOS kern feature, e.g. 'TRK ' or 'TRK' for Turkish, 'SRB' for Serbian
+ *                                        (a tag of three letters is the tag with its trailing space), not a BCP 47
+ *                                        language tag (see
+ *                                        https://learn.microsoft.com/en-us/typography/opentype/spec/languagetags).
+ *                                        A language system the script has not falls back to the default language
+ *                                        system of the script (see Layout.getLangSysTable), like HarfBuzz.
  * @property {boolean} [kerning=true] - whether to include kerning values: the values of all the lookups of the GPOS kern
  *                                      feature, each lookup kerning a glyph with the next glyph its lookupFlag does not
- *                                      ignore (e.g. across the marks with IgnoreMarks) in the same direction run, or the
- *                                      values of the kern table when GPOS has no kern feature for the script. Like
- *                                      HarfBuzz, which shapes each direction run on its own, two glyphs of a
- *                                      left-to-right run and of a right-to-left run are never kerned together
- * @property {object} [features] - OpenType Layout feature tags (e.g. `{ liga: false, ss01: true }`), enabling or disabling them over the default ones
- *                                 (for latin text: ccmp, locl, rlig, rclt, calt, liga and clig).
+ *                                      ignore (e.g. across the marks with IgnoreMarks) in the same run, or the values of
+ *                                      the kern table when GPOS has no kern feature for the script. Like HarfBuzz, which
+ *                                      shapes each script run and each direction run on its own, two glyphs of two
+ *                                      script runs, or of a left-to-right run and of a right-to-left run, are never
+ *                                      kerned together
+ * @property {object} [features] - OpenType Layout feature tags (e.g. `{ liga: false, ss01: true }`), enabling or disabling
+ *                                 them over the default ones, in every script run: rvrn, ccmp, locl, rlig, rclt, calt,
+ *                                 liga and clig for the latin and the thai features; rvrn, ccmp, locl, isol, init, medi,
+ *                                 fina, rlig, rclt, calt, liga, clig and mset for the arabic features. Like HarfBuzz, the
+ *                                 lookups of rvrn apply first, in a stage of their own, with the GSUB feature variations
+ *                                 at the variation of the options; the arabic features then apply in the stages of the
+ *                                 Arabic shaper of HarfBuzz: ccmp and locl, each form (isol, fina, medi, then init) to the
+ *                                 letters of its form (each lookup of the form once over the whole run, in lookup list
+ *                                 order), rlig, calt (with the other features when the language system has rclt), then
+ *                                 the other features. Like HarfBuzz, the required feature of the language system (its
+ *                                 ReqFeatureIndex) applies whatever the features option, at every glyph, with the lookups
+ *                                 of the stage of its tag in lookup list order when the tag is enabled, otherwise with
+ *                                 rvrn. The GPOS mark and mkmk features are not applied yet. Not yet the stch of
+ *                                 the Arabic shaper of HarfBuzz, nor a form enabled by the features option at every glyph
+ *                                 like a feature of HarfBuzz enabled by the user.
  *                                 See https://www.microsoft.com/typography/otspec/featuretags.htm
+ * @property {Object} [variation] - variation coordinates of the advances, the kerning and the GSUB feature variations
+ *                                  (e.g. `{ wght: 700 }`), the current variation of the font if omitted
  * @property {boolean} [hinting=false] - whether to apply font hinting to the outlines
  * @property {integer} [usePalette=0] For COLR/CPAL fonts, the zero-based index of the color palette to use. (Use `Font.palettes.get()` to get the available palettes)
  * @property {boolean} [drawLayers=true] For COLR/CPAL fonts, this can be turned to false in order to draw the fallback glyphs instead
@@ -571,15 +568,15 @@ function getDirectionGlyphRuns(glyphClusters) {
  */
 Font.prototype.defaultRenderOptions = {
     kerning: true,
+    // the GSUB features of each shaper: arab for the arabic script runs, thai for the thai script runs, latn for the
+    // other ones. Like HarfBuzz, rvrn is on by default in a stage of its own, the substitution features browsers enable
+    // by default apply to every script, and the arabic features add the forms and mset (collect_features_arabic). Not
+    // yet the other features HarfBuzz enables by default: the direction features (ltra, ltrm, rtla), rand, the
+    // automatic fractions (numr, dnom and frac around U+2044 FRACTION SLASH) and the stch of the Arabic shaper
     features: [
-        /**
-         * these 4 features are required to render Arabic text properly
-         * and shouldn't be turned off when rendering arabic text.
-         */
-        { script: 'arab', tags: ['init', 'medi', 'fina', 'rlig'] },
-        // the substitution features browsers enable by default
-        { script: 'latn', tags: ['ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig'] },
-        { script: 'thai', tags: ['liga', 'rlig', 'ccmp'] },
+        { script: 'arab', tags: ['rvrn', 'ccmp', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'mset'] },
+        { script: 'latn', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig'] },
+        { script: 'thai', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig'] },
     ],
     hinting: false,
     usePalette: 0,
@@ -604,20 +601,18 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
     options = Object.assign({}, this.defaultRenderOptions, options);
     const fontScale = 1 / this.unitsPerEm * fontSize;
     const glyphClusters = this._stringToDirectionalGlyphClusters(text, options);
-    const kerningLookupsByScript = new Map();
-    const getKerningLookups = script => {
-        if (!kerningLookupsByScript.has(script)) {
-            kerningLookupsByScript.set(script, this.position.getKerningTables(script, options.language));
+    const kerningLookupsByScriptRun = new Map();
+    // the kerning lookups of a script run, with its script tag that the GPOS table has (see selectScriptTag)
+    const getKerningLookups = scriptRun => {
+        if (!kerningLookupsByScriptRun.has(scriptRun)) {
+            const script = selectScriptTag(this.position, scriptRun.scriptTags);
+            kerningLookupsByScriptRun.set(scriptRun, this.position.getKerningTables(script, options.language));
         }
-        return kerningLookupsByScript.get(script);
+        return kerningLookupsByScriptRun.get(scriptRun);
     };
-    const clusterScripts = options.kerning && !options.script ?
-        glyphClusters.map(cluster => getClusterKerningScript(text.slice(cluster.start, cluster.end))) :
-        [];
-    const hasScript = clusterScripts.some(script => script !== undefined);
-    // the direction runs of the glyphs in visual order, and in the order of the text for the pairs of right-to-left text
-    const glyphRuns = getDirectionGlyphRuns(glyphClusters);
-    const reversedGlyphRuns = getDirectionGlyphRuns(reverseGlyphClusters(glyphClusters));
+    // the runs of the glyphs in visual order, and in the order of the text for the pairs of right-to-left text
+    const glyphRuns = getShapedGlyphRuns(glyphClusters);
+    const reversedGlyphRuns = getShapedGlyphRuns(glyphClusters.slice().reverse());
     for (let i = 0; i < glyphClusters.length; i += 1) {
         const glyph = glyphClusters[i].glyph;
         callback.call(this, glyph, x, y, fontSize, options);
@@ -629,10 +624,9 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
         if (options.kerning && i < glyphClusters.length - 1) {
             // We should apply position adjustment lookups in a more generic way.
             // Here we only use the xAdvance value.
-            const script = options.script || selectKerningScript([clusterScripts[i], clusterScripts[i + 1]], hasScript);
-            const kerningLookups = getKerningLookups(script);
-            // like HarfBuzz, which shapes each direction run on its own, a glyph is kerned with the glyphs of its run
-            // only. The GPOS pairs are in the order of the text, where the first glyph of a right-to-left pair is its
+            const kerningLookups = getKerningLookups(glyphClusters[i].scriptRun);
+            // like HarfBuzz, which shapes each script run and each direction run on its own, a glyph is kerned with the
+            // glyphs of its run only. The GPOS pairs are in the order of the text, where the first glyph of a right-to-left pair is its
             // right glyph, and each lookup kerns it with the next glyph of its run it does not ignore; the kern table
             // has no direction, HarfBuzz looks its pairs up in visual order
             const glyphRun = kerningLookups && glyphClusters[i].rightToLeft ?

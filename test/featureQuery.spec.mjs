@@ -6,12 +6,15 @@ import {
     glyphIndexes,
     createLookupFlagsFont,
     createLayoutTable,
+    createCoverage,
     createCoverages,
     createSingleLookup,
     createMultipleLookup,
     subAcuteBLookup
 } from './lookup-flags-font.mjs';
 import { readFileSync } from 'fs';
+import { itFailsUntilFixed } from './regression/helpers.mjs';
+import { getFeatureLookupTables } from './testutil.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
 // the result of a contextual rule that matches: its substitutions, and the offset of its last input glyph from the current one
@@ -64,30 +67,30 @@ describe('featureQuery.mjs', function() {
             /** arab */
             const initFeature = query.arabic.getFeature({tag: 'init', script: 'arab'});
             assert.deepEqual(initFeature.lookupListIndexes, [7]);
-            const initFeatureLookups = query.arabic.getFeatureLookups(initFeature);
+            const initFeatureLookups = getFeatureLookupTables(query.arabic, initFeature);
             assert.deepEqual(initFeatureLookups[0], arabicFont.tables.gsub.lookups[7]);
             /** latin */
             const ligaFeature = query.latin.getFeature({tag: 'liga', script: 'latn'});
             assert.deepEqual(ligaFeature.lookupListIndexes, [35]);
-            const ligaFeatureLookups = query.latin.getFeatureLookups(ligaFeature);
+            const ligaFeatureLookups = getFeatureLookupTables(query.latin, ligaFeature);
             assert.deepEqual(ligaFeatureLookups[0], latinFont.tables.gsub.lookups[35]);
         });
         it('should return lookup subtables', function () {
             /** arab */
             const initFeature = query.arabic.getFeature({tag: 'init', script: 'arab'});
-            const initFeatureLookups = query.arabic.getFeatureLookups(initFeature);
+            const initFeatureLookups = getFeatureLookupTables(query.arabic, initFeature);
             const initLookupSubtables = query.arabic.getLookupSubtables(initFeatureLookups[0]);
             assert.deepEqual(initLookupSubtables.length, arabicFont.tables.gsub.lookups[7].subtables.length);
             /** latin */
             const ligaFeature = query.latin.getFeature({tag: 'liga', script: 'latn'});
-            const ligaFeatureLookups = query.latin.getFeatureLookups(ligaFeature);
+            const ligaFeatureLookups = getFeatureLookupTables(query.latin, ligaFeature);
             const ligaLookupSubtables = query.latin.getLookupSubtables(ligaFeatureLookups[0]);
             assert.deepEqual(ligaLookupSubtables.length, latinFont.tables.gsub.lookups[35].subtables.length);
         });
         it('should return subtable lookup method', function () {
             /** arab */
             const initFeature = query.arabic.getFeature({tag: 'init', script: 'arab'});
-            const initFeatureLookups = query.arabic.getFeatureLookups(initFeature);
+            const initFeatureLookups = getFeatureLookupTables(query.arabic, initFeature);
             const initLookupTable = initFeatureLookups[0];
             const initLookupSubtables = query.arabic.getLookupSubtables(initLookupTable);
             const initSubtable = initLookupSubtables[0];
@@ -97,7 +100,7 @@ describe('featureQuery.mjs', function() {
             assert.deepEqual(typeof initLookupFn, 'function');
             /** latin */
             const ligaFeature = query.latin.getFeature({tag: 'liga', script: 'latn'});
-            const ligaFeatureLookups = query.latin.getFeatureLookups(ligaFeature);
+            const ligaFeatureLookups = getFeatureLookupTables(query.latin, ligaFeature);
             const ligaLookupTable = ligaFeatureLookups[0];
             const ligaLookupSubtables = query.latin.getLookupSubtables(ligaLookupTable);
             const ligaSubtable = ligaLookupSubtables[0];
@@ -108,7 +111,7 @@ describe('featureQuery.mjs', function() {
         });
         it('should find a substitute - single substitution format 1 (11)', function () {
             const feature = query.arabicChanga.getFeature({tag: 'init', script: 'arab'});
-            const featureLookups = query.arabicChanga.getFeatureLookups(feature);
+            const featureLookups = getFeatureLookupTables(query.arabicChanga, feature);
             const lookupSubtables = query.arabicChanga.getLookupSubtables(featureLookups[0]);
             const substitutionType = query.arabicChanga.getSubstitutionType(featureLookups[0], lookupSubtables[0]);
             assert.equal(substitutionType, 11);
@@ -118,7 +121,7 @@ describe('featureQuery.mjs', function() {
         });
         it('should find a substitute - single substitution format 2 (12)', function () {
             const feature = query.arabic.getFeature({tag: 'init', script: 'arab'});
-            const featureLookups = query.arabic.getFeatureLookups(feature);
+            const featureLookups = getFeatureLookupTables(query.arabic, feature);
             const lookupSubtables = query.arabic.getLookupSubtables(featureLookups[0]);
             const substitutionType = query.arabic.getSubstitutionType(featureLookups[0], lookupSubtables[0]);
             assert.equal(substitutionType, 12);
@@ -128,7 +131,7 @@ describe('featureQuery.mjs', function() {
         });
         it('should find a substitute - chaining context substitution format 3 (63)', function () {
             const feature = query.arabic.getFeature({tag: 'rlig', script: 'arab'});
-            const featureLookups = query.arabic.getFeatureLookups(feature);
+            const featureLookups = getFeatureLookupTables(query.arabic, feature);
             const lookupSubtables = query.arabic.getLookupSubtables(featureLookups[0]);
             const substitutionType = query.arabic.getSubstitutionType(featureLookups[0], lookupSubtables[0]);
             assert.equal(substitutionType, 63);
@@ -141,7 +144,7 @@ describe('featureQuery.mjs', function() {
         it('should find a substitute - required ligature substitution format 1 (41)', function () {
             /** arab */
             const initFeature = query.arabic.getFeature({tag: 'rlig', script: 'arab'});
-            const initFeatureLookups = query.arabic.getFeatureLookups(initFeature);
+            const initFeatureLookups = getFeatureLookupTables(query.arabic, initFeature);
             const lookupSubtables = query.arabic.getLookupSubtables(initFeatureLookups[1]);
             const substitutionType = query.arabic.getSubstitutionType(initFeatureLookups[1], lookupSubtables[0]);
             assert.equal(substitutionType, 41);
@@ -154,7 +157,7 @@ describe('featureQuery.mjs', function() {
         it('should find a substitute - ligature substitution format 1 (41)', function () {
             /** latin */
             const ligaFeature = query.latin.getFeature({tag: 'liga', script: 'latn'});
-            const ligaFeatureLookups = query.latin.getFeatureLookups(ligaFeature);
+            const ligaFeatureLookups = getFeatureLookupTables(query.latin, ligaFeature);
             const ligaLookupTable = ligaFeatureLookups[0];
             const ligaLookupSubtables = query.latin.getLookupSubtables(ligaLookupTable);
             const ligaSubtable = ligaLookupSubtables[0];
@@ -168,7 +171,7 @@ describe('featureQuery.mjs', function() {
         });
         it('should parse multiple glyphs -ligature substitution format 1 (51)', function () {
             const feature = query.sub5.getFeature({tag: 'ccmp', script: 'DFLT'});
-            const featureLookups = query.sub5.getFeatureLookups(feature);
+            const featureLookups = getFeatureLookupTables(query.sub5, feature);
             const lookupSubtables = query.sub5.getLookupSubtables(featureLookups[0]);
             const substitutionType = query.sub5.getSubstitutionType(featureLookups[0], lookupSubtables[0]);
             assert.equal(substitutionType, 51);
@@ -185,7 +188,7 @@ describe('featureQuery.mjs', function() {
         });
         it('should parse multiple glyphs -ligature substitution format 3 (53)', function () {
             const feature = query.sub5.getFeature({tag: 'ccmp', script: 'DFLT'});
-            const featureLookups = query.sub5.getFeatureLookups(feature);
+            const featureLookups = getFeatureLookupTables(query.sub5, feature);
             const lookupSubtables = query.sub5.getLookupSubtables(featureLookups[1]);
             const substitutionType = query.sub5.getSubstitutionType(featureLookups[1], lookupSubtables[0]);
             assert.equal(substitutionType, 53);
@@ -196,7 +199,7 @@ describe('featureQuery.mjs', function() {
         });
         it('should decompose a glyph - multiple substitution format 1 (21)', function () {
             const feature = query.arabic.getFeature({tag: 'ccmp', script: 'arab'});
-            const featureLookups = query.arabic.getFeatureLookups(feature);
+            const featureLookups = getFeatureLookupTables(query.arabic, feature);
             const lookupSubtables = query.arabic.getLookupSubtables(featureLookups[1]);
             const substitutionType = query.arabic.getSubstitutionType(featureLookups[1], lookupSubtables[0]);
             assert.equal(substitutionType, 21);
@@ -349,7 +352,7 @@ describe('featureQuery.mjs', function() {
             assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, glyphB], 0), { ligGlyph: aAlternate, componentOffsets: [] });
         });
 
-        it('ignores the glyph classes of a GDEF table HarfBuzz ignores: ligature, single substitution and lookupFeature', function() {
+        it('ignores the glyph classes of a GDEF table HarfBuzz ignores: ligature and single substitution', function() {
             // LookupFlagsBlocklistedGDEF.ttf: the GDEF table of LookupFlags.ttf, where ff is a ligature, padded with its GSUB and GPOS
             // tables to the lengths of a font of the blocklist of HarfBuzz, which drops the GDEF table and synthesizes the glyph
             // classes from the general category (GDEF::accelerator_t, hb_synthesize_glyph_classes): ff (U+FB00, Ll) is a base
@@ -365,8 +368,8 @@ describe('featureQuery.mjs', function() {
                 lookupFlag: IGNORE_LIGATURES,
                 subtables: [{ substFormat: 2, coverage: { format: 1, glyphs: [ff] }, substitute: [glyphIndexes.a_b_c] }]
             };
-            const createBlocklistedQuery = (lookupTable, scriptTag, featureTag) => {
-                const query = createQuery(lookupTable, scriptTag, featureTag);
+            const createBlocklistedQuery = lookupTable => {
+                const query = createQuery(lookupTable);
                 query.font.isGdefIgnoredByLayout = true;
                 return query;
             };
@@ -383,10 +386,6 @@ describe('featureQuery.mjs', function() {
             // with the GDEF table the lookup does not apply at the ligature ff
             assert.equal(substituteWith(createBlocklistedQuery(singleLookup), singleLookup, [ff]), glyphIndexes.a_b_c);
             assert.equal(substituteWith(createQuery(singleLookup), singleLookup, [ff]), null);
-            const ccmpAtFf = { tag: 'ccmp', script: 'thai', contextParams: new ContextParams([ff], 0) };
-            const substitutions = createBlocklistedQuery(singleLookup, 'thai', 'ccmp').lookupFeature(ccmpAtFf);
-            assert.equal(substitutions[0].substitution, glyphIndexes.a_b_c);
-            assert.deepStrictEqual(createQuery(singleLookup, 'thai', 'ccmp').lookupFeature(ccmpAtFf), [ff]);
         });
 
         it('maps the sequence indexes of the input to their offsets across the marks: context formats 1, 2 and 3', function() {
@@ -508,8 +507,6 @@ describe('featureQuery.mjs', function() {
             assert.equal(substituteIn(lookupTable, context, 0), null);
             // ss20, the same rule without the flag: [7=0+500|5=0+0|2=1+500]
             assert.deepStrictEqual(substituteIn({ ...lookupTable, lookupFlag: 0 }, context, 0), contextualMatch([aAlternate], 0));
-            const thaiQuery = createQuery(lookupTable, 'thai', 'ccmp');
-            assert.deepStrictEqual(thaiQuery.lookupFeature({ tag: 'ccmp', script: 'thai', contextParams: new ContextParams(context, 0) }), context);
         });
 
         it('matches nothing with a rule of format 3 without input glyphs', function() {
@@ -590,13 +587,6 @@ describe('featureQuery.mjs', function() {
             it('skips the glyphs its lookupFlag ignores in a contextual rule, not the flags of its subtable', function() {
                 assert.deepStrictEqual(substituteAt(extensionLookup, 0), contextualMatch([aAlternate], 0));
             });
-
-            it('skips the glyphs its lookupFlag ignores in a contextual rule in lookupFeature', function() {
-                const extensionQuery = createQuery(extensionLookup, 'thai', 'ccmp');
-                const contextParams = new ContextParams([glyphA, acute, glyphB], 0);
-                const substitutions = extensionQuery.lookupFeature({ tag: 'ccmp', script: 'thai', contextParams });
-                assert.deepStrictEqual(substitutions[0].substitution, contextualMatch([aAlternate], 0));
-            });
         });
 
         // lookupflag IgnoreMarks; sub acute by acute.alt;
@@ -612,8 +602,7 @@ describe('featureQuery.mjs', function() {
             assert.equal(substituteAt({ ...acuteLookup, lookupFlag: 0 }, 1), glyphIndexes['acute.alt']);
         });
 
-        it('applies the lookupFlag in lookupFeature, the path of the arabic and thai features', function() {
-            const contextAt = position => new ContextParams([glyphA, acute, glyphB], position);
+        it('applies the lookupFlag of a chaining lookup and of a single lookup of a feature of the default language system of a script', function() {
             // the lookahead rule above in the ccmp feature of thai
             const lookaheadLookup = {
                 lookupType: 6,
@@ -626,14 +615,15 @@ describe('featureQuery.mjs', function() {
                     lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }]
                 }]
             };
-            const lookaheadQuery = createQuery(lookaheadLookup, 'thai', 'ccmp');
-            const substitutions = lookaheadQuery.lookupFeature({ tag: 'ccmp', script: 'thai', contextParams: contextAt(0) });
-            assert.deepStrictEqual(substitutions[0].substitution, contextualMatch([aAlternate], 0));
-            const acuteQuery = createQuery(acuteLookup, 'thai', 'ccmp');
-            assert.deepStrictEqual(acuteQuery.lookupFeature({ tag: 'ccmp', script: 'thai', contextParams: contextAt(1) }), [glyphA, acute, glyphB]);
+            const substituteInFeature = (lookupTable, scriptTag, featureTag, context, position) => {
+                const action = createQuery(lookupTable, scriptTag, featureTag).lookupSubstitution(lookupTable, new ContextParams(context, position), featureTag);
+                return action && action.substitution;
+            };
+            assert.deepStrictEqual(substituteInFeature(lookaheadLookup, 'thai', 'ccmp', [glyphA, acute, glyphB], 0), contextualMatch([aAlternate], 0));
+            assert.strictEqual(substituteInFeature(acuteLookup, 'thai', 'ccmp', [glyphA, acute, glyphB], 1), null);
         });
 
-        it('matches the components of a ligature across the marks in lookupFeature, the path of the arabic required ligatures', function() {
+        it('matches the components of a ligature across the marks, in the rlig of arab', function() {
             // rlig: lookupflag IgnoreMarks; sub lam alef by lam_alef;
             // --features=-kern -u 0644,064E,0627 (rlig is on by default): [14=0+0|19=0+500]
             const ligatureLookup = {
@@ -646,9 +636,8 @@ describe('featureQuery.mjs', function() {
                 }]
             };
             const ligatureQuery = createQuery(ligatureLookup, 'arab', 'rlig');
-            const contextParams = new ContextParams([lam, fatha, alef], 0);
-            const substitutions = ligatureQuery.lookupFeature({ tag: 'rlig', script: 'arab', contextParams });
-            assert.deepStrictEqual(substitutions[0].substitution, { ligGlyph: glyphIndexes.lam_alef, componentOffsets: [2] });
+            const action = ligatureQuery.lookupSubstitution(ligatureLookup, new ContextParams([lam, fatha, alef], 0), 'rlig');
+            assert.deepStrictEqual(action.substitution, { ligGlyph: glyphIndexes.lam_alef, componentOffsets: [2] });
         });
     });
 
@@ -829,7 +818,7 @@ describe('featureQuery.mjs', function() {
             assert.deepStrictEqual(action.substitution, contextualMatch([], 1));
         });
 
-        it('ends the lookup at a contextual rule that substitutes nothing in lookupFeature, the path of the arabic forms', function() {
+        it('ends the lookup at a chaining rule that substitutes nothing, the exception rule of rlig of arab', function() {
             // rlig: ignore sub reh' dal; subtable; sub reh' lookup SUB_REH; (two ChainContextSubst format 3)
             const chainingSubtable = (lookaheadGlyphs, lookupRecords) => ({
                 substFormat: 3,
@@ -845,11 +834,49 @@ describe('featureQuery.mjs', function() {
             };
             const lookups = [createSingleLookup([reh], [glyphIndexes['reh.alt']]), exceptionLookup];
             const query = new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('arab', 'rlig', [1], lookups) }));
-            const lookupFeatureAtFirstGlyph = context => query.lookupFeature({ tag: 'rlig', script: 'arab', contextParams: new ContextParams(context, 0) });
+            const substituteAtFirstGlyph = context => query.lookupSubstitution(exceptionLookup, new ContextParams(context, 0), 'rlig').substitution;
             // -u 0631,062F: [15=1+500|13=0+500], reh is kept
-            assert.deepStrictEqual(lookupFeatureAtFirstGlyph([reh, dal]), [reh, dal]);
+            assert.deepStrictEqual(substituteAtFirstGlyph([reh, dal]), contextualMatch([], 0));
             // -u 0631,0631: [20=1+500|20=0+500]
-            assert.deepStrictEqual(lookupFeatureAtFirstGlyph([reh, reh])[0].substitution, contextualMatch([glyphIndexes['reh.alt']], 0));
+            assert.deepStrictEqual(substituteAtFirstGlyph([reh, reh]), contextualMatch([glyphIndexes['reh.alt']], 0));
+        });
+    });
+
+    // the font of test/lookup-flags-font.mjs, which has no cmap (DefaultEncoding): a character it has not has no glyph index
+    // (null), not the glyph 0 that the cmap of a parsed font and HarfBuzz give it
+    describe('a coverage table from the glyph 0', function() {
+        const { a: glyphA } = glyphIndexes;
+        const aAlternate = glyphIndexes['a.alt'];
+
+        // LookupFlagsNotdefBacktrack.ttf: calt sub .notdef a' by a.alt;, its backtrack coverage of format 2 here (a range from
+        // the glyph 0), of format 1 in the font of feaLib
+        function createNotdefBacktrackFont() {
+            const chainingLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    backtrackCoverage: [{ format: 2, ranges: [{ start: 0, end: 0, index: 0 }] }],
+                    inputCoverage: [createCoverage([glyphA])],
+                    lookaheadCoverage: [],
+                    lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 1 }]
+                }]
+            };
+            const lookups = [chainingLookup, createSingleLookup([glyphA], [aAlternate])];
+            return createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [0], lookups) });
+        }
+
+        it('matches the glyph 0 in the backtrack of a rule, like HarfBuzz', function() {
+            // Z has the glyph .notdef: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsNotdefBacktrack.ttf
+            // -u 005A,0061 [0=0+500|7=1+500]
+            const font = createNotdefBacktrackFont();
+            font.glyphs.get(0).addUnicode(0x5A);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('Za'), [0, aAlternate]);
+        });
+
+        it('does not match a character with no glyph index in the backtrack of a rule', function() {
+            // a coverage table lists glyph IDs (OpenType, Common Table Formats), and Z has none
+            assert.deepStrictEqual(createNotdefBacktrackFont().stringToGlyphIndexes('Za'), [null, glyphA]);
         });
     });
 
@@ -875,6 +902,187 @@ describe('featureQuery.mjs', function() {
             // hb-shape --no-glyph-names --variations=wght=650.31 TestVariationPrecision.ttf -u 002E
             // [4=0+250]
             assert.deepStrictEqual(variationFont.stringToGlyphs('.', { features: { rvrn: true } }).map(glyph => glyph.index), [4]);
+        });
+
+        it('matches the conditions at the variation of the query, not at the variation of the font', function() {
+            // the font left at its default instance, wght 400
+            assert.equal(new FeatureQuery(variationFont).getFeatureVariationSubstitutions().size, 0);
+            assert.equal(new FeatureQuery(variationFont, { wght: 650.32 }).getFeatureVariationSubstitutions().size, 1);
+            assert.equal(new FeatureQuery(variationFont, { wght: 650.31 }).getFeatureVariationSubstitutions().size, 0);
+            variationFont.variation.set({ wght: 650.32 });
+            assert.equal(new FeatureQuery(variationFont, { wght: 400 }).getFeatureVariationSubstitutions().size, 0);
+        });
+
+        it('applies rvrn by default, at the variation of the options', function() {
+            // hb-shape --no-glyph-names --variations=wght=650.32 TestVariationPrecision.ttf -u 002E
+            // [2=0+300]
+            const glyphsAt = options => variationFont.stringToGlyphs('.', options).map(glyph => glyph.index);
+            assert.deepStrictEqual(glyphsAt({ variation: { wght: 650.32 } }), [2]);
+            // hb-shape --no-glyph-names --variations=wght=650.32 --features=-rvrn TestVariationPrecision.ttf -u 002E
+            // [4=0+250]
+            assert.deepStrictEqual(glyphsAt({ variation: { wght: 650.32 }, features: { rvrn: false } }), [4]);
+            // hb-shape --no-glyph-names TestVariationPrecision.ttf -u 002E
+            // [4=0+250]
+            assert.deepStrictEqual(glyphsAt(), [4]);
+        });
+
+        it('gives the required feature with the alternate feature table of the variation, like HarfBuzz', function() {
+            // TestVariationRequired.ttf: TestVariationPrecision.ttf with rvrn (feature 0: no lookups, lookup 0 sub period by
+            // space; from wght 650.32 up) as the required feature of the DefaultLangSys of DFLT (ReqFeatureIndex 0, set with
+            // fontTools)
+            variationFont.tables.gsub.scripts[0].script.defaultLangSys.reqFeatureIndex = 0;
+            const requiredLookups = variation => new FeatureQuery(variationFont, variation).getRequiredFeature('DFLT').feature.lookupListIndexes;
+            assert.deepStrictEqual(requiredLookups({ wght: 650.32 }), [0]);
+            assert.deepStrictEqual(requiredLookups(), []);
+            // the required feature applies whatever the features option: hb-shape --no-glyph-names --features=-rvrn
+            // --variations=wght=650.32 TestVariationRequired.ttf -u 002E [2=0+300], without --variations [4=0+250]
+            const glyphsAt = options => variationFont.stringToGlyphs('.', options).map(glyph => glyph.index);
+            assert.deepStrictEqual(glyphsAt({ variation: { wght: 650.32 }, features: { rvrn: false } }), [2]);
+            assert.deepStrictEqual(glyphsAt({ features: { rvrn: false } }), [4]);
+        });
+
+        it('substitutes the glyph .notdef of a character the font has not, like HarfBuzz', function() {
+            // TestItalicSwitch.ttf: rvrn (feature 25) has the lookup 1 from ital 0.5 up (fontTools), which substitutes .notdef
+            // too: hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --variations=ital=1 TestItalicSwitch.ttf
+            // -u 0041,4E00 [140=0+695|105=1+512], A.ital and .notdef.ital; without --variations [35=0+700|0=1+512]
+            const italicSwitchFont = loadSync('./test/fonts/TestItalicSwitch.ttf');
+            assert.deepStrictEqual(italicSwitchFont.stringToGlyphIndexes('A\u{4E00}', { variation: { ital: 1 } }), [140, 105]);
+            assert.deepStrictEqual(italicSwitchFont.stringToGlyphIndexes('A\u{4E00}'), [35, 0]);
+        });
+    });
+
+    // TestScriptLanguage.ttf, generated by test/generate-script-language-font.py: the features of its language systems
+    // (feature indexes, from fontTools: font['GSUB'].table.ScriptList) are DFLT calt (0) clig (6) liga (13) rclt (24)
+    // rvrn (27); arab URD calt (1) clig (6) fina (8) liga (16) locl (22) rlig (25) rvrn (27); cyrl calt (0) clig (6)
+    // liga (17) rvrn (27) and the required feature (ReqFeatureIndex) ss06 (31, lookup 26), cyrl SRB calt (0) clig (6)
+    // liga (13) locl (20) rvrn (27); latn calt (0) clig (6) liga (19) rvrn (27), latn TRK calt (0) clig (6) liga (15)
+    // locl (21) rvrn (27) and the required feature ss05 (30, lookup 25)
+    describe('the language systems of a script', function() {
+        let scriptLanguageQuery;
+
+        beforeEach(function() {
+            scriptLanguageQuery = new FeatureQuery(loadSync('./test/fonts/TestScriptLanguage.ttf'));
+        });
+
+        it('gives the features of the language system of a language, with its tag of three or four letters', function() {
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('latn', 'TRK '), [0, 6, 15, 21, 27]);
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('latn', 'TRK'), [0, 6, 15, 21, 27]);
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('cyrl', 'SRB'), [0, 6, 13, 20, 27]);
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('arab', 'URD'), [1, 6, 8, 16, 22, 25, 27]);
+        });
+
+        it('falls back to the default language system of the script for a language the script has not, like HarfBuzz', function() {
+            // hb_ot_layout_script_select_language: the language, then the dflt record, then the DefaultLangSys
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('latn'), [0, 6, 19, 27]);
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('latn', 'dflt'), [0, 6, 19, 27]);
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('latn', 'SRB'), [0, 6, 19, 27]);
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('cyrl', 'TRK'), [0, 6, 17, 27]);
+        });
+
+        it('falls back to DFLT for a script the font has not, like HarfBuzz', function() {
+            // hb_ot_layout_table_select_script: the script, then DFLT, dflt and latn
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes('armn'), [0, 6, 13, 24, 27]);
+            assert.deepStrictEqual(scriptLanguageQuery.getScriptFeaturesIndexes(), [0, 6, 13, 24, 27]);
+        });
+
+        it('gives the feature of a tag in the language system of the script and of the language', function() {
+            const lookupIndexes = query => scriptLanguageQuery.getFeature(query).lookupListIndexes;
+            assert.deepStrictEqual(lookupIndexes({ tag: 'liga', script: 'cyrl' }), [0, 3, 16]);
+            assert.deepStrictEqual(lookupIndexes({ tag: 'liga', script: 'cyrl', language: 'SRB' }), [0, 16]);
+            assert.deepStrictEqual(lookupIndexes({ tag: 'locl', script: 'cyrl', language: 'SRB' }), [7]);
+            assert.deepStrictEqual(lookupIndexes({ tag: 'locl', script: 'latn', language: 'TRK' }), [6]);
+            assert.strictEqual(scriptLanguageQuery.getFeature({ tag: 'locl', script: 'cyrl' }), null);
+            assert.strictEqual(scriptLanguageQuery.getFeature({ tag: 'locl', script: 'latn', language: 'SRB' }), null);
+        });
+
+        it('gives the required feature of a language system, of its language or its default one, like HarfBuzz', function() {
+            assert.strictEqual(scriptLanguageQuery.getRequiredFeatureIndex('latn', 'TRK'), 30);
+            assert.strictEqual(scriptLanguageQuery.getRequiredFeatureIndex('cyrl'), 31);
+            // arab SND ss07 (32), arab KUR fina (7), which is not in the features of its language system
+            assert.strictEqual(scriptLanguageQuery.getRequiredFeatureIndex('arab', 'SND'), 32);
+            assert.strictEqual(scriptLanguageQuery.getRequiredFeatureIndex('arab', 'KUR'), 7);
+            // the language systems with no required feature: hb_ot_layout_language_get_required_feature gives
+            // HB_OT_LAYOUT_NO_FEATURE_INDEX
+            assert.strictEqual(scriptLanguageQuery.getRequiredFeatureIndex('cyrl', 'SRB'), undefined);
+            assert.strictEqual(scriptLanguageQuery.getRequiredFeatureIndex('latn'), undefined);
+            const requiredFeature = scriptLanguageQuery.getRequiredFeature('latn', 'TRK');
+            assert.deepStrictEqual([requiredFeature.tag, requiredFeature.feature.lookupListIndexes], ['ss05', [25]]);
+            assert.strictEqual(scriptLanguageQuery.getRequiredFeature('cyrl', 'SRB'), null);
+            // the required feature is not one of the features of the language system: its tag gives no feature
+            assert.strictEqual(scriptLanguageQuery.getFeature({ tag: 'ss05', script: 'latn', language: 'TRK' }), null);
+        });
+    });
+
+    describe('a script with no default language system', function() {
+        // NotoSansThai-Medium-Testing-v1.ttf: its latn script has the language systems MOL and ROM only, no DefaultLangSys
+        // and no dflt LangSysRecord (ttx), and DFLT has ccmp, whose lookups substitute j before a mark by dotless j
+        let font;
+
+        before(function() {
+            font = loadSync('./test/fonts/NotoSansThai-Medium-Testing-v1.ttf');
+        });
+
+        it('gives no features for the default language and for a language the script has not, like HarfBuzz', function() {
+            const featureQuery = new FeatureQuery(font);
+            assert.deepStrictEqual(featureQuery.getScriptFeaturesIndexes('latn'), []);
+            assert.deepStrictEqual(featureQuery.getScriptFeaturesIndexes('latn', 'TRK'), []);
+            assert.deepStrictEqual(featureQuery.getScriptFeaturesIndexes('latn', 'ROM'), [0, 1, 4, 6, 7]);
+            assert.strictEqual(featureQuery.getRequiredFeature('latn'), null);
+            // not the features of DFLT: hb-shape --no-glyph-names --cluster-level=1 NotoSansThai-Medium-Testing-v1.ttf
+            // -u 006A,0301 [79=0+272|302=1+0], --language=ro [289=0+272|302=1+0]
+            assert.deepStrictEqual(font.stringToGlyphIndexes('j\u{301}'), [79, 302]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('j\u{301}', { language: 'ROM' }), [289, 302]);
+        });
+
+        itFailsUntilFixed('composes a letter and its combining mark into the precomposed letter of the cmap, like HarfBuzz',
+            'Font.prototype.stringToGlyphIndexes (src/font.mjs): the fork has no compose step of the normalizer of HarfBuzz ' +
+            '(hb_ot_shape_normalize), and the latn script has no ccmp, so A U+0328 keeps the glyphs A and uni0328',
+            function() {
+                // the decomposed A ogonek (U+0104 is mapped by the cmap): hb-shape --shapers=ot --no-glyph-names --cluster-level=1
+                // NotoSansThai-Medium-Testing-v1.ttf -u 0041,0328 [188=0+654], --features=-ccmp the same
+                assert.deepStrictEqual(font.stringToGlyphIndexes('A\u{328}'), [188]);
+            });
+    });
+
+    describe('a feature index past the FeatureList', function() {
+        const { reh, dal } = glyphIndexes;
+        const dalAlternate = glyphIndexes['dal.alt'];
+        const rehAlternate = glyphIndexes['reh.alt'];
+
+        it('ignores the index and keeps the other features of the language system, like HarfBuzz', function() {
+            // LookupFlagsFeatureIndexPastList.ttf: in rlig sub dal by dal.alt; then sub dal.alt by reh.alt;, the feature index 7
+            // after the rlig feature (0) in the language systems
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsFeatureIndexPastList.ttf -u 0631,062F
+            // [20=1+500|13=0+500]
+            const lookups = [createSingleLookup([dal], [dalAlternate]), createSingleLookup([dalAlternate], [rehAlternate])];
+            const gsub = createLayoutTable('arab', 'rlig', [0, 1], lookups);
+            gsub.scripts[0].script.defaultLangSys.featureIndexes.push(7);
+            const font = createLookupFlagsFont({ gsub });
+            const featureQuery = new FeatureQuery(font);
+            assert.deepStrictEqual(featureQuery.getFeature({ tag: 'rlig', script: 'arab' }).lookupListIndexes, [0, 1]);
+            assert.deepStrictEqual(featureQuery.getScriptFeatures('arab').map(({ tag }) => tag), ['rlig']);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{631}\u{62F}'), [rehAlternate, reh]);
+        });
+    });
+
+    describe('two features of one tag in a language system', function() {
+        const { dal } = glyphIndexes;
+        const dalAlternate = glyphIndexes['dal.alt'];
+        const rehAlternate = glyphIndexes['reh.alt'];
+
+        it('gives the first feature of the tag, like HarfBuzz', function() {
+            // LookupFlagsDuplicateFeatureTag.ttf: in rlig (0) sub dal by dal.alt;, in a second rlig (1) sub dal by reh.alt;
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsDuplicateFeatureTag.ttf -u 062F [17=0+500];
+            // --features=-kern,-rlig [15=0+500]
+            const lookups = [createSingleLookup([dal], [dalAlternate]), createSingleLookup([dal], [rehAlternate])];
+            const gsub = createLayoutTable('arab', 'rlig', [0], lookups);
+            gsub.features.push({ tag: 'rlig', feature: { featureParams: 0, lookupListIndexes: [1] } });
+            gsub.scripts[0].script.defaultLangSys.featureIndexes.push(1);
+            const font = createLookupFlagsFont({ gsub });
+            const featureQuery = new FeatureQuery(font);
+            assert.deepStrictEqual(featureQuery.getFeature({ tag: 'rlig', script: 'arab' }).lookupListIndexes, [0]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{62F}'), [dalAlternate]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{62F}', { features: { rlig: false } }), [dal]);
         });
     });
 });

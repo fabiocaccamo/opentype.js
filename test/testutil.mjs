@@ -149,4 +149,26 @@ function enableMockCanvas() {
     window.document = global.document;
 }
 
-export { hex, unhex, unhexArray, createMockObject, enableMockCanvas };
+/**
+ * Make the text layout of a font draw the given glyphs in place of the glyphs of the text (e.g. for a font without
+ * cmap): the glyph clusters keep the characters, the direction and the script run of the glyphs of the text.
+ * @param {opentype.Font} font
+ * @param {number[]} glyphIndexes the glyph index of each glyph of the text, in visual order
+ */
+function replaceTextGlyphs(font, glyphIndexes) {
+    const getTextGlyphClusters = font._stringToDirectionalGlyphClusters;
+    font._stringToDirectionalGlyphClusters = (text, options) => getTextGlyphClusters.call(font, text, options)
+        .map((cluster, index) => Object.assign({}, cluster, { glyph: font.glyphs.get(glyphIndexes[index]) }));
+}
+
+/**
+ * The lookup tables of a GSUB feature, in the order of the feature
+ * @param {FeatureQuery} query
+ * @param {Object} feature a feature table (see FeatureQuery.getFeature)
+ * @returns {Object[]}
+ */
+function getFeatureLookupTables(query, feature) {
+    return feature.lookupListIndexes.map(lookupIndex => query.getLookupByIndex(lookupIndex));
+}
+
+export { hex, unhex, unhexArray, createMockObject, enableMockCanvas, replaceTextGlyphs, getFeatureLookupTables };

@@ -1,54 +1,21 @@
 /**
- * Apply the enabled GSUB features of the latin script, like HarfBuzz does: the
- * lookups of all the features are applied one after the other in lookup list order,
- * each one to the whole run of text, and not feature by feature.
+ * Apply the enabled GSUB features like the default shaper of HarfBuzz, to every script run that is neither arabic nor
+ * thai (see getScriptRunShaper) and to a text of no script: the lookups of rvrn first, then the lookups of all the other
+ * features one after the other in lookup list order, each one to the whole script run of text, and not feature by
+ * feature. The scripts of the default shaper of HarfBuzz (Latin, Cyrillic, Greek, Armenian, Georgian...) and Hebrew,
+ * whose shaper of HarfBuzz adds no GSUB feature, take the GSUB features of HarfBuzz; not yet the features and the
+ * stages of the other shapers of HarfBuzz (Indic, Khmer, Myanmar, the Universal Shaping Engine...).
  */
 
-import { applyFeaturesToTokens } from '../applySubstitution.mjs';
-import { isArabicChar, isThaiChar } from '../../char.mjs';
-
-/**
- * Check if a character belongs to the runs the latin features apply to
- * @param {string} char
- * @returns {boolean}
- */
-function isLatinRunChar(char) {
-    return !isArabicChar(char) && !isThaiChar(char);
-}
+import { applyFeatureStagesToTokens } from '../applySubstitution.mjs';
 
 /**
- * Split the tokens into the runs the latin features apply to: the maximal sequences
- * of characters that are not shaped by the arabic or thai features, so that
- * spaces, digits and punctuation (e.g. the code ligatures of "->") are included.
- * @param {Token[]} tokens
- * @returns {Token[][]}
+ * Apply the enabled latin features to a script run of the text
+ * @param {Token[]} tokens the tokens of the run
+ * @param {string} script the script tag of the run in the GSUB table
  */
-function getLatinRuns(tokens) {
-    const runs = [];
-    let run = [];
-    for (let i = 0; i < tokens.length; i++) {
-        const token = tokens[i];
-        if (!isLatinRunChar(token.char)) {
-            if (run.length) runs.push(run);
-            run = [];
-        } else {
-            run.push(token);
-        }
-    }
-    if (run.length) runs.push(run);
-    return runs;
-}
-
-/**
- * Apply the enabled latin features to the text
- */
-function latinFeatures() {
-    const tags = this.featuresTags.latn || [];
-    if (!tags.length) return;
-    for (const run of getLatinRuns(this.tokenizer.tokens)) {
-        applyFeaturesToTokens(this.query, tags, 'latn', run);
-    }
+function latinFeatures(tokens, script) {
+    applyFeatureStagesToTokens(this.query, this.featuresTags.latn, script, this.language, tokens);
 }
 
 export default latinFeatures;
-export { isLatinRunChar };

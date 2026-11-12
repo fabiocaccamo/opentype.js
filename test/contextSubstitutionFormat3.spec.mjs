@@ -2,6 +2,7 @@ import assert from 'assert';
 import { Font, Glyph, Path } from '../src/opentype.mjs';
 import FeatureQuery from '../src/features/featureQuery.mjs';
 import { ContextParams } from '../src/tokenizer.mjs';
+import { getFeatureLookupTables } from './testutil.mjs';
 
 /**
  * Build a minimal font with a GSUB Context Substitution Format 3 (type 5, format 3)
@@ -119,7 +120,7 @@ describe('contextSubstitutionFormat3', function () {
 
     it('should produce correct substitutions for [A, B] → [A\', B\']', function () {
         const feature = query.getFeature({ tag: 'test', script: 'DFLT' });
-        const featureLookups = query.getFeatureLookups(feature);
+        const featureLookups = getFeatureLookupTables(query, feature);
         const lookupSubtables = query.getLookupSubtables(featureLookups[0]);
         const substitutionType = query.getSubstitutionType(featureLookups[0], lookupSubtables[0]);
         assert.equal(substitutionType, '53');
@@ -135,7 +136,7 @@ describe('contextSubstitutionFormat3', function () {
 
     it('should return null when context is too short', function () {
         const feature = query.getFeature({ tag: 'test', script: 'DFLT' });
-        const featureLookups = query.getFeatureLookups(feature);
+        const featureLookups = getFeatureLookupTables(query, feature);
         const lookupSubtables = query.getLookupSubtables(featureLookups[0]);
 
         const lookup = query.getLookupMethod(featureLookups[0], lookupSubtables[0]);
@@ -147,7 +148,7 @@ describe('contextSubstitutionFormat3', function () {
 
     it('should return null when glyphs do not match coverages', function () {
         const feature = query.getFeature({ tag: 'test', script: 'DFLT' });
-        const featureLookups = query.getFeatureLookups(feature);
+        const featureLookups = getFeatureLookupTables(query, feature);
         const lookupSubtables = query.getLookupSubtables(featureLookups[0]);
 
         const lookup = query.getLookupMethod(featureLookups[0], lookupSubtables[0]);
@@ -166,7 +167,7 @@ describe('contextSubstitutionFormat3', function () {
         query = new FeatureQuery(font);
 
         const feature = query.getFeature({ tag: 'test', script: 'DFLT' });
-        const featureLookups = query.getFeatureLookups(feature);
+        const featureLookups = getFeatureLookupTables(query, feature);
         const lookupSubtables = query.getLookupSubtables(featureLookups[0]);
 
         const lookup = query.getLookupMethod(featureLookups[0], lookupSubtables[0]);

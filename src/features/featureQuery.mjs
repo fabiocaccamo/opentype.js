@@ -2,7 +2,6 @@
  * Query a feature by some of it's properties to lookup a glyph substitution.
  */
 
-import { ContextParams } from '../tokenizer.mjs';
 import { getLayoutGdefTable, isGlyphIgnoredByLookup, getNotIgnoredGlyphPositions } from '../layout.mjs';
 
 // font -> substitution types already warned as unsupported (warn once per font)
@@ -11,10 +10,23 @@ const warnedUnsupportedSubstitutionTypes = new WeakMap();
 /**
  * Create feature query instance
  * @param {Font} font opentype font instance
+ * @param {Object} [variation] variation coordinates of the GSUB feature variations, the current variation of the font if omitted
  */
-function FeatureQuery(font) {
+function FeatureQuery(font, variation) {
     this.font = font;
+    this.variation = variation;
+    // the features of each language system, by script and language (see getLanguageSystemKey)
     this.features = {};
+}
+
+/**
+ * The key of the features of a language system in FeatureQuery.features
+ * @param {string} [scriptTag] script tag, DFLT if omitted
+ * @param {string} [languageTag] language tag, the default language system of the script if omitted
+ * @returns {string}
+ */
+function getLanguageSystemKey(scriptTag, languageTag) {
+    return (scriptTag || 'DFLT') + '|' + (languageTag || 'dflt');
 }
 
 /**
@@ -36,12 +48,15 @@ function SubstitutionAction(action) {
 }
 
 /**
- * Lookup a coverage table
- * @param {number} glyphIndex glyph index
+ * Lookup a coverage table: like HarfBuzz, the glyph 0 (.notdef) is covered like any other glyph
+ * @param {number|null} glyphIndex glyph index, null for a character with no glyph in a font without cmap (see
+ * DefaultEncoding.charToGlyphIndex), which no coverage table covers
  * @param {CoverageTable} coverage coverage table
  */
 function lookupCoverage(glyphIndex, coverage) {
-    if (!glyphIndex) return -1;
+    if (typeof glyphIndex !== 'number') {
+        return -1;
+    }
     switch (coverage.format) {
         case 1:
             return coverage.glyphs.indexOf(glyphIndex);
@@ -481,87 +496,79 @@ function decompositionSubstitutionFormat1(glyphIndex, subtable) {
 }
 
 /**
- * Get default script features indexes
+ * Get the feature indexes of a language system, like HarfBuzz: a script the GSUB table has not falls back to
+ * DFLT, dflt, then latn, and a language the script has not to the default language system of the script
+ * (see Layout.getScriptTable and Layout.getLangSysTable)
+ * @param {string} [scriptTag] script tag, DFLT if omitted
+ * @param {string} [languageTag] language tag ('TRK ' or 'TRK'), the default language system of the script if omitted
+ * @returns {number[]}
  */
-FeatureQuery.prototype.getDefaultScriptFeaturesIndexes = function () {
-    const scripts = this.font.tables.gsub.scripts;
-    for (let s = 0; s < scripts.length; s++) {
-        const script = scripts[s];
-        if (script.tag === 'DFLT') return (
-            script.script.defaultLangSys.featureIndexes
-        );
-    }
-    return [];
+FeatureQuery.prototype.getScriptFeaturesIndexes = function(scriptTag, languageTag) {
+    const langSysTable = this.font.substitution.getLangSysTable(scriptTag, languageTag);
+    return langSysTable ? langSysTable.featureIndexes : [];
 };
 
 /**
- * Get feature indexes of a specific script
- * @param {string} scriptTag script tag
+ * Get the index of the required feature (ReqFeatureIndex) of a language system, with the fallbacks of
+ * getScriptFeaturesIndexes
+ * @param {string} [scriptTag] script tag, DFLT if omitted
+ * @param {string} [languageTag] language tag, the default language system of the script if omitted
+ * @returns {number|undefined} undefined when the language system has no required feature
  */
-FeatureQuery.prototype.getScriptFeaturesIndexes = function(scriptTag) {
-    const tables = this.font.tables;
-    if (!tables.gsub) return [];
-    if (!scriptTag) return this.getDefaultScriptFeaturesIndexes();
-    const scripts = this.font.tables.gsub.scripts;
-    for (let i = 0; i < scripts.length; i++) {
-        const script = scripts[i];
-        if (script.tag === scriptTag && script.script.defaultLangSys) {
-            return script.script.defaultLangSys.featureIndexes;
-        } else {
-            let langSysRecords = script.langSysRecords;
-            if (langSysRecords) {
-                for (let j = 0; j < langSysRecords.length; j++) {
-                    const langSysRecord = langSysRecords[j];
-                    if (langSysRecord.tag === scriptTag) {
-                        let langSys = langSysRecord.langSys;
-                        return langSys.featureIndexes;
-                    }
-                }
-            }
-        }
-    }
-    return this.getDefaultScriptFeaturesIndexes();
+FeatureQuery.prototype.getRequiredFeatureIndex = function(scriptTag, languageTag) {
+    const langSysTable = this.font.substitution.getLangSysTable(scriptTag, languageTag);
+    return langSysTable && langSysTable.reqFeatureIndex !== 0xFFFF ? langSysTable.reqFeatureIndex : undefined;
 };
 
 /**
- * Map a feature tag to a gsub feature
- * @param {any} features gsub features
- * @param {string} scriptTag script tag
+ * Get the features of a language system (see getScriptFeaturesIndexes), with the alternate feature tables of the
+ * GSUB feature variations at the variation of the query. Like HarfBuzz, a feature index past the FeatureList is
+ * ignored.
+ * @param {string} [scriptTag] script tag
+ * @param {string} [languageTag] language tag
+ * @returns {Array<{tag: string, feature: any}>} the features, with a tags property that maps each tag to its feature
+ * (the first one of the tag), and a required property, the required feature of the language system (see getRequiredFeature)
  */
-FeatureQuery.prototype.mapTagsToFeatures = function (features, scriptTag) {
-    let tags = {};
-    for (let i = 0; i < features.length; i++) {
-        const tag = features[i].tag;
-        const feature = features[i].feature;
-        tags[tag] = feature;
+FeatureQuery.prototype.getScriptFeatures = function (scriptTag, languageTag) {
+    const key = getLanguageSystemKey(scriptTag, languageTag);
+    if (Object.prototype.hasOwnProperty.call(this.features, key)) {
+        return this.features[key];
     }
-    this.features[scriptTag].tags = tags;
-};
-
-/**
- * Get features of a specific script
- * @param {string} scriptTag script tag
- */
-FeatureQuery.prototype.getScriptFeatures = function (scriptTag) {
-    let features = this.features[scriptTag];
-    if (Object.prototype.hasOwnProperty.call(this.features, scriptTag)) return features;
-    const featuresIndexes = this.getScriptFeaturesIndexes(scriptTag);
-    if (!featuresIndexes) return null;
     const gsub = this.font.tables.gsub;
     const featureVariations = this.getFeatureVariationSubstitutions();
-    features = featuresIndexes.map(index => {
+    const getFeatureOfIndex = index => {
         const feature = gsub.features[index];
         const alternateFeature = feature && featureVariations.get(index);
         return alternateFeature ? { tag: feature.tag, feature: alternateFeature } : feature;
-    });
-    this.features[scriptTag] = features;
-    this.mapTagsToFeatures(features, scriptTag);
+    };
+    const features = this.getScriptFeaturesIndexes(scriptTag, languageTag).map(getFeatureOfIndex).filter(Boolean);
+    features.tags = {};
+    // the first feature of a tag, like HarfBuzz (hb_ot_layout_language_find_feature)
+    for (const feature of features) {
+        if (!Object.prototype.hasOwnProperty.call(features.tags, feature.tag)) {
+            features.tags[feature.tag] = feature.feature;
+        }
+    }
+    const requiredFeatureIndex = this.getRequiredFeatureIndex(scriptTag, languageTag);
+    features.required = requiredFeatureIndex === undefined ? null : getFeatureOfIndex(requiredFeatureIndex) || null;
+    this.features[key] = features;
     return features;
 };
 
 /**
- * Get the alternate feature tables of the GSUB feature variations for the current
- * variation coordinates of the font: the first feature variation record whose
+ * Get the required feature of a language system (see getRequiredFeatureIndex), at the variation of the query: like
+ * HarfBuzz, its lookups apply whatever the enabled features (see getRequiredFeatureStage)
+ * @param {string} [scriptTag] script tag
+ * @param {string} [languageTag] language tag
+ * @returns {{tag: string, feature: any}|null} null when the language system has no required feature
+ */
+FeatureQuery.prototype.getRequiredFeature = function (scriptTag, languageTag) {
+    return this.getScriptFeatures(scriptTag, languageTag).required;
+};
+
+/**
+ * Get the alternate feature tables of the GSUB feature variations at the variation coordinates of the
+ * query (the current variation of the font if it has none): the first feature variation record whose
  * conditions are all met applies.
  * @returns {Map<number, any>} alternate feature tables by feature index
  */
@@ -570,7 +577,7 @@ FeatureQuery.prototype.getFeatureVariationSubstitutions = function () {
     const featureVariations = this.font.tables.gsub && this.font.tables.gsub.variations;
     if (!featureVariations || !featureVariations.length || !this.font.variation) return substitutions;
     // normalized coordinates, in the F2DOT14 precision of the condition values
-    const coordinates = this.font.variation.process.getNormalizedCoords();
+    const coordinates = this.font.variation.process.getNormalizedCoords(this.variation);
     for (let i = 0; i < featureVariations.length; i++) {
         const record = featureVariations[i];
         const conditionsMet = (record.conditions || []).every(condition => {
@@ -683,117 +690,6 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
  *
  */
 
-/**
- * @typedef FQuery
- * @type Object
- * @param {string} tag feature tag
- * @param {string} script feature script
- * @param {ContextParams} contextParams context params
- */
-
-/**
- * Lookup a feature using a query parameters
- * @param {FQuery} query feature query
- */
-FeatureQuery.prototype.lookupFeature = function (query) {
-    let contextParams = query.contextParams;
-    let currentIndex = contextParams.index;
-    const feature = this.getFeature({
-        tag: query.tag, script: query.script
-    });
-    if (!feature) return new Error(
-        `font '${(this.font.names.unicode || this.font.names.windows || this.font.names.macintosh).fullName.en}' ` +
-        `doesn't support feature '${query.tag}' ` +
-        `for script '${query.script}'.`
-    );
-    const lookups = this.getFeatureLookups(feature);
-    const substitutions = [].concat(contextParams.context);
-    for (let l = 0; l < lookups.length; l++) {
-        const lookupTable = lookups[l];
-        // a lookup does not apply at a glyph it ignores
-        if (isGlyphIgnoredByLookup(getLayoutGdefTable(this.font), lookupTable, contextParams.current)) {
-            continue;
-        }
-        const subtables = this.getLookupSubtables(lookupTable);
-        for (let s = 0; s < subtables.length; s++) {
-            let subtable = subtables[s];
-            let substType = this.getSubstitutionType(lookupTable, subtable);
-            let lookup;
-
-            if (substType === '71') {
-                // This is an extension subtable, so lookup the target subtable
-                substType = this.getSubstitutionType(subtable, subtable.extension);
-                lookup = this.getLookupMethod(subtable, subtable.extension);
-                subtable = subtable.extension;
-            } else {
-                lookup = this.getLookupMethod(lookupTable, subtable);
-            }
-            if (!lookup) {
-                continue;
-            }
-
-            let substitution;
-            let contextualRuleMatched = false;
-            switch (substType) {
-                case '11':
-                    substitution = lookup(contextParams.current);
-                    if (substitution) {
-                        substitutions.splice(currentIndex, 1, new SubstitutionAction({
-                            id: 11, tag: query.tag, substitution
-                        }));
-                    }
-                    break;
-                case '12':
-                    substitution = lookup(contextParams.current);
-                    if (substitution) {
-                        substitutions.splice(currentIndex, 1, new SubstitutionAction({
-                            id: 12, tag: query.tag, substitution
-                        }));
-                    }
-                    break;
-                case '41':
-                    substitution = lookup(contextParams, lookupTable);
-                    if (substitution) {
-                        substitutions.splice(currentIndex, 1, new SubstitutionAction({
-                            id: 41, tag: query.tag, substitution
-                        }));
-                    }
-                    break;
-                case '21':
-                    substitution = lookup(contextParams.current);
-                    if (substitution) {
-                        substitutions.splice(currentIndex, 1, new SubstitutionAction({
-                            id: 21, tag: query.tag, substitution
-                        }));
-                    }
-                    break;
-                case '51':
-                case '52':
-                case '53':
-                case '61':
-                case '62':
-                case '63':
-                    substitution = lookup(contextParams, lookupTable);
-                    // a matching contextual rule ends the lookup, even when it substitutes nothing (e.g. an exception rule)
-                    contextualRuleMatched = substitution !== null;
-                    if (contextualRuleMatched && substitution.substitutions.length) {
-                        substitutions.splice(currentIndex, 1, new SubstitutionAction({
-                            id: parseInt(substType),
-                            tag: query.tag,
-                            substitution
-                        }));
-                    }
-                    break;
-            }
-            contextParams = new ContextParams(substitutions, currentIndex);
-            if (contextualRuleMatched) break;
-            if (Array.isArray(substitution) && !substitution.length) continue;
-            substitution = null;
-        }
-    }
-    return substitutions.length ? substitutions : null;
-};
-
 // top-level lookup types (lookupType + substFormat) applied by lookupSubstitution
 const APPLIED_SUBSTITUTION_TYPES = ['11', '12', '21', '41', '51', '52', '53', '61', '62', '63'];
 
@@ -856,21 +752,6 @@ FeatureQuery.prototype.lookupSubstitution = function (lookupTable, contextParams
 };
 
 /**
- * Checks if a font supports a specific features
- * @param {FQuery} query feature query object
- */
-FeatureQuery.prototype.supports = function (query) {
-    if (!query.script) return false;
-    this.getScriptFeatures(query.script);
-    const supportedScript = Object.prototype.hasOwnProperty.call(this.features, query.script);
-    if (!query.tag) return supportedScript;
-    const supportedFeature = (
-        this.features[query.script].some(feature => feature.tag === query.tag)
-    );
-    return supportedScript && supportedFeature;
-};
-
-/**
  * Get lookup table subtables
  * @param {any} lookupTable lookup table
  */
@@ -888,29 +769,13 @@ FeatureQuery.prototype.getLookupByIndex = function (index) {
 };
 
 /**
- * Get lookup tables for a feature
- * @param {string} feature
- */
-FeatureQuery.prototype.getFeatureLookups = function (feature) {
-    // TODO: memoize
-    return feature.lookupListIndexes.map(this.getLookupByIndex.bind(this));
-};
-
-/**
- * Query a feature by it's properties
- * @param {any} query an object that describes the properties of a query
+ * Query a feature by it's properties: its tag in the features of a language system (see getScriptFeatures)
+ * @param {{tag: string, script: string, language?: string}} query
+ * @returns {any|null} the feature table, null if the language system has no feature of the tag
  */
 FeatureQuery.prototype.getFeature = function getFeature(query) {
     if (!this.font) return { FAIL: 'No font was found'};
-    if (!Object.prototype.hasOwnProperty.call(this.features, query.script)) {
-        this.getScriptFeatures(query.script);
-    }
-    const scriptFeatures = this.features[query.script];
-    if (!scriptFeatures) return (
-        { FAIL: `No feature for script ${query.script}`}
-    );
-    if (!scriptFeatures.tags[query.tag]) return null;
-    return this.features[query.script].tags[query.tag];
+    return this.getScriptFeatures(query.script, query.language).tags[query.tag] || null;
 };
 
 export default FeatureQuery;

@@ -41,6 +41,8 @@ The variants of LookupFlags.ttf:
   deleted glyph;
 - LookupFlagsNestedTwoSubtables.ttf: the GDEF table of LookupFlags.ttf, in calt sub c' lookup C_THEN_A b; whose nested lookup
   has the subtables sub c by a; and sub a by a.alt;
+- LookupFlagsNotdefBacktrack.ttf: the GDEF table of LookupFlags.ttf, in calt sub .notdef a' by a.alt;, whose backtrack is the
+  glyph of a character the font has not;
 - LookupFlagsDeletionThenLigature.ttf: the GDEF table of LookupFlags.ttf, in calt sub c by NULL; then lookupflag IgnoreMarks;
   sub a b by a_b;
 - LookupFlagsRligAfterMultiple.ttf: the GDEF table of LookupFlags.ttf, and in rlig MULTIPLE_DAL (sub dal by dal.alt fatha;)
@@ -59,11 +61,30 @@ The variants of LookupFlags.ttf:
 - LookupFlagsArabicJoining.ttf: the GDEF table of LookupFlags.ttf, in init sub lam by lam.init;, in fina sub dal by
   dal.alt;, for the joining of a letter next to a character of no glyph in the font (U+0621, U+0629);
 - LookupFlagsMediContext.ttf: the GDEF table of LookupFlags.ttf, in medi sub lam' lookup SUB_LAM lam'; (sub lam by lam.init;);
+- LookupFlagsFinaThenMedi.ttf: the GDEF table of LookupFlags.ttf, in medi sub lam' dal.alt by lam.init;, whose lookahead is
+  the final form, first in the lookup list, in fina sub dal by dal.alt;
+- LookupFlagsMediThenInit.ttf: the GDEF table of LookupFlags.ttf, in init sub lam' reh.alt by lam.init;, whose lookahead is
+  the medial form, first in the lookup list, in medi sub lam by reh.alt;
+- LookupFlagsIsolThenFina.ttf: the GDEF table of LookupFlags.ttf, in fina sub dal' reh.alt by dal.alt;, whose lookahead is
+  the isolated form, first in the lookup list, in isol sub dal by reh.alt;
+- LookupFlagsInitLigature.ttf: the GDEF table of LookupFlags.ttf, in init sub lam alef by lam_alef;
+- LookupFlagsFinaAcrossSpace.ttf: the GDEF table of LookupFlags.ttf, in fina sub dal' lookup DAL_ALT .notdef lam; (sub dal
+  by dal.alt;), whose lookahead is a space (no glyph in the font) and the arabic letter after it;
 - LookupFlagsRligChain.ttf: the GDEF table of LookupFlags.ttf, in rlig sub dal by dal.alt; then sub dal.alt by reh.alt;
 - LookupFlagsRligUnsorted.ttf: the lookups of LookupFlagsRligChain.ttf with sub dal.alt by reh.alt; first in the lookup list,
   rlig listing the lookup indexes 1 and 0 in this order;
 - LookupFlagsRligIndexPastList.ttf: LookupFlagsRligChain.ttf with rlig listing the lookup indexes 0 and 7, past the end of
   the lookup list of two lookups;
+- LookupFlagsFeatureIndexPastList.ttf: LookupFlagsRligChain.ttf with the feature index 7 after the ones of each language
+  system, past the end of the feature list of one feature;
+- LookupFlagsDuplicateFeatureTag.ttf: the GDEF table of LookupFlags.ttf, in rlig sub dal by dal.alt;, in a second feature
+  tagged rlig (built as ss01, then renamed) sub dal by reh.alt;, both features in each language system;
+- LookupFlagsFinaChain.ttf: the GDEF table of LookupFlags.ttf, in fina sub dal by dal.alt; then sub dal.alt by reh.alt;
+- LookupFlagsRequiredFina.ttf: the GDEF table of LookupFlags.ttf, in fina sub lam by dal.alt;, and the required feature
+  (ReqFeatureIndex) of each language system tagged fina (built as ss01, then renamed) sub lam by lam.init;, whose lookup
+  is first in the lookup list;
+- LookupFlagsRequiredFinaShared.ttf: the GDEF table of LookupFlags.ttf, in fina and in the required feature of each
+  language system tagged fina (built as ss01, then renamed) the same lookup sub lam by lam.init; sub lam.init by dal.alt;
 - LookupFlagsRligContextThenLigature.ttf: the GDEF table of LookupFlags.ttf, in rlig sub dal' lookup DAL_ALT lam'; (sub dal
   by dal.alt;) then sub lam alef by lam_alef;
 - LookupFlagsExceptionRules.ttf: the GDEF table of LookupFlags.ttf, in calt ignore sub a' b'; sub b' lookup SUB_B; and in
@@ -532,6 +553,60 @@ lookup DAL_ALT_REH {
 feature rlig { lookup DAL_ALT; lookup DAL_ALT_REH; } rlig;
 """
 
+# the lookups of LookupFlagsDuplicateFeatureTag.ttf: ss01 is renamed rlig, the second feature of the tag in each language system
+DUPLICATE_FEATURE_TAG_FEATURES = GDEF_FEATURES + """
+lookup DAL_ALT {
+    sub dal by dal.alt;
+} DAL_ALT;
+
+lookup DAL_REH {
+    sub dal by reh.alt;
+} DAL_REH;
+
+feature rlig { lookup DAL_ALT; } rlig;
+feature ss01 { lookup DAL_REH; } ss01;
+"""
+
+# the lookups of LookupFlagsFinaChain.ttf: the second lookup of the final form substitutes the substitute of the first one
+FINA_CHAIN_FEATURES = GDEF_FEATURES + """
+lookup DAL_ALT {
+    sub dal by dal.alt;
+} DAL_ALT;
+
+lookup DAL_ALT_REH {
+    sub dal.alt by reh.alt;
+} DAL_ALT_REH;
+
+feature fina { lookup DAL_ALT; lookup DAL_ALT_REH; } fina;
+"""
+
+# the lookups of LookupFlagsRequiredFina.ttf: ss01 is renamed fina, the required feature of each language system, and
+# its lookup is before the one of fina in the lookup list
+REQUIRED_FINA_FEATURES = GDEF_FEATURES + """
+lookup LAM_INIT {
+    sub lam by lam.init;
+} LAM_INIT;
+
+lookup LAM_DAL_ALT {
+    sub lam by dal.alt;
+} LAM_DAL_ALT;
+
+feature fina { lookup LAM_DAL_ALT; } fina;
+feature ss01 { lookup LAM_INIT; } ss01;
+"""
+
+# the lookups of LookupFlagsRequiredFinaShared.ttf: ss01 is renamed fina, the required feature of each language system,
+# with the lookup of fina, which substitutes its own substitute
+REQUIRED_FINA_SHARED_FEATURES = GDEF_FEATURES + """
+lookup LAM_INIT_DAL_ALT {
+    sub lam by lam.init;
+    sub lam.init by dal.alt;
+} LAM_INIT_DAL_ALT;
+
+feature fina { lookup LAM_INIT_DAL_ALT; } fina;
+feature ss01 { lookup LAM_INIT_DAL_ALT; } ss01;
+"""
+
 # the lookups of LookupFlagsRligUnsorted.ttf: the lookups of LookupFlagsRligChain.ttf, the second one first in the lookup list,
 # and rlig lists them in the order of LookupFlagsRligChain.ttf (feaLib keeps the order of the feature)
 RLIG_UNSORTED_FEATURES = GDEF_FEATURES + """
@@ -577,6 +652,46 @@ lookup SUB_LAM {
 } SUB_LAM;
 
 feature medi { sub lam' lookup SUB_LAM lam'; } medi;
+"""
+
+# the lookups of LookupFlagsFinaThenMedi.ttf: the rule of the medial form needs the final form after it; the rule first in
+# the lookup list, so that only the order of the form stages applies the final form before it
+FINA_THEN_MEDI_FEATURES = GDEF_FEATURES + """
+feature medi { sub lam' dal.alt by lam.init; } medi;
+feature fina { sub dal by dal.alt; } fina;
+"""
+
+# the lookups of LookupFlagsMediThenInit.ttf: the rule of the initial form needs the medial form after it, first in the
+# lookup list
+MEDI_THEN_INIT_FEATURES = GDEF_FEATURES + """
+feature init { sub lam' reh.alt by lam.init; } init;
+feature medi { sub lam by reh.alt; } medi;
+"""
+
+# the lookups of LookupFlagsIsolThenFina.ttf: the rule of the final form needs the isolated form after it, first in the
+# lookup list
+ISOL_THEN_FINA_FEATURES = GDEF_FEATURES + """
+feature fina { sub dal' reh.alt by dal.alt; } fina;
+feature isol { sub dal by reh.alt; } isol;
+"""
+
+# the lookups of LookupFlagsInitLigature.ttf: the ligature of the initial form ends at a letter of the final form
+INIT_LIGATURE_FEATURES = GDEF_FEATURES + """
+feature init { sub lam alef by lam_alef; } init;
+"""
+
+# the lookups of LookupFlagsFinaAcrossSpace.ttf: the lookahead of the final form crosses the space after the arabic word
+FINA_ACROSS_SPACE_FEATURES = GDEF_FEATURES + """
+lookup DAL_ALT {
+    sub dal by dal.alt;
+} DAL_ALT;
+
+feature fina { sub dal' lookup DAL_ALT .notdef lam; } fina;
+"""
+
+# the lookups of LookupFlagsNotdefBacktrack.ttf: the backtrack of the rule is the glyph 0
+NOTDEF_BACKTRACK_FEATURES = GDEF_FEATURES + """
+feature calt { sub .notdef a' by a.alt; } calt;
 """
 
 # the lookups of LookupFlagsNestedTwoSubtables.ttf: the second subtable of the nested lookup covers the substitute of the first one
@@ -885,6 +1000,31 @@ def set_feature_lookup_indexes(font, feature_tag, lookup_indexes):
     record.Feature.LookupCount = len(lookup_indexes)
 
 
+def append_feature_index(font, feature_index):
+    for script_record in font["GSUB"].table.ScriptList.ScriptRecord:
+        language_system = script_record.Script.DefaultLangSys
+        language_system.FeatureIndex.append(feature_index)
+        language_system.FeatureCount = len(language_system.FeatureIndex)
+
+
+def rename_feature_tag(font, feature_tag, new_feature_tag):
+    gsub = font["GSUB"].table
+    record = next(record for record in gsub.FeatureList.FeatureRecord if record.FeatureTag == feature_tag)
+    record.FeatureTag = new_feature_tag
+
+
+def make_feature_required(font, feature_tag, new_feature_tag):
+    """Rename a feature and make it the required feature (ReqFeatureIndex) of each language system, out of its features."""
+    gsub = font["GSUB"].table
+    feature_index = next(index for index, record in enumerate(gsub.FeatureList.FeatureRecord) if record.FeatureTag == feature_tag)
+    rename_feature_tag(font, feature_tag, new_feature_tag)
+    for script_record in gsub.ScriptList.ScriptRecord:
+        language_system = script_record.Script.DefaultLangSys
+        language_system.FeatureIndex = [index for index in language_system.FeatureIndex if index != feature_index]
+        language_system.FeatureCount = len(language_system.FeatureIndex)
+        language_system.ReqFeatureIndex = feature_index
+
+
 def get_thai_features(lookups):
     arab_language_system = "languagesystem arab dflt;\n"
     assert arab_language_system in GDEF_FEATURES
@@ -948,6 +1088,7 @@ def main():
     fonts["LookupFlagsNestedDeletionLastInput.ttf"] = build_font(NESTED_DELETION_LAST_INPUT_FEATURES)
     fonts["LookupFlagsNestedDeletionNextRecord.ttf"] = build_font(NESTED_DELETION_NEXT_RECORD_FEATURES)
     fonts["LookupFlagsNestedTwoSubtables.ttf"] = build_font(NESTED_TWO_SUBTABLES_FEATURES)
+    fonts["LookupFlagsNotdefBacktrack.ttf"] = build_font(NOTDEF_BACKTRACK_FEATURES)
     fonts["LookupFlagsDeletionThenLigature.ttf"] = build_font(DELETION_THEN_LIGATURE_FEATURES)
     fonts["LookupFlagsRligAfterMultiple.ttf"] = build_font(RLIG_AFTER_MULTIPLE_FEATURES)
     fonts["LookupFlagsArabicForms.ttf"] = build_font(ARABIC_FORMS_FEATURES)
@@ -958,12 +1099,26 @@ def main():
     fonts["LookupFlagsArabicFormsMultiple.ttf"] = build_font(ARABIC_FORMS_MULTIPLE_FEATURES)
     fonts["LookupFlagsArabicJoining.ttf"] = build_font(ARABIC_JOINING_FEATURES)
     fonts["LookupFlagsMediContext.ttf"] = build_font(MEDI_CONTEXT_FEATURES)
+    fonts["LookupFlagsFinaThenMedi.ttf"] = build_font(FINA_THEN_MEDI_FEATURES)
+    fonts["LookupFlagsMediThenInit.ttf"] = build_font(MEDI_THEN_INIT_FEATURES)
+    fonts["LookupFlagsIsolThenFina.ttf"] = build_font(ISOL_THEN_FINA_FEATURES)
+    fonts["LookupFlagsInitLigature.ttf"] = build_font(INIT_LIGATURE_FEATURES)
+    fonts["LookupFlagsFinaAcrossSpace.ttf"] = build_font(FINA_ACROSS_SPACE_FEATURES)
     fonts["LookupFlagsRligChain.ttf"] = build_font(RLIG_CHAIN_FEATURES)
     fonts["LookupFlagsRligUnsorted.ttf"] = build_font(RLIG_UNSORTED_FEATURES)
     fonts["LookupFlagsRligContextThenLigature.ttf"] = build_font(RLIG_CONTEXT_THEN_LIGATURE_FEATURES)
     fonts["LookupFlagsExceptionRules.ttf"] = build_font(EXCEPTION_RULES_FEATURES)
     fonts["LookupFlagsRligIndexPastList.ttf"] = build_font(RLIG_CHAIN_FEATURES)
     set_feature_lookup_indexes(fonts["LookupFlagsRligIndexPastList.ttf"], "rlig", [0, 7])
+    fonts["LookupFlagsFeatureIndexPastList.ttf"] = build_font(RLIG_CHAIN_FEATURES)
+    append_feature_index(fonts["LookupFlagsFeatureIndexPastList.ttf"], 7)
+    fonts["LookupFlagsDuplicateFeatureTag.ttf"] = build_font(DUPLICATE_FEATURE_TAG_FEATURES)
+    rename_feature_tag(fonts["LookupFlagsDuplicateFeatureTag.ttf"], "ss01", "rlig")
+    fonts["LookupFlagsFinaChain.ttf"] = build_font(FINA_CHAIN_FEATURES)
+    fonts["LookupFlagsRequiredFina.ttf"] = build_font(REQUIRED_FINA_FEATURES)
+    make_feature_required(fonts["LookupFlagsRequiredFina.ttf"], "ss01", "fina")
+    fonts["LookupFlagsRequiredFinaShared.ttf"] = build_font(REQUIRED_FINA_SHARED_FEATURES)
+    make_feature_required(fonts["LookupFlagsRequiredFinaShared.ttf"], "ss01", "fina")
     fonts["LookupFlagsDeletionThenMultiple.ttf"] = build_font(DELETION_THEN_MULTIPLE_FEATURES)
     fonts["LookupFlagsArabicFormsDeletion.ttf"] = build_font(ARABIC_FORMS_DELETION_FEATURES)
     fonts["LookupFlagsThaiCcmp.ttf"] = build_font(get_thai_features(THAI_CCMP_LOOKUPS))

@@ -116,18 +116,24 @@ function multipleSubstitutionFormat1(action, glyphSequence, position) {
 
 /**
  * Merge the clusters of the glyphs of a range of a glyph sequence, like HarfBuzz (merge_clusters): every token
- * of the sequence in one of their clusters takes the smallest one, so that the whole clusters are merged
+ * of the sequence in one of their clusters takes the smallest one, so that the whole clusters are merged. The clusters
+ * are monotone while GSUB applies (in the logical order of the text, before the right-to-left runs are reversed), so the
+ * smallest cluster is the one of the first glyph of the range, and the range only extends forward, to the glyphs after
+ * it that share its last cluster (e.g. the other glyphs of a multiple substitution)
  * @param {GlyphSequence} glyphSequence
  * @param {number} startPosition
  * @param {number} endPosition the position after the last glyph of the range
  */
 function mergeClusters(glyphSequence, startPosition, endPosition) {
-    const clusters = new Set(glyphSequence.glyphTokens.slice(startPosition, endPosition).map(token => token.cluster));
+    const glyphTokens = glyphSequence.glyphTokens;
+    const clusters = new Set(glyphTokens.slice(startPosition, endPosition).map(token => token.cluster));
     const mergedCluster = Math.min(...clusters);
-    for (const token of glyphSequence.glyphTokens) {
-        if (clusters.has(token.cluster)) {
-            token.cluster = mergedCluster;
-        }
+    let lastPosition = endPosition;
+    while (lastPosition < glyphTokens.length && clusters.has(glyphTokens[lastPosition].cluster)) {
+        lastPosition++;
+    }
+    for (let position = startPosition; position < lastPosition; position++) {
+        glyphTokens[position].cluster = mergedCluster;
     }
 }
 
@@ -214,9 +220,11 @@ function getLookupFirstGlyphCoverages(lookupTable) {
  * @param {any} lookupTable
  * @param {string} tag feature tag set as the state of the substituted tokens
  * @param {Token[]} tokens
- * @param {function(Token): boolean} [isTokenSkipped] whether the lookup does not apply at the glyphs of a token
+ * @param {function(Token): boolean} [isTokenEnabled] whether a rule or a ligature of the lookup can start at the glyphs
+ * of a token (e.g. the arabic form of the token), at every glyph if omitted; unlike the feature mask of HarfBuzz, the
+ * later input glyphs of a rule and the components of a ligature are matched whatever their token
  */
-function applyLookupToTokens(query, lookupTable, tag, tokens, isTokenSkipped) {
+function applyLookupToTokens(query, lookupTable, tag, tokens, isTokenEnabled = () => true) {
     const layout = query.font.substitution;
     const coverages = getLookupFirstGlyphCoverages(lookupTable);
     // a glyph no subtable covers cannot start a substitution: skip it without building its context
@@ -230,10 +238,7 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, isTokenSkipped) {
     const glyphSequence = getGlyphSequence(tokens);
     const contextParams = new ContextParams(glyphSequence.glyphIndexes, 0);
     for (let position = 0; position < glyphSequence.glyphIndexes.length; position++) {
-        if (!isCovered(glyphSequence.glyphIndexes[position])) {
-            continue;
-        }
-        if (isTokenSkipped && isTokenSkipped(glyphSequence.glyphTokens[position])) {
+        if (!isTokenEnabled(glyphSequence.glyphTokens[position]) || !isCovered(glyphSequence.glyphIndexes[position])) {
             continue;
         }
         contextParams.setCurrentIndex(position);
@@ -250,27 +255,37 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, isTokenSkipped) {
  * @param {FeatureQuery} query
  * @param {string[]} tags feature tags
  * @param {string} script script tag
- * @returns {Array<{lookupTable: any, tag: string}>}
+ * @param {string} [language] language tag, the default language system of the script if omitted
+ * @param {boolean} [withRequiredFeature=false] whether to add the lookups of the required feature of the language system
+ * (see FeatureQuery.getRequiredFeature), whatever its tag
+ * @returns {Array<{lookupTable: any, tag: string, isRequiredFeatureLookup: boolean}>} isRequiredFeatureLookup: whether the
+ * required feature has the lookup, which then applies at every glyph like the global mask that HarfBuzz gives it
  */
-function getFeaturesLookups(query, tags, script) {
-    const lookupTags = new Map();
-    for (const tag of tags) {
-        const feature = query.getFeature({ tag, script });
+function getFeaturesLookups(query, tags, script, language, withRequiredFeature = false) {
+    const features = tags.map(tag => ({ tag, feature: query.getFeature({ tag, script, language }), isRequired: false }));
+    const requiredFeature = withRequiredFeature && query.getRequiredFeature(script, language);
+    if (requiredFeature) {
+        features.push({ tag: requiredFeature.tag, feature: requiredFeature.feature, isRequired: true });
+    }
+    // the tag of the first feature of each lookup, and whether the required feature has it
+    const lookupOrigins = new Map();
+    for (const { tag, feature, isRequired } of features) {
         if (!feature || !feature.lookupListIndexes) {
             continue;
         }
         for (const lookupIndex of feature.lookupListIndexes) {
-            if (!lookupTags.has(lookupIndex)) {
-                lookupTags.set(lookupIndex, tag);
-            }
+            const lookupOrigin = lookupOrigins.get(lookupIndex) || { tag, isRequiredFeatureLookup: false };
+            lookupOrigin.isRequiredFeatureLookup = lookupOrigin.isRequiredFeatureLookup || isRequired;
+            lookupOrigins.set(lookupIndex, lookupOrigin);
         }
     }
-    const lookupIndexes = Array.from(lookupTags.keys()).sort((indexA, indexB) => indexA - indexB);
+    const lookupIndexes = Array.from(lookupOrigins.keys()).sort((indexA, indexB) => indexA - indexB);
     const lookups = [];
     for (const lookupIndex of lookupIndexes) {
         const lookupTable = query.getLookupByIndex(lookupIndex);
         if (lookupTable) {
-            lookups.push({ lookupTable, tag: lookupTags.get(lookupIndex) });
+            const { tag, isRequiredFeatureLookup } = lookupOrigins.get(lookupIndex);
+            lookups.push({ lookupTable, tag, isRequiredFeatureLookup });
         }
     }
     return lookups;
@@ -283,14 +298,65 @@ function getFeaturesLookups(query, tags, script) {
  * @param {FeatureQuery} query
  * @param {string[]} tags feature tags
  * @param {string} script script tag
+ * @param {string|undefined} language language tag, the default language system of the script if undefined
  * @param {Token[]} tokens
- * @param {function(Token): boolean} [isTokenSkipped] whether the features do not apply at the glyphs of a token
+ * @param {boolean} [withRequiredFeature=false] whether to add the lookups of the required feature of the language system
+ * (see getRequiredFeatureStage)
  */
-function applyFeaturesToTokens(query, tags, script, tokens, isTokenSkipped) {
-    for (const { lookupTable, tag } of getFeaturesLookups(query, tags, script)) {
-        applyLookupToTokens(query, lookupTable, tag, tokens, isTokenSkipped);
+function applyFeaturesToTokens(query, tags, script, language, tokens, withRequiredFeature = false) {
+    for (const { lookupTable, tag } of getFeaturesLookups(query, tags, script, language, withRequiredFeature)) {
+        applyLookupToTokens(query, lookupTable, tag, tokens);
+    }
+}
+
+/**
+ * The stage whose lookups the lookups of the required feature of a language system join, like HarfBuzz
+ * (hb_ot_map_builder_t::compile): the stage of its tag when a stage has its tag, otherwise the first stage
+ * @param {string[][]} stages the enabled feature tags of each stage, in the order of the stages
+ * @param {{tag: string}|null} requiredFeature see FeatureQuery.getRequiredFeature
+ * @returns {number} the index of the stage, -1 without a required feature
+ */
+function getRequiredFeatureStage(stages, requiredFeature) {
+    if (!requiredFeature) {
+        return -1;
+    }
+    return Math.max(stages.findIndex(stageTags => stageTags.includes(requiredFeature.tag)), 0);
+}
+
+// the feature whose lookups HarfBuzz applies before the lookups of all the other features, in a stage of its own
+// (hb_ot_shape_collect_features): the required variation alternates
+const REQUIRED_VARIATION_ALTERNATES_TAG = 'rvrn';
+
+/**
+ * Apply features to a run of text in the stages of the shapers of HarfBuzz that add no stage of their own (the
+ * default shaper, the Thai shaper): the lookups of rvrn first, then the lookups of the other features together
+ * (see applyFeaturesToTokens), the lookups of the required feature of the language system in its stage (see
+ * getRequiredFeatureStage)
+ * @param {FeatureQuery} query
+ * @param {string[]} tags feature tags
+ * @param {string} script script tag
+ * @param {string|undefined} language language tag, the default language system of the script if undefined
+ * @param {Token[]} tokens
+ */
+function applyFeatureStagesToTokens(query, tags, script, language, tokens) {
+    const stages = [
+        tags.filter(tag => tag === REQUIRED_VARIATION_ALTERNATES_TAG),
+        tags.filter(tag => tag !== REQUIRED_VARIATION_ALTERNATES_TAG)
+    ];
+    const requiredFeatureStage = getRequiredFeatureStage(stages, query.getRequiredFeature(script, language));
+    for (let i = 0; i < stages.length; i++) {
+        applyFeaturesToTokens(query, stages[i], script, language, tokens, i === requiredFeatureStage);
     }
 }
 
 export default applySubstitution;
-export { getTokenGlyphIndexes, getGlyphSequence, applyLookupToTokens, getFeaturesLookups, applyFeaturesToTokens };
+export {
+    getTokenGlyphIndexes,
+    getGlyphSequence,
+    applyLookupToTokens,
+    getFeaturesLookups,
+    applyFeaturesToTokens,
+    getRequiredFeatureStage,
+    applyFeatureStagesToTokens,
+    REQUIRED_VARIATION_ALTERNATES_TAG
+};

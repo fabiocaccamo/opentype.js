@@ -55,6 +55,58 @@ function getFallbackScriptTable(scripts) {
     }
 }
 
+// the OpenType script tags that are not the ISO 15924 code in lowercase (hb_ot_old_tag_from_script of HarfBuzz)
+const OLD_SCRIPT_TAGS = { Hira: 'kana', Laoo: 'lao ', Nkoo: 'nko ', Vaii: 'vai ', Yiii: 'yi  ' };
+// the second version of the OpenType script tags of the Indic scripts and of Myanmar (hb_ot_new_tag_from_script)
+const NEW_SCRIPT_TAGS = {
+    Beng: 'bng2', Deva: 'dev2', Gujr: 'gjr2', Guru: 'gur2', Knda: 'knd2',
+    Mlym: 'mlm2', Mymr: 'mym2', Orya: 'ory2', Taml: 'tml2', Telu: 'tel2'
+};
+
+/**
+ * The OpenType script tags of a Unicode script, in the order HarfBuzz tries them (hb_ot_all_tags_from_script): for the
+ * Indic scripts the third and the second version of the tag before the first one (e.g. dev3, dev2, deva), for Myanmar
+ * mym2 before mymr, otherwise the one tag of the script (kana for Hiragana and Katakana); DFLT for a text of no script.
+ * @param {string|undefined} script - the ISO 15924 code of the script (see getCharScript), undefined for no script
+ * @return {string[]}
+ */
+function getOpenTypeScriptTags(script) {
+    if (script === undefined) {
+        return ['DFLT'];
+    }
+    const tags = [];
+    const newTag = NEW_SCRIPT_TAGS[script];
+    if (newTag) {
+        if (newTag !== 'mym2') {
+            tags.push(newTag.slice(0, 3) + '3');
+        }
+        tags.push(newTag);
+    }
+    tags.push(OLD_SCRIPT_TAGS[script] || script.toLowerCase());
+    return tags;
+}
+
+/**
+ * The script tag a layout table uses for a list of script tags, like hb_ot_layout_table_select_script of HarfBuzz: the
+ * first one the table has, otherwise the first one, which getScriptTable takes to the fallback scripts.
+ * @param {Layout} layout - a GSUB or GPOS layout (font.substitution, font.position)
+ * @param {string[]} scriptTags - see getOpenTypeScriptTags
+ * @return {string}
+ */
+function selectScriptTag(layout, scriptTags) {
+    const scriptNames = layout.getScriptNames();
+    return scriptTags.find(tag => scriptNames.includes(tag)) || scriptTags[0];
+}
+
+/**
+ * A language system tag of 4 characters: the tags of three letters end with a space ('TRK' is 'TRK ').
+ * @param {string} language
+ * @return {string}
+ */
+function getLanguageSystemTag(language) {
+    return language.padEnd(4, ' ');
+}
+
 /**
  * The default language system of a script table, like hb_ot_layout_script_select_language of HarfBuzz:
  * the LangSysRecord tagged dflt (where some fonts put it by mistake), otherwise the DefaultLangSys.
@@ -367,6 +419,7 @@ Layout.prototype = {
      * (see getScriptTable for a script the table has not), unless the language system is created.
      * Like HarfBuzz, the default language system is the LangSysRecord tagged dflt if the script has one,
      * otherwise the DefaultLangSys, also with create (the writers add to the language system the readers use).
+     * A language tag of three letters is the tag with its trailing space ('TRK' is 'TRK ').
      * @instance
      * @param {string} [script='DFLT']
      * @param {string} [language='dlft']
@@ -379,6 +432,7 @@ Layout.prototype = {
             if (!language || language === 'dflt' || language === 'DFLT') {
                 return getDefaultLangSysTable(scriptTable);
             }
+            language = getLanguageSystemTag(language);
             const pos = searchTag(scriptTable.langSysRecords, language);
             if (pos >= 0) {
                 return scriptTable.langSysRecords[pos].langSys;
@@ -529,4 +583,11 @@ Layout.prototype = {
 };
 
 export default Layout;
-export { getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, getNotIgnoredGlyphPositions };
+export {
+    getLayoutGdefTable,
+    isGlyphIgnoredByLookup,
+    findNextNotIgnoredGlyphPosition,
+    getNotIgnoredGlyphPositions,
+    getOpenTypeScriptTags,
+    selectScriptTag
+};
