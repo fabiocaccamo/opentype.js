@@ -36,6 +36,33 @@ export function isThaiChar(c) {
 }
 
 /**
+ * The OpenType script tags of the kerning other than latn, in the order a pair of characters of several of
+ * these scripts takes them (see getCharKerningScript)
+ */
+export const KERNING_SCRIPT_TAGS = ['thai', 'arab', 'hebr', 'cyrl', 'grek'];
+
+// a capture group for each script of KERNING_SCRIPT_TAGS, in the same order, then one for the chars of no script,
+// so that one test gives the script of a char
+const KERNING_SCRIPT_PATTERN = /(\p{Script=Thai})|(\p{Script=Arabic})|(\p{Script=Hebrew})|(\p{Script=Cyrillic})|(\p{Script=Greek})|([\p{Script=Common}\p{Script=Inherited}\p{General_Category=Unassigned}\p{General_Category=Private_Use}\p{General_Category=Surrogate}])/u;
+
+/**
+ * The script of the kerning of a char, from its Unicode Script property: thai, arab, hebr, cyrl or grek for
+ * Thai, Arabic, Hebrew, Cyrillic or Greek, undefined for a char of no script: Common (digits, punctuation,
+ * symbols), Inherited (combining marks) or Unknown (the unassigned, private use and surrogate code points),
+ * latn for the other scripts
+ * @param {string} char a single char
+ * @return {string|undefined}
+ */
+export function getCharKerningScript(char) {
+    const match = KERNING_SCRIPT_PATTERN.exec(char);
+    if (!match) {
+        return 'latn';
+    }
+    // the group of the chars of no script comes after the groups of KERNING_SCRIPT_TAGS
+    return KERNING_SCRIPT_TAGS.find((tag, index) => match[index + 1] !== undefined);
+}
+
+/**
  * Check if a char is Latin
  * @param {string} c a single char
  */

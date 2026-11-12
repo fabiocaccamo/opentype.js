@@ -83,11 +83,22 @@ opentype.Font.prototype.glyphIndexToName = function(gid) {};
  * and the right glyph (or its index). If no kerning pair is found, return 0.
  * The kerning value gets added to the advance width when calculating the spacing
  * between glyphs.
- * @param  {opentype.Glyph} leftGlyph
- * @param  {opentype.Glyph} rightGlyph
+ * For GPOS kerning, the values of all the lookups of the kern feature of the default language
+ * are added up, for the script of the characters the cmap maps to the two glyphs (with the fallbacks
+ * of opentype.Position.prototype.getKerningTables). The script of a glyph is the one of its
+ * characters: thai, arab, hebr, cyrl or grek for Thai, Arabic, Hebrew, Cyrillic or Greek, latn for
+ * the other scripts, none for characters of no script (Common, Inherited or Unknown), and latn for a
+ * glyph shared by characters of several scripts, a character of no script counting as latn. The pair
+ * takes the first of thai, arab, hebr, cyrl and grek that one of its glyphs has, otherwise latn, or
+ * DFLT when neither glyph has a script. The pair is the left glyph then the right glyph:
+ * for a GPOS pair of right-to-left text, pass the glyphs in the order of the text.
+ * The kern table is used when the GPOS table has no kern feature for that script.
+ * @param  {opentype.Glyph|number} leftGlyph
+ * @param  {opentype.Glyph|number} rightGlyph
+ * @param  {Object=} variation - variation coordinates for GPOS kerning, the current font variation if omitted
  * @return {Number}
  */
-opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph) {};
+opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variation) {};
 
 /**
  * Helper function that invokes the given callback for each glyph in the given text.
@@ -438,6 +449,8 @@ opentype.Layout.prototype.getScriptNames = function() {};
 
 /**
  * Returns all LangSysRecords in the given script.
+ * A script the table has not falls back, like HarfBuzz, to the first of DFLT, dflt and latn that
+ * the table has, unless the script table is created.
  * @instance
  * @param {string} script - Use 'DFLT' for default script
  * @param {boolean} create - forces the creation of this script table if it doesn't exist.
@@ -446,7 +459,11 @@ opentype.Layout.prototype.getScriptNames = function() {};
 opentype.Layout.prototype.getScriptTable = function(script, create) {};
 
 /**
- * Returns a language system table
+ * Returns a language system table.
+ * A language the script has not falls back to the default language system of the script
+ * (see getScriptTable for a script the table has not), unless the language system is created.
+ * Like HarfBuzz, the default language system is the LangSysRecord tagged dflt if the script has one,
+ * otherwise the DefaultLangSys, also with create (the writers add to the language system the readers use).
  * @instance
  * @param {string} script - Use 'DFLT' for default script
  * @param {string} language - Use 'dlft' for default language
@@ -457,6 +474,8 @@ opentype.Layout.prototype.getLangSysTable = function(script, language, create) {
 
 /**
  * Get a specific feature table.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable,
+ * unless the feature table is created.
  * @instance
  * @param {string} script - Use 'DFLT' for default script
  * @param {string} language - Use 'dlft' for default language
@@ -468,6 +487,8 @@ opentype.Layout.prototype.getFeatureTable = function(script, language, feature, 
 
 /**
  * Get the lookup tables of a given type for a script/language/feature.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable,
+ * unless the lookup table is created.
  * @instance
  * @param {string} [script='DFLT']
  * @param {string} [language='dlft']
@@ -493,6 +514,38 @@ opentype.Layout.prototype.expandCoverage = function(coverageTable) {};
  * @constructor
  * @param {opentype.Font}
  */
+opentype.Position = function(font) {};
+
+/**
+ * List the kerning lookup tables of a script and language in LookupList order, the order they apply in,
+ * including the pair adjustment subtables wrapped in extension lookups.
+ * A script the GPOS table has not falls back to DFLT, dflt, then latn, and a language the script has not
+ * to the default language system of the script (see getScriptTable and getLangSysTable), except hebr:
+ * like the Hebrew shaper of HarfBuzz, a GPOS table without the hebr script does not apply to it.
+ * @param {string=} script - 'latn' if omitted
+ * @param {string=} language - 'dflt' if omitted
+ * @return {Array<Object>|undefined} the lookup tables (may be empty), or undefined when the GPOS table has no
+ * kern feature for the script and language, or when there is no GPOS table: the kern table applies then
+ */
+opentype.Position.prototype.getKerningTables = function(script, language) {};
+
+/**
+ * Get the xAdvance kerning value of a glyph pair, in the order of the text, in a list of kerning lookup tables:
+ * in each lookup the first subtable that applies to the pair gives the value of the lookup, and the values of
+ * the lookups add up. Without lookup tables (undefined, see getKerningTables), the value of the kern table.
+ * @param {Array<Object>|undefined} kerningLookups - the result of getKerningTables
+ * @param {number} leftIndex
+ * @param {number} rightIndex
+ * @param {Object=} variation - variation coordinates, the current font variation if omitted
+ * @return {number}
+ */
+opentype.Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIndex, variation) {};
+
+/**
+ * @extends opentype.Layout
+ * @constructor
+ * @param {opentype.Font}
+ */
 opentype.Substitution = function(font) {};
 
 /**
@@ -503,6 +556,7 @@ opentype.Substitution.prototype.createDefaultTable = function() {};
 
 /**
  * List all single substitutions (lookup type 1) for a given script, language, and feature.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * @param {string} script
  * @param {string} language
  * @param {string} feature - 4-character feature name ('aalt', 'salt', 'ss01'...)
@@ -512,6 +566,7 @@ opentype.Substitution.prototype.getSingle = function(feature, script, language) 
 
 /**
  * List all alternates (lookup type 3) for a given script, language, and feature.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * @param {string} feature - 4-character feature name ('aalt', 'salt'...)
  * @param {string} script
  * @param {string} language
@@ -521,6 +576,7 @@ opentype.Substitution.prototype.getAlternates = function(feature, script, langua
 
 /**
  * List all ligatures (lookup type 4) for a given script, language, and feature.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * The result is an array of ligature objects like { sub: [ids], by: id }
  * @param {string} feature - 4-letter feature name ('liga', 'rlig', 'dlig'...)
  * @param {string} script
@@ -560,6 +616,7 @@ opentype.Substitution.prototype.addLigature = function(feature, ligature, script
 
 /**
  * List all feature data for a given script and language.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * @param {string} feature - 4-letter feature name
  * @param {string} [script='DFLT']
  * @param {string} [language='dflt']

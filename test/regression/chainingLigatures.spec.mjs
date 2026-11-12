@@ -25,9 +25,9 @@
  * substitution format 2 (lookup 6).
  *
  * Around the fix, the same fixture shows what the text layout does with the substituted
- * glyphs: their kerning and a character the font does not have (regular tests), the zero
- * width joiner and non-joiner inside a ligature, the non-joiner in a chaining context and in a
- * kerning pair, and the kerning with a language the font has no language system for (known failures).
+ * glyphs: their kerning, a character the font does not have and the kerning with a language
+ * the font has no language system for (regular tests), the zero width joiner and non-joiner
+ * inside a ligature, the non-joiner in a chaining context and in a kerning pair (known failures).
  *
  * The font has one script (latn) with its default language system only, in GSUB and in GPOS:
  * the hb-shape commands need no --script or --language, except the one of the language test.
@@ -428,23 +428,18 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
             assert.strictEqual(font.getAdvanceWidth('To Ty', font.unitsPerEm, { kerning: false }), 2522);
         });
 
-        itFailsUntilFixed(
-            'kerns with the default language system of the script when the font has none for the language (Turkish)',
-            'Layout.prototype.getLangSysTable (src/layout.mjs): a language without a LangSysRecord in the script gives no language system ' +
-            'instead of the default one, so getKerningTables (src/position.mjs) finds no kern feature and forEachGlyph (src/font.mjs) kerns nothing',
-            function() {
-                // the substitutions do not depend on the language: o.end and y.end are right
-                const shape = shapeText(font, 'To Ty', { language: 'TRK ' });
-                // hb-shape --no-glyph-names --cluster-level=1 --language=tr TestGSUB-ChainingLigatures-subset.otf -u 0054,006F,0020,0054,0079
-                // [3=0+511|36=1+481|38=2+215|3=3+529|50=4+482]
-                // (T o.end space T y.end, kerned as without a language; the fork gives the advances 672, 481, 215, 672 and 482)
-                assertShape(shape, {
-                    glyphs: [3, 36, 38, 3, 50],
-                    clusters: [0, 1, 2, 3, 4],
-                    advances: [511, 481, 215, 529, 482]
-                });
-            }
-        );
+        it('kerns with the default language system of the script when the font has none for the language (Turkish)', function() {
+            // the substitutions do not depend on the language: o.end and y.end are right
+            const shape = shapeText(font, 'To Ty', { language: 'TRK ' });
+            // hb-shape --no-glyph-names --cluster-level=1 --language=tr TestGSUB-ChainingLigatures-subset.otf -u 0054,006F,0020,0054,0079
+            // [3=0+511|36=1+481|38=2+215|3=3+529|50=4+482]
+            // (T o.end space T y.end, kerned as without a language)
+            assertShape(shape, {
+                glyphs: [3, 36, 38, 3, 50],
+                clusters: [0, 1, 2, 3, 4],
+                advances: [511, 481, 215, 529, 482]
+            });
+        });
 
         it('kerns the substituted glyphs, not the glyphs of the characters', function() {
             // hb-shape --no-glyph-names --cluster-level=1 TestGSUB-ChainingLigatures-subset.otf -u 0054,0074,0020,0054,0066,0069,0020,006E,0054
