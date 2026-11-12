@@ -618,8 +618,9 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         itFailsUntilFixed(
             'keeps the tail of lo chula before sara i when ccmp is turned off',
             'updateFeatures (src/font.mjs): overrides only the features of latn, the ccmp of thai stays on ' +
-            '(thaiGlyphComposition), and ccmpReplacementLigatures (src/features/ccmp/ccmpReplacementLigatures.mjs) ' +
-            'applies the ccmp lookups whatever the features option: lo chula still loses its tail, [3, 8]',
+            '(thaiFeatures), and ccmpReplacementLigatures (src/features/ccmp/ccmpReplacementLigatures.mjs) ' +
+            'applies the ccmp lookups whatever the features option, to the thai text when the ccmp of thai is off: ' +
+            'lo chula still loses its tail, [3, 8]',
             function() {
                 assert.deepStrictEqual(shapeText(font, '\u{E2C}\u{E34}', { features: { ccmp: false } }).glyphs, [2, 8]);
             }

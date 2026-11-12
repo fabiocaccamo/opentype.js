@@ -53,7 +53,9 @@ opentype.Font.prototype.stringToGlyphs = function(s, options) {};
 
 /**
  * Convert the given text to the list of glyphs of stringToGlyphs, each one with
- * the UTF-16 range [start, end) of the characters of the text it represents.
+ * the UTF-16 range [start, end) of the characters of the text it represents:
+ * the glyphs of a ligature and the glyphs between its components share a range,
+ * each glyph of a multiple substitution has the range of the glyph it replaces.
  * @param  {string} s
  * @param  {Object=} options
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number}>}

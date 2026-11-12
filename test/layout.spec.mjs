@@ -1,6 +1,6 @@
 import assert  from 'assert';
 import { Font, Path, Glyph } from '../src/opentype.mjs';
-import Layout, { getLayoutGdefTable, getFirstGlyphIndex, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, getNotIgnoredGlyphPositions } from '../src/layout.mjs';
+import Layout, { getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, getNotIgnoredGlyphPositions } from '../src/layout.mjs';
 import { glyphIndexes, createLookupFlagsGdef } from './lookup-flags-font.mjs';
 
 describe('layout.mjs', function() {
@@ -323,7 +323,7 @@ describe('layout.mjs', function() {
         });
     });
 
-    describe('getFirstGlyphIndex, findNextNotIgnoredGlyphPosition and getNotIgnoredGlyphPositions', function() {
+    describe('findNextNotIgnoredGlyphPosition and getNotIgnoredGlyphPositions', function() {
         const gdef = createLookupFlagsGdef();
         const { a: glyphA, b: glyphB, c: glyphC, acute, dotbelow } = glyphIndexes;
         const ignoreMarks = { lookupFlag: 0x0008 };
@@ -337,11 +337,11 @@ describe('layout.mjs', function() {
             assert.equal(findNextNotIgnoredGlyphPosition(gdef, { lookupFlag: 0 }, glyphs, 0, 1), 1);
         });
 
-        it('takes the first glyph of the glyphs of a multiple substitution', function() {
-            assert.equal(getFirstGlyphIndex(glyphB), glyphB);
-            assert.equal(getFirstGlyphIndex([acute, glyphB]), acute);
-            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, [glyphA, [acute, glyphB], glyphC], 0, 1), 2);
-            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, [glyphA, [glyphB, acute], glyphC], 0, 1), 1);
+        it('counts each glyph of a multiple substitution as a glyph of its own', function() {
+            // a multiple substitution into acute b (or b acute) between a and c: the b is the next glyph either way
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, [glyphA, acute, glyphB, glyphC], 0, 1), 2);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, [glyphA, glyphB, acute, glyphC], 0, 1), 1);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, [glyphA, glyphB, acute, glyphC], 1, 1), 3);
         });
 
         it('lists the positions of the glyphs that the lookup does not ignore, at most the count given', function() {

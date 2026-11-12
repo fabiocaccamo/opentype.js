@@ -5,6 +5,7 @@
 
 import Tokenizer from './tokenizer.mjs';
 import FeatureQuery from './features/featureQuery.mjs';
+import { getTokenGlyphIndexes, getGlyphSequence } from './features/applySubstitution.mjs';
 import arabicWordCheck from './features/arab/contextCheck/arabicWord.mjs';
 import arabicSentenceCheck from './features/arab/contextCheck/arabicSentence.mjs';
 import arabicPresentationForms from './features/arab/arabicPresentationForms.mjs';
@@ -13,9 +14,7 @@ import ccmpReplacementCheck from './features/ccmp/contextCheck/ccmpReplacement.m
 import ccmpReplacement from './features/ccmp/ccmpReplacementLigatures.mjs';
 import latinFeatures from './features/latn/latinFeatures.mjs';
 import thaiWordCheck from './features/thai/contextCheck/thaiWord.mjs';
-import thaiGlyphComposition from './features/thai/thaiGlyphComposition.mjs';
-import thaiLigatures from './features/thai/thaiLigatures.mjs';
-import thaiRequiredLigatures from './features/thai/thaiRequiredLigatures.mjs';
+import thaiFeatures from './features/thai/thaiFeatures.mjs';
 import unicodeVariationSequenceCheck from './features/unicode/contextCheck/variationSequenceCheck.mjs';
 import unicodeVariationSequences from './features/unicode/variationSequences.mjs';
 
@@ -210,17 +209,11 @@ function applyUnicodeVariationSequences() {
 }
 
 /**
- * Apply available thai features
+ * Apply the enabled thai features
  */
 function applyThaiFeatures() {
     checkGlyphIndexStatus.call(this);
-    const ranges = this.tokenizer.getContextRanges('thaiWord');
-    for(let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        if (this.hasFeatureEnabled('thai', 'liga')) thaiLigatures.call(this, range);
-        if (this.hasFeatureEnabled('thai', 'rlig')) thaiRequiredLigatures.call(this, range);
-        if (this.hasFeatureEnabled('thai', 'ccmp')) thaiGlyphComposition.call(this, range);
-    }
+    thaiFeatures.call(this);
 }
 
 /**
@@ -292,78 +285,43 @@ Bidi.prototype.getBidiText = function (text) {
 };
 
 /**
- * Get the current state index of each token
- * @param {text} text an input text
+ * Get the glyph indexes of the text in glyph order: each glyph of a multiple substitution its own, none for a
+ * deleted token
+ * @param {string} text an input text
+ * @returns {number[]}
  */
 Bidi.prototype.getTextGlyphs = function (text) {
     this.processText(text);
-    let indexes = [];
-    for (let i = 0; i < this.tokenizer.tokens.length; i++) {
-        const token = this.tokenizer.tokens[i];
-        if (token.state.deleted) continue;
-        const index = token.activeState.value;
-        // a multiple substitution replaces the glyph of a token with a sequence of glyphs
-        if (Array.isArray(index)) {
-            indexes.push(...index);
-        } else {
-            indexes.push(index);
-        }
-    }
-    return indexes;
+    return getGlyphSequence(this.tokenizer.tokens).glyphIndexes;
 };
 
 /**
- * Get the current state index of each token, with the range of the characters of the text it represents
- * (its cluster): the characters of the deleted tokens (e.g. ligature components, variation selectors)
- * belong to the glyph of the previous token in the text.
+ * Get each glyph of the text, with the range of the characters it represents (its cluster), like the
+ * monotone clusters of HarfBuzz: a cluster ends where the next cluster of the text
+ * starts, so the characters of the deleted tokens (e.g. ligature components, variation selectors) belong to
+ * the cluster before them in the text (the first cluster for the ones before it). The glyphs of a multiple
+ * substitution have the cluster of their token, a ligature merges the clusters of its components and of the
+ * glyphs between them.
  * @param {string} text an input text
- * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean}>} glyph indexes in the glyph
- * order, with the UTF-16 range [start, end) of their characters in the text, and whether their run is laid out
- * from right to left (the arabic sentences, in reverse order of the text)
+ * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean, tokenOffset: number}>} glyph
+ * indexes in the glyph order, with the UTF-16 range [start, end) of their characters in the text, whether their run
+ * is laid out from right to left (the arabic sentences, in reverse order of the text), and the UTF-16 offset of the
+ * character of their token in the text, shared by the glyphs of a multiple substitution only
  */
 Bidi.prototype.getTextGlyphClusters = function (text) {
     this.processText(text);
-    const tokens = this.tokenizer.tokens;
+    const glyphTokens = this.tokenizer.tokens.filter(token => !token.state.deleted);
+    const clusterStarts = Array.from(new Set(glyphTokens.map(token => token.cluster))).sort((startA, startB) => startA - startB);
+    const clusterRanges = new Map(clusterStarts.map((start, index) => [start, {
+        start: index === 0 ? 0 : start,
+        end: index + 1 < clusterStarts.length ? clusterStarts[index + 1] : text.length
+    }]));
     const clusters = [];
-    const tokenClusters = new Map();
-    for (let i = 0; i < tokens.length; i++) {
-        const token = tokens[i];
-        if (token.state.deleted) continue;
-        // a multiple substitution replaces the glyph of a token with a sequence of glyphs,
-        // all of them representing the characters of the token
-        const value = token.activeState.value;
+    for (const token of glyphTokens) {
+        const { start, end } = clusterRanges.get(token.cluster);
         const rightToLeft = this.rightToLeftTokens.has(token);
-        const tokenGlyphClusters = (Array.isArray(value) ? value : [value]).map(index => ({
-            index,
-            start: token.charOffset,
-            end: token.charOffset + token.char.length,
-            rightToLeft
-        }));
-        clusters.push(...tokenGlyphClusters);
-        tokenClusters.set(token, tokenGlyphClusters);
-    }
-    // extend the clusters with the characters of the deleted tokens, in text order
-    const tokensInTextOrder = tokens.slice().sort((tokenA, tokenB) => tokenA.charOffset - tokenB.charOffset);
-    let previousClusters = null;
-    let pendingTokens = [];
-    for (let i = 0; i < tokensInTextOrder.length; i++) {
-        const token = tokensInTextOrder[i];
-        const tokenGlyphClusters = tokenClusters.get(token);
-        if (tokenGlyphClusters) {
-            // deleted tokens before the first glyph belong to it
-            for (let j = 0; j < pendingTokens.length; j++) {
-                for (const cluster of tokenGlyphClusters) {
-                    cluster.start = Math.min(cluster.start, pendingTokens[j].charOffset);
-                }
-            }
-            pendingTokens = [];
-            previousClusters = tokenGlyphClusters;
-        } else if (previousClusters) {
-            for (const cluster of previousClusters) {
-                cluster.end = Math.max(cluster.end, token.charOffset + token.char.length);
-            }
-        } else {
-            pendingTokens.push(token);
+        for (const index of getTokenGlyphIndexes(token)) {
+            clusters.push({ index, start, end, rightToLeft, tokenOffset: token.charOffset });
         }
     }
     return clusters;

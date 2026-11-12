@@ -4,8 +4,7 @@
 
 import { ContextParams } from '../../tokenizer.mjs';
 import { isIsolatedArabicChar, isTashkeelArabicChar } from '../../char.mjs';
-import { SubstitutionAction } from '../featureQuery.mjs';
-import applySubstitution from '../applySubstitution.mjs';
+import applySubstitution, { getGlyphSequence } from '../applySubstitution.mjs';
 
 /**
  * Check if a char can be connected to it's preceding char
@@ -38,7 +37,28 @@ function willConnectNext(charContextParams) {
 }
 
 /**
- * Apply arabic presentation forms to a list of tokens
+ * Apply the lookups of a form feature at each glyph of a token (none for a deleted token), from its first one, going on
+ * after the glyphs of the substitution at each glyph (see applySubstitution)
+ * @param {FeatureQuery} query
+ * @param {string} tag the form feature tag
+ * @param {Token} token
+ * @param {GlyphSequence} glyphSequence the glyphs of the tokens, which applySubstitution updates
+ * @param {ContextParams} contextParams the context of the lookups, the glyph indexes of the sequence
+ */
+function applyFormToToken(query, tag, token, glyphSequence, contextParams) {
+    let position = glyphSequence.glyphTokens.indexOf(token);
+    while (position >= 0 && glyphSequence.glyphTokens[position] === token) {
+        contextParams.setCurrentIndex(position);
+        const substitutions = query.lookupFeature({ tag, script: 'arab', contextParams });
+        // the substitution of the current glyph, if any
+        position += applySubstitution(substitutions[position], glyphSequence, position);
+    }
+}
+
+/**
+ * Apply arabic presentation forms to a list of tokens, in the context of the glyphs of the tokens, where each glyph
+ * of a multiple substitution (e.g. of ccmp) is a glyph of its own: like the form mask that HarfBuzz copies to each
+ * glyph of a multiple substitution, the form of a token applies at each of its glyphs
  * @param {ContextRange} range a range of tokens
  */
 function arabicPresentationForms(range) {
@@ -46,16 +66,15 @@ function arabicPresentationForms(range) {
     const tags = this.featuresTags[script];
     const tokens = this.tokenizer.getRangeTokens(range);
     if (tokens.length === 1) return;
-    let contextParams = new ContextParams(
-        tokens.map(token => token.getState('glyphIndex')
-        ), 0);
+    // applySubstitution updates the glyphs of the sequence, the context of the lookups
+    const glyphSequence = getGlyphSequence(tokens);
+    const contextParams = new ContextParams(glyphSequence.glyphIndexes, 0);
     const charContextParams = new ContextParams(
         tokens.map(token => token.char
         ), 0);
     for(let i = 0; i < tokens.length; i++) {
         const token = tokens[i];
         if (isTashkeelArabicChar(token.char)) continue;
-        contextParams.setCurrentIndex(i);
         charContextParams.setCurrentIndex(i);
         let CONNECT = 0; // 2 bits 00 (10: can connect next) (01: can connect prev)
         if (willConnectPrev(charContextParams)) CONNECT |= 1;
@@ -67,20 +86,7 @@ function arabicPresentationForms(range) {
             case 3: (tag = 'medi'); break;
         }
         if (tags.indexOf(tag) === -1) continue;
-        let substitutions = this.query.lookupFeature({
-            tag, script, contextParams
-        });
-        if (substitutions instanceof Error) {
-            console.info(substitutions.message);
-            continue;
-        }
-        for(let j = 0; j < substitutions.length; j++) {
-            const action = substitutions[j];
-            if (action instanceof SubstitutionAction) {
-                applySubstitution(action, tokens, j);
-                contextParams.context[j] = action.substitution;
-            }
-        }
+        applyFormToToken(this.query, tag, token, glyphSequence, contextParams);
     }
 }
 

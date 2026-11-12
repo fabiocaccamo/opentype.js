@@ -6,7 +6,7 @@
  *   hb-shape --no-glyph-names --cluster-level=1 --features=<the feature of the lookup in the generator> LookupFlags.ttf -u <code points>
  * (or one of the variants of LookupFlags.ttf the generator lists, e.g. LookupFlagsNoGDEF.ttf).
  * Each test quotes its lookups in the feaLib syntax, the GDEF of the font is:
- *   GlyphClassDef [a b c a.alt b.alt alef reh dal waw dal.alt lam reh.alt A V Agrave], [ff a_b a_b_c lam_alef], [acute dotbelow acute.alt fatha gravecomb], ;
+ *   GlyphClassDef [a b c a.alt b.alt alef reh dal waw dal.alt lam reh.alt A V Agrave lam.init kokai khokhai], [ff a_b a_b_c lam_alef kokai_maiek], [acute dotbelow acute.alt fatha gravecomb maiek maiek.alt], ;
  *   lookupflag MarkAttachmentType @ACUTES (class 1 of MarkAttachClassDef), with @ACUTES = [acute acute.alt]
  *   lookupflag MarkAttachmentType @DOTS (class 2), lookupflag UseMarkFilteringSet @DOTS (set 0), with @DOTS = [dotbelow]
  * The bases and the ligatures are 500 units wide, the marks 0.
@@ -40,7 +40,13 @@ const glyphDefinitions = [
     ['A', 'A', 1],
     ['V', 'V', 1],
     ['Agrave', '\u{C0}', 1],
-    ['gravecomb', '\u{300}', 3]
+    ['gravecomb', '\u{300}', 3],
+    ['lam.init', null, 1],
+    ['kokai', '\u{E01}', 1],
+    ['khokhai', '\u{E02}', 1],
+    ['maiek', '\u{E48}', 3],
+    ['maiek.alt', null, 3],
+    ['kokai_maiek', null, 2]
 ];
 
 // the index of each glyph by name
@@ -110,4 +116,80 @@ function createLayoutTable(scriptTag, featureTag, lookupListIndexes, lookups) {
     };
 }
 
-export { glyphIndexes, createLookupFlagsGdef, createLookupFlagsFont, createLayoutTable };
+/**
+ * A GSUB or GPOS table whose scripts have the given features in their default language system
+ * @param {Object<string, Array<[string, number[]]>>} scriptFeatures - for each script tag, its features: a feature tag
+ * and the indexes of its lookups in the lookup list
+ * @param {Object[]} lookups - the lookup list
+ * @returns {Object}
+ */
+function createScriptsLayoutTable(scriptFeatures, lookups) {
+    const features = [];
+    const scripts = Object.entries(scriptFeatures).map(([scriptTag, featureLookups]) => {
+        const featureIndexes = featureLookups.map(([featureTag, lookupListIndexes]) => {
+            features.push({ tag: featureTag, feature: { featureParams: 0, lookupListIndexes } });
+            return features.length - 1;
+        });
+        return { tag: scriptTag, script: { defaultLangSys: { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes }, langSysRecords: [] } };
+    });
+    return { version: 1, scripts, features, lookups };
+}
+
+/**
+ * A coverage table of format 1
+ * @param {number[]} glyphs - glyph indexes, in glyph index order
+ * @returns {Object}
+ */
+function createCoverage(glyphs) {
+    return { format: 1, glyphs };
+}
+
+/**
+ * The coverage tables of a sequence of glyphs (e.g. the input of a contextual rule of format 3), one glyph each
+ * @param {number[]} glyphs - glyph indexes, in the order of the sequence
+ * @returns {Object[]}
+ */
+function createCoverages(glyphs) {
+    return glyphs.map(glyph => createCoverage([glyph]));
+}
+
+/**
+ * A lookup of one single substitution of format 2
+ * @param {number[]} glyphs - the glyphs it substitutes, in glyph index order
+ * @param {number[]} substitutes - the substitute of each glyph
+ * @param {number} [lookupFlag=0]
+ * @returns {Object}
+ */
+function createSingleLookup(glyphs, substitutes, lookupFlag = 0) {
+    return { lookupType: 1, lookupFlag, subtables: [{ substFormat: 2, coverage: createCoverage(glyphs), substitute: substitutes }] };
+}
+
+/**
+ * A lookup of one multiple substitution (format 1)
+ * @param {number[]} glyphs - the glyphs it substitutes, in glyph index order
+ * @param {number[][]} sequences - the glyphs that replace each glyph
+ * @returns {Object}
+ */
+function createMultipleLookup(glyphs, sequences) {
+    return { lookupType: 2, lookupFlag: 0, subtables: [{ substFormat: 1, coverage: createCoverage(glyphs), sequences }] };
+}
+
+// MULTIPLE_C of LookupFlags.ttf: sub c by a acute;
+const multipleCLookup = createMultipleLookup([glyphIndexes.c], [[glyphIndexes.a, glyphIndexes.acute]]);
+
+// SUB_ACUTE_B of LookupFlags.ttf: sub acute by acute.alt; sub b by b.alt;
+const subAcuteBLookup = createSingleLookup([glyphIndexes.b, glyphIndexes.acute], [glyphIndexes['b.alt'], glyphIndexes['acute.alt']]);
+
+export {
+    glyphIndexes,
+    createLookupFlagsGdef,
+    createLookupFlagsFont,
+    createLayoutTable,
+    createScriptsLayoutTable,
+    createCoverage,
+    createCoverages,
+    createSingleLookup,
+    createMultipleLookup,
+    multipleCLookup,
+    subAcuteBLookup
+};

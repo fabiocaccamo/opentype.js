@@ -276,8 +276,10 @@ Font.prototype._createBidi = function(options) {
 
 /**
  * Convert the given text to a list of glyphs, each one with the characters of the text it represents
- * (its cluster): a ligature represents all its component characters, a character represented by no glyph
- * of its own (e.g. a variation selector) belongs to the cluster of the glyph before it.
+ * (its cluster), like the clusters of HarfBuzz (cluster level 1): a ligature represents all its component
+ * characters, and the glyphs between its components (e.g. the marks its lookup skips) are in its cluster; each
+ * glyph of a multiple substitution represents the characters of the glyph it replaces; a character represented
+ * by no glyph of its own (e.g. a variation selector) belongs to the cluster of the glyph before it.
  * The glyphs are the ones (and in the same order) returned by stringToGlyphs().
  * @param  {string} s
  * @param  {GlyphRenderOptions} [options]
@@ -293,8 +295,9 @@ Font.prototype.stringToGlyphClusters = function(s, options) {
  * its run.
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options]
- * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean}>} the glyphs in visual
- * order, rightToLeft for the glyphs of a right-to-left run
+ * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean, tokenOffset: number}>} the
+ * glyphs in visual order, rightToLeft for the glyphs of a right-to-left run, tokenOffset shared by the glyphs of a
+ * multiple substitution only (see Bidi.getTextGlyphClusters)
  * @private
  */
 Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
@@ -304,7 +307,8 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
         glyph: this.glyphs.get(cluster.index) || notdef,
         start: cluster.start,
         end: cluster.end,
-        rightToLeft: cluster.rightToLeft
+        rightToLeft: cluster.rightToLeft,
+        tokenOffset: cluster.tokenOffset
     }));
 };
 
@@ -486,23 +490,24 @@ function getGlyphKerningScript(glyph) {
 }
 
 /**
- * Reverse a sequence of glyph clusters in visual order, keeping the glyphs of one cluster (the glyphs of a multiple
- * substitution, which have the same start) in the order of the substitution: the order of the text of a
- * right-to-left run, the order of the kerning pairs of HarfBuzz.
- * @param  {Array<{start: number}>} glyphClusters - see _stringToDirectionalGlyphClusters
- * @return {Array<{start: number}>} the clusters in reverse order, the glyphs of each cluster in their order
+ * Reverse a sequence of glyph clusters in visual order, keeping the glyphs of one token (the glyphs of a multiple
+ * substitution, which have the same tokenOffset) in the order of the substitution: the order of the text of a
+ * right-to-left run, the order of the kerning pairs of HarfBuzz. The glyphs of the tokens a ligature merged into
+ * one cluster (the ligature and the marks between its components) are reversed like the other ones.
+ * @param  {Array<{tokenOffset: number}>} glyphClusters - see _stringToDirectionalGlyphClusters
+ * @return {Array<{tokenOffset: number}>} the clusters in reverse order, the glyphs of each token in their order
  */
 function reverseGlyphClusters(glyphClusters) {
-    const clusterGlyphs = [];
+    const tokenGlyphs = [];
     for (const glyphCluster of glyphClusters) {
-        const lastClusterGlyphs = clusterGlyphs[clusterGlyphs.length - 1];
-        if (lastClusterGlyphs && lastClusterGlyphs[0].start === glyphCluster.start) {
-            lastClusterGlyphs.push(glyphCluster);
+        const lastTokenGlyphs = tokenGlyphs[tokenGlyphs.length - 1];
+        if (lastTokenGlyphs && lastTokenGlyphs[0].tokenOffset === glyphCluster.tokenOffset) {
+            lastTokenGlyphs.push(glyphCluster);
         } else {
-            clusterGlyphs.push([glyphCluster]);
+            tokenGlyphs.push([glyphCluster]);
         }
     }
-    return clusterGlyphs.reverse().flat();
+    return tokenGlyphs.reverse().flat();
 }
 
 /**

@@ -210,28 +210,18 @@ function isGlyphIgnoredByLookup(gdef, lookupTable, glyphIndex) {
 }
 
 /**
- * The glyph index of an item of a context: the glyph index itself, or the first glyph of the glyphs of a multiple substitution
- * @param {number|number[]} glyph
- * @returns {number}
- */
-function getFirstGlyphIndex(glyph) {
-    return Array.isArray(glyph) ? glyph[0] : glyph;
-}
-
-/**
  * The position of the first glyph of a sequence after a position (before it with a step of -1) that a lookup does
  * not ignore (see isGlyphIgnoredByLookup).
  * @param {object|undefined} gdef - the GDEF table of the font
  * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
- * @param {Array<number|number[]>} glyphs - glyph indexes; an item that holds the glyphs of a multiple substitution
- * counts as its first glyph
+ * @param {number[]} glyphs - glyph indexes, each glyph of a multiple substitution a glyph of its own
  * @param {number} position - the position the search starts from, excluded
  * @param {number} step - 1 for the next glyph, -1 for the previous one
  * @returns {number} -1 if there is none
  */
 function findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphs, position, step) {
     for (let i = position + step; i >= 0 && i < glyphs.length; i += step) {
-        if (!isGlyphIgnoredByLookup(gdef, lookupTable, getFirstGlyphIndex(glyphs[i]))) {
+        if (!isGlyphIgnoredByLookup(gdef, lookupTable, glyphs[i])) {
             return i;
         }
     }
@@ -243,7 +233,7 @@ function findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphs, position, st
  * of -1), at most count of them (see findNextNotIgnoredGlyphPosition).
  * @param {object|undefined} gdef - the GDEF table of the font
  * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
- * @param {Array<number|number[]>} glyphs - glyph indexes, or the glyphs of a multiple substitution
+ * @param {number[]} glyphs - glyph indexes, each glyph of a multiple substitution a glyph of its own
  * @param {number} position - the position the search starts from, excluded
  * @param {number} step - 1 for the next glyphs, -1 for the previous ones
  * @param {number} count
@@ -539,4 +529,4 @@ Layout.prototype = {
 };
 
 export default Layout;
-export { getLayoutGdefTable, getFirstGlyphIndex, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, getNotIgnoredGlyphPositions };
+export { getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, getNotIgnoredGlyphPositions };
