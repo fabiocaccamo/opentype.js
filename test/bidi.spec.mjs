@@ -2,6 +2,8 @@ import assert from 'assert';
 import Bidi from '../src/bidi.mjs';
 import { parse } from '../src/opentype.mjs';
 import { readFileSync } from 'fs';
+import { itFailsUntilFixed } from './regression/helpers.mjs';
+import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
 describe('bidi.mjs', function() {
@@ -86,6 +88,142 @@ describe('bidi.mjs', function() {
         it('should apply latin ligature', function () {
             let glyphIndexes = bidiFira.getTextGlyphs('fi'); // fi => ﬁ
             assert.deepEqual(glyphIndexes, [1145]);
+        });
+    });
+
+    describe('getTextGlyphClusters', function() {
+        it('gives the direction of the run of each glyph', function() {
+            // 'Hi ' then the arabic sentence of beh, fatha, alef, in visual order: H, i, space, alef, fatha, beh
+            const clusters = bidiScheherazade.getTextGlyphClusters('Hi \u{628}\u{64E}\u{627}');
+            assert.deepStrictEqual(clusters.map(cluster => [cluster.start, cluster.rightToLeft]),
+                [[0, false], [1, false], [2, false], [5, true], [4, true], [3, true]]);
+            // a right-to-left run of one glyph between two left-to-right glyphs
+            const oneGlyphRunClusters = bidiScheherazade.getTextGlyphClusters('a\u{631}b');
+            assert.deepStrictEqual(oneGlyphRunClusters.map(cluster => cluster.rightToLeft), [false, true, false]);
+            // two right-to-left runs reh alef around a left-to-right b
+            const twoRunsClusters = bidiScheherazade.getTextGlyphClusters('\u{631}\u{627}b\u{631}\u{627}');
+            assert.deepStrictEqual(twoRunsClusters.map(cluster => [cluster.start, cluster.rightToLeft]),
+                [[1, true], [0, true], [2, false], [4, true], [3, true]]);
+        });
+
+        describe('a ligature formed across a mark', function() {
+            let changaFont;
+            let lookupFlagsFont;
+            let ccmpLigatureFont;
+
+            // the font of test/lookup-flags-font.mjs with the two rlig lookups of LookupFlags.ttf in ccmp, in DFLT where the fork
+            // looks the ccmp of an arabic text up: lookupflag IgnoreMarks; sub lam alef by lam_alef; then
+            // lookupflag IgnoreMarks; sub lam_alef reh' by reh.alt;
+            function createCcmpLigatureFont() {
+                const { lam, alef, reh } = glyphIndexes;
+                const IGNORE_MARKS = 0x0008;
+                const coverage = glyphIndex => ({ format: 1, glyphs: [glyphIndex] });
+                const ligatureLookup = {
+                    lookupType: 4,
+                    lookupFlag: IGNORE_MARKS,
+                    subtables: [{ substFormat: 1, coverage: coverage(lam), ligatureSets: [[{ ligGlyph: glyphIndexes.lam_alef, components: [alef] }]] }]
+                };
+                const chainingLookup = {
+                    lookupType: 6,
+                    lookupFlag: IGNORE_MARKS,
+                    subtables: [{
+                        substFormat: 3,
+                        backtrackCoverage: [coverage(glyphIndexes.lam_alef)],
+                        inputCoverage: [coverage(reh)],
+                        lookaheadCoverage: [],
+                        lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 2 }]
+                    }]
+                };
+                const rehLookup = { lookupType: 1, lookupFlag: 0, subtables: [{ substFormat: 2, coverage: coverage(reh), substitute: [glyphIndexes['reh.alt']] }] };
+                return createLookupFlagsFont({ gsub: createLayoutTable('DFLT', 'ccmp', [0, 1], [ligatureLookup, chainingLookup, rehLookup]) });
+            }
+
+            // the font of test/lookup-flags-font.mjs with a ligature of two marks in ccmp, in DFLT where the fork looks the
+            // ccmp of an arabic text up: sub fatha fatha by fatha; then in rlig: lookupflag IgnoreMarks; sub lam alef by lam_alef;
+            function createCcmpBeforeRligFont() {
+                const { lam, alef, fatha } = glyphIndexes;
+                const IGNORE_MARKS = 0x0008;
+                const coverage = glyphIndex => ({ format: 1, glyphs: [glyphIndex] });
+                const defaultLangSys = featureIndex => ({ reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [featureIndex] });
+                const fathaLigatureLookup = {
+                    lookupType: 4,
+                    lookupFlag: 0,
+                    subtables: [{ substFormat: 1, coverage: coverage(fatha), ligatureSets: [[{ ligGlyph: fatha, components: [fatha] }]] }]
+                };
+                const lamAlefLigatureLookup = {
+                    lookupType: 4,
+                    lookupFlag: IGNORE_MARKS,
+                    subtables: [{ substFormat: 1, coverage: coverage(lam), ligatureSets: [[{ ligGlyph: glyphIndexes.lam_alef, components: [alef] }]] }]
+                };
+                return createLookupFlagsFont({
+                    gsub: {
+                        version: 1,
+                        scripts: [
+                            { tag: 'DFLT', script: { defaultLangSys: defaultLangSys(0), langSysRecords: [] } },
+                            { tag: 'arab', script: { defaultLangSys: defaultLangSys(1), langSysRecords: [] } }
+                        ],
+                        features: [
+                            { tag: 'ccmp', feature: { featureParams: 0, lookupListIndexes: [0] } },
+                            { tag: 'rlig', feature: { featureParams: 0, lookupListIndexes: [1] } }
+                        ],
+                        lookups: [fathaLigatureLookup, lamAlefLigatureLookup]
+                    }
+                });
+            }
+
+            before(function() {
+                changaFont = loadSync('./test/fonts/Changa-Regular.ttf');
+                // built by test/generate-lookup-flags-font.py
+                lookupFlagsFont = loadSync('./test/fonts/LookupFlags.ttf');
+                ccmpLigatureFont = createCcmpLigatureFont();
+            });
+
+            it('forms the lam alef required ligature across the fatha, like HarfBuzz', function() {
+                // hb-shape --no-glyph-names --cluster-level=1 Changa-Regular.ttf -u 644,64e,627
+                // [773=0@375,180+0|458=0+635]: the fatha, then the lam alef ligature, in visual order
+                assert.deepStrictEqual(changaFont.stringToGlyphIndexes('\u{644}\u{64E}\u{627}'), [773, 458]);
+            });
+
+            it('matches the rule of a later required ligature lookup right after the ligature, like HarfBuzz', function() {
+                // rlig: lookupflag IgnoreMarks; sub lam alef by lam_alef; then lookupflag IgnoreMarks; sub lam_alef reh' by reh.alt;
+                // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlags.ttf -u 0644,0627,0631
+                // [20=2+500|19=0+500]: reh.alt, then the lam alef ligature, in visual order
+                assert.deepStrictEqual(lookupFlagsFont.stringToGlyphIndexes('\u{644}\u{627}\u{631}'), [20, 19]);
+            });
+
+            it('forms the lam alef required ligature across a mark ligature that ccmp formed, like HarfBuzz', function() {
+                // ccmp: sub fatha fatha by fatha; then rlig: lookupflag IgnoreMarks; sub lam alef by lam_alef;
+                // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsCcmpBeforeRlig.ttf -u 0644,064E,064E,0627
+                // [14=0+0|19=0+500]: the fatha, then the lam alef ligature, in visual order
+                assert.deepStrictEqual(createCcmpBeforeRligFont().stringToGlyphIndexes('\u{644}\u{64E}\u{64E}\u{627}'), [14, 19]);
+            });
+
+            it('forms both glyphs of the lam alef across a mark ligature of a later required ligature lookup, like HarfBuzz', function() {
+                // rlig of Scheherazade: lookup 8 (IgnoreMarks) substitutes lam by lam.init.preAlef and alef by alef.fina.postLamIni,
+                // lookup 9 (MarkAttachmentType 1) forms the ligature uni0651064E of the fatha and the shadda between them.
+                // hb-shape --shapers=ot (the default shaper of this font is graphite2) --no-glyph-names --cluster-level=1
+                // Scheherazade-Bold.ttf -u 0644,064E,0651,0627: [1341=3+564|1311=1@18,316+0|1330=0@-51,0+451]
+                assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{644}\u{64E}\u{651}\u{627}'), [1341, 1311, 1330]);
+            });
+
+            itFailsUntilFixed('matches the rule of a later ccmp lookup right after the ligature, like HarfBuzz',
+                'ccmpReplacementLigatures (src/features/ccmp/ccmpReplacementLigatures.mjs): the context keeps the component the ligature ' +
+                'deleted, as true, so the backtrack of the rule at reh is true and not the lam alef ligature: lam_alef reh',
+                function() {
+                    // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsCcmpLigature.ttf -u 0644,0627,0631
+                    // [20=2+500|19=0+500]: reh.alt, then the lam alef ligature, in visual order
+                    assert.deepStrictEqual(ccmpLigatureFont.stringToGlyphIndexes('\u{644}\u{627}\u{631}'), [20, 19]);
+                });
+
+            itFailsUntilFixed('merges the clusters of a ligature and of the mark between its components, like HarfBuzz',
+                'getTextGlyphClusters (src/bidi.mjs): the character of a deleted ligature component belongs to the glyph before it in ' +
+                'the text, here the fatha that the lam alef ligature skipped: the fatha has the cluster [1, 3), the ligature [0, 1) of lam',
+                function() {
+                    // hb-shape --no-glyph-names --cluster-level=1 Changa-Regular.ttf -u 644,64e,627
+                    // [773=0@375,180+0|458=0+635]: lam fatha alef is one cluster
+                    const clusters = changaFont.stringToGlyphClusters('\u{644}\u{64E}\u{627}');
+                    assert.deepStrictEqual(clusters.map(cluster => [cluster.start, cluster.end]), [[0, 3], [0, 3]]);
+                });
         });
     });
 

@@ -22,7 +22,7 @@ function singleSubstitutionFormat2(action, tokens, index) {
 
 /**
  * Apply contextual substitutions (context and chaining context, all formats),
- * whose substitutions are indexed by the sequence index of the input glyphs
+ * whose substitutions are indexed by the offset of the input glyphs from the current one
  * @param {Array} substitutions substitutions
  * @param {any} tokens a list of tokens
  * @param {number} index token index
@@ -63,18 +63,16 @@ function multipleSubstitutionFormat1(action, tokens, index) {
 }
 
 /**
- * Apply ligature substitution format 1
+ * Apply ligature substitution format 1: the first component becomes the ligature glyph and the
+ * other components are deleted, the glyphs the lookup skipped between them stay after the ligature
  * @param {Array} substitutions substitutions
  * @param {any} tokens a list of tokens
  * @param {number} index token index
  */
 function ligatureSubstitutionFormat1(action, tokens, index) {
-    let token = tokens[index];
-    token.setState(action.tag, action.substitution.ligGlyph);
-    const compsCount = action.substitution.components.length;
-    for (let i = 0; i < compsCount; i++) {
-        token = tokens[index + i + 1];
-        token.setState('deleted', true);
+    tokens[index].setState(action.tag, action.substitution.ligGlyph);
+    for (const componentOffset of action.substitution.componentOffsets) {
+        tokens[index + componentOffset].setState('deleted', true);
     }
 }
 

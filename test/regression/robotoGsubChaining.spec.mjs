@@ -566,8 +566,7 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         it('shortens the tail of lo chula before a below vowel and an above mark', function() {
             // lo chula (U+0E2C), sara u (U+0E38), mai tho (U+0E49): HarfBuzz skips sara u (lookupFlag
             // 16, a mark outside of the mark filtering set) and matches the first subtable of lookup
-            // 9; opentype.js does not filter (see the known failure below) and gets the same glyphs
-            // from the second subtable, which lists the below vowel
+            // 9, like opentype.js (the second subtable, which lists the below vowel, gives the same glyphs)
             // hb-shape --no-glyph-names --cluster-level=1 NotoSansThaiLooped-VF-gsub-chaining-subset.ttf -u 0E2C,0E38,0E49
             // [3=0+703|10=1@-1,0+0|5=2@-1,0+0]
             assertShapedLike(font, '\u{E2C}\u{E38}\u{E49}', { glyphs: [3, 10, 5], clusters: [0, 1, 2], advances: [703, 0, 0] });
@@ -609,15 +608,9 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         // lookup 9 the below vowels are skipped and the first subtable matches
         // hb-shape --no-glyph-names --cluster-level=1 NotoSansThaiLooped-VF-gsub-chaining-subset.ttf -u 0E2C,0E38,0E38,0E49
         // [3=0+703|10=1@-1,0+0|10=2@-1,-314+0|5=3@-1,0+0]
-        itFailsUntilFixed(
-            'skips the marks outside of the mark filtering set of the chaining lookup',
-            'chainingSubstitutionFormat3 (src/features/featureQuery.mjs): matches the lookahead on the glyphs that ' +
-            'follow, whatever the lookupFlag and the markFilteringSet of the lookup: the two sara u are not skipped ' +
-            'and lo chula keeps its tail, [2, 10, 10, 5]',
-            function() {
-                assert.deepStrictEqual(shapeText(font, '\u{E2C}\u{E38}\u{E38}\u{E49}').glyphs, [3, 10, 10, 5]);
-            }
-        );
+        it('skips the marks outside of the mark filtering set of the chaining lookup', function() {
+            assert.deepStrictEqual(shapeText(font, '\u{E2C}\u{E38}\u{E38}\u{E49}').glyphs, [3, 10, 10, 5]);
+        });
 
         // lo chula (U+0E2C) then sara i (U+0E34), ccmp off
         // hb-shape --no-glyph-names --cluster-level=1 --features=-ccmp NotoSansThaiLooped-VF-gsub-chaining-subset.ttf -u 0E2C,0E34

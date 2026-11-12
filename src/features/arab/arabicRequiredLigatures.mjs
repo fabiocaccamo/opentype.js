@@ -19,12 +19,14 @@ function getContextParams(tokens, index) {
 }
 
 /**
- * Apply Arabic required ligatures to a context range
+ * Apply Arabic required ligatures to a context range: the glyphs deleted by a ligature
+ * are not part of the context any more
  * @param {ContextRange} range a range of tokens
  */
 function arabicRequiredLigatures(range) {
     const script = 'arab';
-    let tokens = this.tokenizer.getRangeTokens(range);
+    const rangeTokens = this.tokenizer.getRangeTokens(range);
+    let tokens = rangeTokens.filter(token => !token.state.deleted);
     let contextParams = getContextParams(tokens);
     for (let index = 0; index < contextParams.context.length; index++) {
         contextParams.setCurrentIndex(index);
@@ -36,6 +38,7 @@ function arabicRequiredLigatures(range) {
                 const action = substitutions[i];
                 applySubstitution(action, tokens, index);
             }
+            tokens = rangeTokens.filter(token => !token.state.deleted);
             contextParams = getContextParams(tokens);
         }
     }

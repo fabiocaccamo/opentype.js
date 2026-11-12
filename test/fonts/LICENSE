@@ -31,6 +31,11 @@ liga-sub5.ttf
     SIL Open Font License, Version 1.1.
     https://opensource.org/licenses/OFL-1.1
 
+LookupFlags.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-lookup-flags-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 noto-emoji.ttf
     Copyright 2021, Google Inc.
     SIL Open Font License, version 1.1
@@ -87,6 +92,16 @@ TestCVARGVARTwo.ttf
     Copyright 2015 Google Inc. All Rights Reserved.
     SIL Open Font License, Version 1.1
     http://scripts.sil.org/OFL
+
+TestGDEF-Blocklisted.ttf
+TestGDEF-Blocklisted.woff
+TestGDEF-Blocklisted.woff2
+TestGDEF-NotBlocklisted.ttf
+TestGDEF-NotBlocklistedGposLength.ttf
+TestGDEF-NotBlocklistedGsubLength.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-gdef-blocklist-fonts.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
 
 TestGSUB-UnsupportedLookup.ttf
     Generated with fontTools FontBuilder for the opentype.js test suite.

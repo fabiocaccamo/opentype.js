@@ -126,7 +126,7 @@ describe('contextSubstitutionFormat3', function () {
 
         const lookup = query.getLookupMethod(featureLookups[0], lookupSubtables[0]);
         const contextParams = new ContextParams([1, 2], 0);
-        const substitutions = lookup(contextParams);
+        const substitutions = lookup(contextParams, featureLookups[0]);
 
         // Should produce [A'(3), B'(4)], NOT [3, 4, 3, 4] (old bug)
         assert.deepEqual(substitutions, [3, 4]);
@@ -139,7 +139,7 @@ describe('contextSubstitutionFormat3', function () {
 
         const lookup = query.getLookupMethod(featureLookups[0], lookupSubtables[0]);
         const contextParams = new ContextParams([1], 0);
-        const substitutions = lookup(contextParams);
+        const substitutions = lookup(contextParams, featureLookups[0]);
 
         assert.strictEqual(substitutions, null);
     });
@@ -152,7 +152,7 @@ describe('contextSubstitutionFormat3', function () {
         const lookup = query.getLookupMethod(featureLookups[0], lookupSubtables[0]);
         // B, A (wrong order — coverage[0] expects A, coverage[1] expects B)
         const contextParams = new ContextParams([2, 1], 0);
-        const substitutions = lookup(contextParams);
+        const substitutions = lookup(contextParams, featureLookups[0]);
 
         assert.strictEqual(substitutions, null);
     });
@@ -170,7 +170,7 @@ describe('contextSubstitutionFormat3', function () {
 
         const lookup = query.getLookupMethod(featureLookups[0], lookupSubtables[0]);
         const contextParams = new ContextParams([1, 2], 0);
-        const substitutions = lookup(contextParams);
+        const substitutions = lookup(contextParams, featureLookups[0]);
 
         // Only position 0 substituted: [A'(3)], position 1 untouched
         assert.deepEqual(substitutions, [3]);
