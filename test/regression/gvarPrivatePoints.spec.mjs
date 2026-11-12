@@ -33,10 +33,11 @@
  * fontTools.pens.recordingPen (the components of a composite are drawn as contours), the path
  * is the one of SVGPathPen. The static instance of hb-subset --variations has the same points
  * for every glyph and location asserted here, but for two values of H at wght 700, wdth 85:
- * HarfBuzz maps avar before it rounds the normalized wght to F2Dot14, which gives another
- * location there (see the test of H). The advances and the x bearings are those of hb-shape
- * (HarfBuzz 11.3.2, run from test/fonts/regression/), equal to the hmtx of the instance but
- * for the x bearing of H at the same location, for the same reason.
+ * HarfBuzz normalizes wght there to 11102/16384 with the OpenType algorithm (16.16 math, avar
+ * in 16.16, one conversion to F2Dot14 at the end), like the fork, fontTools to 11101/16384
+ * (see the test of H, whose points are those of HarfBuzz). The advances and the x bearings are
+ * those of hb-shape (HarfBuzz 11.3.2, run from test/fonts/regression/), equal to the hmtx of the
+ * instance but for the x bearing of H at the same location, for the same reason.
  *
  * On upstream master (5d65b6d) every test of the points and of the path fails; the points of
  * .notdef, a guard of the inverse arrangement, are right there too. With the fix of the
@@ -47,23 +48,21 @@
  * The tests of the metrics call what upstream master does not have (stringToGlyphClusters,
  * variation.getLeftSideBearing, Glyph.prototype.getAdvanceWidth) and cannot run there.
  *
- * The same mechanism and the same three gaps of the metrics (the left side bearing with an HVAR
- * without LSB map, the phantom deltas of an all-points tuple read through the shared points,
- * isComposite read before the lazy outline) are tracked on Readex Pro in
+ * The same mechanism and the same three cases of the metrics (the left side bearing with an HVAR
+ * without LSB map, the phantom deltas of an all-points tuple, which are not in the shared points,
+ * a composite whose outline is not loaded yet) are tested on Readex Pro in
  * readexProVariable.spec.mjs (#754). This spec adds the composite with all-points tuples
  * (Eacute), the all-points tuple of an intermediate region (H) and the inverse arrangement
  * (.notdef and the colon).
  */
 
 import assert from 'assert';
-import { loadFont, shapeText, assertShape, getOutline, assertOutlineClose, itFailsUntilFixed } from './helpers.mjs';
+import { loadFont, shapeText, assertShape, getOutline, assertOutlineClose } from './helpers.mjs';
 
 const hvarFixture = 'Roboto-VF-gvar-private-points-subset.ttf';
 const noHvarFixture = 'Roboto-VF-gvar-private-points-noHVAR-subset.ttf';
 
 const glyphIndexes = { notdef: 0, hyphen: 1, period: 2, colon: 3, H: 5, z: 6, Eacute: 11 };
-
-const allPointsPhantomDeltasReason = 'getPhantomPointDeltas (src/variationprocessor.mjs): takes the empty list of private point numbers of an all-points tuple for no list and looks its phantom points up in the shared point numbers, so it reads the delta of another point or none';
 
 /**
  * Points of a glyph at the current variation of the font, like a fontTools
@@ -177,17 +176,15 @@ describe('regression: gvar private point numbers for all points in a glyph with 
                 ], 0, 'period');
             });
 
-            itFailsUntilFixed(
-                'has the left side bearing of the varied period',
-                'getLeftSideBearing (src/variationprocessor.mjs): returns the default left side bearing (144) when HVAR has no LSB mapping, instead of the one of the varied points and phantom points',
-                function() {
-                    const leftSideBearing = font.variation.getLeftSideBearing(glyphIndexes.period);
-                    // the x bearing, equal to the left side bearing of the hmtx of the instance at wght=900
-                    // hb-shape --no-glyph-names --cluster-level=1 --show-extents --variations=wght=900 Roboto-VF-gvar-private-points-subset.ttf -u 002E
-                    // [2=0+620<117,327,372,-338>]
-                    assert.strictEqual(leftSideBearing, 117);
-                }
-            );
+            // HVAR has no LSB mapping: the left side bearing of the varied points and phantom points,
+            // not the default one (144)
+            it('has the left side bearing of the varied period', function() {
+                const leftSideBearing = font.variation.getLeftSideBearing(glyphIndexes.period);
+                // the x bearing, equal to the left side bearing of the hmtx of the instance at wght=900
+                // hb-shape --no-glyph-names --cluster-level=1 --show-extents --variations=wght=900 Roboto-VF-gvar-private-points-subset.ttf -u 002E
+                // [2=0+620<117,327,372,-338>]
+                assert.strictEqual(leftSideBearing, 117);
+            });
         });
 
         describe('at wdth 75, the all-points tuples of the hyphen, z and Eacute alone at their peak', function() {
@@ -234,32 +231,28 @@ describe('regression: gvar private point numbers for all points in a glyph with 
             });
 
             it('adds the all-points tuple of the period to a tuple of 9 private points, within 1 unit', function() {
-                // 1 unit: the fork rounds after each tuple, see the known failure below
+                // 1 unit: the mechanism of the all-points tuple alone, the exact points are the next test
                 assertOutlineClose(getGlyphPoints(font, glyphIndexes.period), periodPoints, 1, 'period');
             });
 
-            itFailsUntilFixed(
-                'has the exact points of the period',
-                'applyTupleVariationStore (src/variationprocessor.mjs): rounds the points after each tuple instead of once after all of them, 9 coordinates of the period are 1 unit off',
-                function() {
-                    const points = getGlyphPoints(font, glyphIndexes.period);
-                    assertOutlineClose(points, periodPoints, 0, 'period');
-                }
-            );
+            // the deltas rounded after each tuple put 9 coordinates of the period 1 unit off
+            it('has the exact points of the period', function() {
+                const points = getGlyphPoints(font, glyphIndexes.period);
+                assertOutlineClose(points, periodPoints, 0, 'period');
+            });
 
             it('varies all the points of H with a tuple of an intermediate region', function() {
-                // instance at wght=700,wdth=85, glyph H, DecomposingRecordingPointPen. HarfBuzz has 122
-                // where the instance has 123, the x of the two left points of the left stem, because
-                // it maps avar in 16.16 before it rounds to F2Dot14 (hb_ot_var_normalize_coords): wght
-                // 700 is 11102/16384 there, 11101/16384 in fontTools and in the OpenType algorithm
-                // (F2Dot14 rounding, then avar), and the unrounded x is 122.4988 instead of 122.5023.
-                // The fork does not round the normalized coordinates (wght 0.6775709, wdth -0.6):
-                // its unrounded x is 122.5009.
+                // hb-subset --variations=wght=700,wdth=85 --unicodes=0048 Roboto-VF-gvar-private-points-subset.ttf,
+                // glyph H, DecomposingRecordingPointPen. The instance of fontTools has 123 for the x of the
+                // two left points of the left stem: it normalizes wght 700 to 11101/16384 (normalizeValue,
+                // piecewiseLinearMap and one F2Dot14 rounding, in floats), where the OpenType algorithm and
+                // HarfBuzz give 11102/16384 (wght 0.6 is 39322 in 16.16, avar maps it to 44406 in 16.16,
+                // (44406 + 2) >> 2 is 11102), and the unrounded x is 122.4988 instead of 122.5023.
                 // hb-shape --no-glyph-names --cluster-level=1 --show-extents --variations=wght=700,wdth=85 Roboto-VF-gvar-private-points-subset.ttf -u 0048
                 // [5=0+1333<122,1456,1086,-1456>]
                 assertOutlineClose(getGlyphPoints(font, glyphIndexes.H), [
                     ['on', 995, 865], ['on', 995, 626], ['on', 333, 626], ['on', 333, 865], ['end'],
-                    ['on', 418, 1456], ['on', 418, 0], ['on', 123, 0], ['on', 123, 1456], ['end'],
+                    ['on', 418, 1456], ['on', 418, 0], ['on', 122, 0], ['on', 122, 1456], ['end'],
                     ['on', 1208, 1456], ['on', 1208, 0], ['on', 915, 0], ['on', 915, 1456], ['end']
                 ], 0, 'H');
             });
@@ -365,9 +358,7 @@ describe('regression: gvar private point numbers for all points in a glyph with 
                     ['on', 674, 1426], ['on', 175, 30], ['on', 126, 30], ['on', 625, 1426], ['end'],
                     ['on', 625, 30], ['on', 126, 1426], ['on', 175, 1426], ['on', 674, 30], ['end']
                 ], 0, '.notdef');
-                // instance at wght=250,wdth=75, glyph colon, DecomposingRecordingPointPen. Within 1 unit:
-                // the fork rounds the points of the periods after each tuple, see the known failure of
-                // the period at wght 700, wdth 85
+                // instance at wght=250,wdth=75, glyph colon, DecomposingRecordingPointPen
                 assertOutlineClose(getGlyphPoints(font, glyphIndexes.colon), [
                     ['on', 130, 66], ['off', 130, 97], ['off', 170, 142],
                     ['on', 205, 142], ['off', 240, 142], ['off', 283, 98],
@@ -377,7 +368,7 @@ describe('regression: gvar private point numbers for all points in a glyph with 
                     ['on', 208, 1074], ['off', 243, 1074], ['off', 286, 1030],
                     ['on', 286, 998], ['off', 286, 967], ['off', 243, 924],
                     ['on', 208, 924], ['off', 173, 924], ['off', 133, 967], ['end']
-                ], 1, 'colon');
+                ], 0, 'colon');
             });
         });
     });
@@ -397,8 +388,7 @@ describe('regression: gvar private point numbers for all points in a glyph with 
             });
 
             it('takes the advance widths of the composites from their phantom points, once their outline is loaded', function() {
-                // before its outline is loaded the advance width of a composite is the default one,
-                // see the known failure of the colon below
+                // the advance widths before the outline is loaded are the test of the colon below
                 getOutline(font, glyphIndexes.colon);
                 getOutline(font, glyphIndexes.Eacute);
                 // colon, U+00C9 LATIN CAPITAL LETTER E WITH ACUTE
@@ -414,16 +404,13 @@ describe('regression: gvar private point numbers for all points in a glyph with 
                 assert.deepStrictEqual(getLeftSideBearings(font), [117, 152, 111, 67, 118, 111]);
             });
 
-            itFailsUntilFixed(
-                'takes the advance width of the period from the phantom points of its all-points tuple',
-                `${allPointsPhantomDeltasReason}: 655 instead of 620`,
-                function() {
-                    const advances = shapeText(font, '.').advances;
-                    // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 002E
-                    // [2=0+620]
-                    assert.deepStrictEqual(advances, [620]);
-                }
-            );
+            // read through the shared point numbers, the phantom points of the all-points tuple give 655
+            it('takes the advance width of the period from the phantom points of its all-points tuple', function() {
+                const advances = shapeText(font, '.').advances;
+                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 002E
+                // [2=0+620]
+                assert.deepStrictEqual(advances, [620]);
+            });
         });
 
         describe('at wdth 75, the all-points tuples of the hyphen and z alone at their peak', function() {
@@ -433,16 +420,13 @@ describe('regression: gvar private point numbers for all points in a glyph with 
                 font = loadFont(noHvarFixture, { wdth: 75 });
             });
 
-            itFailsUntilFixed(
-                'takes the advance widths of the hyphen and z from the phantom points of their all-points tuple',
-                `${allPointsPhantomDeltasReason}: 576, 902 instead of 508, 899`,
-                function() {
-                    const advances = shapeText(font, '-z').advances;
-                    // hb-shape --no-glyph-names --cluster-level=1 --variations=wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 002D,007A
-                    // [1=0+508|6=1+899]
-                    assert.deepStrictEqual(advances, [508, 899]);
-                }
-            );
+            // read through the shared point numbers: 576, 902
+            it('takes the advance widths of the hyphen and z from the phantom points of their all-points tuple', function() {
+                const advances = shapeText(font, '-z').advances;
+                // hb-shape --no-glyph-names --cluster-level=1 --variations=wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 002D,007A
+                // [1=0+508|6=1+899]
+                assert.deepStrictEqual(advances, [508, 899]);
+            });
         });
 
         describe('at wght 700, wdth 85, the all-points tuple of H is active', function() {
@@ -452,16 +436,13 @@ describe('regression: gvar private point numbers for all points in a glyph with 
                 font = loadFont(noHvarFixture, { wght: 700, wdth: 85 });
             });
 
-            itFailsUntilFixed(
-                'takes the advance width of H from the phantom points of its all-points tuple of an intermediate region',
-                `${allPointsPhantomDeltasReason}: 1331 instead of 1333`,
-                function() {
-                    const advances = shapeText(font, 'H').advances;
-                    // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=700,wdth=85 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 0048
-                    // [5=0+1333]
-                    assert.deepStrictEqual(advances, [1333]);
-                }
-            );
+            // read through the shared point numbers: 1331
+            it('takes the advance width of H from the phantom points of its all-points tuple of an intermediate region', function() {
+                const advances = shapeText(font, 'H').advances;
+                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=700,wdth=85 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 0048
+                // [5=0+1333]
+                assert.deepStrictEqual(advances, [1333]);
+            });
         });
 
         describe('at wght 900, wdth 75', function() {
@@ -478,41 +459,33 @@ describe('regression: gvar private point numbers for all points in a glyph with 
                 assert.deepStrictEqual(getLeftSideBearings(font), [117, 162, 99, 73, 121, 99]);
             });
 
-            itFailsUntilFixed(
-                'takes the advance widths of the period, the hyphen and z from the phantom points of their all-points tuple',
-                `${allPointsPhantomDeltasReason}: 655, 931, 941 instead of 620, 863, 938`,
-                function() {
-                    const advances = shapeText(font, '.-z').advances;
-                    // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900,wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 002E,002D,007A
-                    // [2=0+620|1=1+863|6=2+938]
-                    assert.deepStrictEqual(advances, [620, 863, 938]);
-                }
-            );
+            // read through the shared point numbers: 655, 931, 941
+            it('takes the advance widths of the period, the hyphen and z from the phantom points of their all-points tuple', function() {
+                const advances = shapeText(font, '.-z').advances;
+                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900,wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 002E,002D,007A
+                // [2=0+620|1=1+863|6=2+938]
+                assert.deepStrictEqual(advances, [620, 863, 938]);
+            });
 
-            itFailsUntilFixed(
-                'takes the advance width of the colon from its phantom points at the first call, before its outline is loaded',
-                'getPhantomPointDeltas (src/variationprocessor.mjs): reads glyph.isComposite before the lazy outline of the glyph is parsed, so the first call counts its points instead of its components and returns the default advance width (496)',
-                function() {
-                    const advanceWidth = font.glyphs.get(glyphIndexes.colon).getAdvanceWidth(font);
-                    // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900,wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 003A
-                    // [3=0+597]
-                    assert.strictEqual(advanceWidth, 597);
-                }
-            );
+            // with glyph.isComposite read before the lazy outline is parsed, the first call counts the
+            // points of the composite instead of its components and gives the default advance width (496)
+            it('takes the advance width of the colon from its phantom points at the first call, before its outline is loaded', function() {
+                const advanceWidth = font.glyphs.get(glyphIndexes.colon).getAdvanceWidth(font);
+                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900,wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 003A
+                // [3=0+597]
+                assert.strictEqual(advanceWidth, 597);
+            });
 
-            itFailsUntilFixed(
-                'takes the advance width of Eacute from the phantom points of its all-points wdth min tuple, once its outline is loaded',
-                `${allPointsPhantomDeltasReason}, also in a composite: 1067 instead of 1000`,
-                function() {
-                    // the outline is loaded first, so that the bug of the first call (the test above) does not hide this one
-                    getOutline(font, glyphIndexes.Eacute);
-                    const advanceWidth = font.glyphs.get(glyphIndexes.Eacute).getAdvanceWidth(font);
-                    // U+00C9 LATIN CAPITAL LETTER E WITH ACUTE
-                    // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900,wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 00C9
-                    // [11=0+1000]
-                    assert.strictEqual(advanceWidth, 1000);
-                }
-            );
+            // read through the shared point numbers: 1067
+            it('takes the advance width of Eacute from the phantom points of its all-points wdth min tuple, once its outline is loaded', function() {
+                // the outline is loaded first, apart from the first call (the test above)
+                getOutline(font, glyphIndexes.Eacute);
+                const advanceWidth = font.glyphs.get(glyphIndexes.Eacute).getAdvanceWidth(font);
+                // U+00C9 LATIN CAPITAL LETTER E WITH ACUTE
+                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900,wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 00C9
+                // [11=0+1000]
+                assert.strictEqual(advanceWidth, 1000);
+            });
         });
 
         describe('at wght 250, wdth 75, the inverse arrangement in .notdef', function() {
@@ -538,8 +511,7 @@ describe('regression: gvar private point numbers for all points in a glyph with 
             });
 
             it('takes the advance width of the colon from the right phantom point of its tuple of private points [1, 3], once its outline is loaded', function() {
-                // before its outline is loaded the advance width of a composite is the default one,
-                // see the known failure of the colon above
+                // the first call, before the outline is loaded, is the test of the colon above
                 getOutline(font, glyphIndexes.colon);
                 // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=100,wdth=75 Roboto-VF-gvar-private-points-noHVAR-subset.ttf -u 003A
                 // [3=0+355]

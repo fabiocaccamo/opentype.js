@@ -16,12 +16,14 @@ describe('tables/cvar.mjs', function() {
             assert.equal(font.tables.cvar.headers.length, 11);
             assert.equal(font.tables.cvar.headers[0].peakTuple.length, font.tables.fvar.axes.length);
             assert.deepEqual(font.variation.process.getCvarTransform(), font.tables.cvt);
-            assert.deepEqual(font.variation.process.getCvarTransform({wght: 142, wdth: 80, opsz: 36}), 
+            // fontTools: varLib.instancer.instantiateVariableFont(font, {'wght': 142, 'wdth': 80, 'opsz': 36})['cvt '],
+            // the deltas of the active tuples added up and rounded once
+            assert.deepEqual(font.variation.process.getCvarTransform({wght: 142, wdth: 80, opsz: 36}),
                 [760, 10, 714, 0, 714, 10, 536, 10, 0, 0, 0, -10, 0, -10, -250, -10]
                 .concat(Array(49).fill(0))
-                .concat([80, 129, 84])
+                .concat([80, 129, 85])
                 .concat(Array(17).fill(0))
-                .concat([38, 0, 61, 0, 0, 0, 0, 0, 33])
+                .concat([38, 0, 62, 0, 0, 0, 0, 0, 34])
                 .concat(Array(26).fill(0))
             );
         };

@@ -49,13 +49,14 @@
  *   that upstream master does not have;
  * - the advance widths without HVAR are the default ones at every location, the gvar phantom
  *   points are not read at all;
- * - of the known failures that read getTransform, uni0660 and fraction have the same wrong
- *   points as in the fork; i and uni066A are wrong in other points, and the advance widths of
+ * - of the tests that read getTransform and failed in the fork before its precision fixes,
+ *   uni0660 and fraction have the same wrong points as in the fork then; i and uni066A are
+ *   wrong in other points, and the advance widths of
  *   i.loclTRK and of the space without HVAR are the default ones, like the other advance widths.
  */
 
 import assert from 'assert';
-import { loadFont, shapeText, assertShape, getOutline, assertOutlineClose, itFailsUntilFixed } from './helpers.mjs';
+import { loadFont, shapeText, assertShape, getOutline, assertOutlineClose } from './helpers.mjs';
 
 const hvarFixture = 'ReadexPro-VF-gvar-shared-points-subset.ttf';
 const noHvarFixture = 'ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf';
@@ -220,8 +221,8 @@ describe('regression: gvar tuples with all points next to shared point numbers (
             // instancer at wght=550, HEXP=50, glyphs l and H. Active tuples of l: wght (all points),
             // HEXP and wght with HEXP (shared points). Active tuples of H: wght (shared points) and
             // HEXP (private points), both through IUP; its all points tuple is not active here, so
-            // H is a guard of the points next to it and not a test of #754. The fork is exact for
-            // these two glyphs at this location, not for U+0660 and U+066A (see their known failures).
+            // H is a guard of the points next to it and not a test of #754. U+0660 and U+066A at this
+            // location are tests of their own (exact scalars).
             const fontAtWeight550HalfExpanded = fonts['wght 550, HEXP 50'];
             assert.deepStrictEqual(getPoints(fontAtWeight550HalfExpanded, glyphIndexes.l), [[141, 0], [141, 740], [273, 740], [273, 0]]);
             assert.deepStrictEqual(getPoints(fontAtWeight550HalfExpanded, glyphIndexes.H), [
@@ -343,43 +344,37 @@ describe('regression: gvar tuples with all points next to shared point numbers (
                 'wght 550, HEXP 50'
             );
             // The transformed glyph has the HVAR advance too, also a glyph without points
-            // (see the known failure of the space without HVAR):
+            // (see the test of the space without HVAR):
             // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=700 ReadexPro-VF-gvar-shared-points-subset.ttf -u 0020
             // [12=0+319]
             assert.strictEqual(fonts['wght 700'].variation.getTransform(glyphIndexes.space).advanceWidth, 319);
         });
 
-        itFailsUntilFixed(
-            'gives the points of the static instance to i at wght 700, HEXP 100',
-            'applyTupleVariationStore (src/variationprocessor.mjs): rounds the points after every tuple instead of once: the first point of the dot is x 297 instead of 296',
-            function() {
-                const points = getPoints(fonts['wght 700, HEXP 100'], glyphIndexes.i);
-                // instancer at wght=700, HEXP=100, glyph i. Three tuples are active with scalar 1,
-                // their interpolated x deltas of point 4 are 21.62, 130 and 5.5:
-                // 139 + 157.12 = 296.12, while rounding after each one gives 161, 291, 297.
-                assert.deepStrictEqual(points, [
-                    [216, 0], [216, 531], [377, 531], [377, 0],
-                    [296, 646], [251, 646], [200, 689], [200, 729], [200, 766], [252, 812],
-                    [296, 812], [341, 812], [392, 769], [392, 729], [392, 692], [340, 646]
-                ]);
-            }
-        );
+        it('gives the points of the static instance to i at wght 700, HEXP 100', function() {
+            const points = getPoints(fonts['wght 700, HEXP 100'], glyphIndexes.i);
+            // instancer at wght=700, HEXP=100, glyph i. Three tuples are active with scalar 1,
+            // their interpolated x deltas of point 4 are 21.62, 130 and 5.5:
+            // 139 + 157.12 = 296.12, while rounding after each one gives 161, 291, 297.
+            assert.deepStrictEqual(points, [
+                [216, 0], [216, 531], [377, 531], [377, 0],
+                [296, 646], [251, 646], [200, 689], [200, 729], [200, 766], [252, 812],
+                [296, 812], [341, 812], [392, 769], [392, 729], [392, 692], [340, 646]
+            ]);
+        });
 
         // instancer at wght=550, HEXP=50, glyphs uni0660 and uni066A (ARABIC PERCENT SIGN,
         // components fraction, uni0660, uni0660). The normalized location is (0.5, 0.5): deltas
         // and component offsets fall on .5 ties, which the instancer rounds up. Active tuples
         // of uni0660: wght above 400 and HEXP; of uni066A: the same and wght above 400 with HEXP.
+        // Scalars with Number.EPSILON terms (0.5000000000000007, 0.5000000000000002, 0.25000000000000056)
+        // round the ties the other way: uni0660 1 unit off, uni066A 2 units off.
         for (const reference of [
             {
                 glyphName: 'uni0660',
-                scalars: 'the scalars 0.5000000000000007 and 0.5000000000000002 instead of 0.5 and 0.5',
-                difference: '1 unit off',
                 points: [[181, 338], [280, 238], [182, 140], [83, 238]]
             },
             {
                 glyphName: 'uni066A',
-                scalars: 'the scalars 0.5000000000000007, 0.5000000000000002 and 0.25000000000000056 instead of 0.5, 0.5 and 0.25',
-                difference: '2 units off, its component uni0660 and the offsets of its components',
                 points: [
                     [89, 0], [567, 700], [691, 700], [213, 0],
                     [572, 187], [671, 87], [573, -11], [474, 87],
@@ -387,50 +382,34 @@ describe('regression: gvar tuples with all points next to shared point numbers (
                 ]
             }
         ]) {
-            itFailsUntilFixed(
-                `gives the points of the static instance to ${reference.glyphName} at wght 550, HEXP 50`,
-                'getNormalizedCoords and getTupleScalar (src/variationprocessor.mjs): their Number.EPSILON terms give ' +
-                `${reference.scalars}, and .5 ties round the other way: ${reference.difference}`,
-                function() {
-                    const points = getPoints(fonts['wght 550, HEXP 50'], glyphIndexes[reference.glyphName]);
-                    assert.deepStrictEqual(points, reference.points);
-                }
-            );
+            it(`gives the points of the static instance to ${reference.glyphName} at wght 550, HEXP 50`, function() {
+                const points = getPoints(fonts['wght 550, HEXP 50'], glyphIndexes[reference.glyphName]);
+                assert.deepStrictEqual(points, reference.points);
+            });
         }
 
-        itFailsUntilFixed(
-            'gives the points of the static instance to the fraction slash at wght 300',
-            'getNormalizedCoords and getTupleScalar (src/variationprocessor.mjs): the normalized coordinate is not rounded to F2Dot14 before avar ' +
-            '(-0.43748 instead of -0.4375) and the scalar gets Number.EPSILON terms: x 30 instead of 31',
-            function() {
-                const points = getPoints(fonts['wght 300'], glyphIndexes.fraction);
-                // instancer at wght=300, HEXP=0, glyph fraction (one tuple active): 20 + 24 * 0.4375 = 30.5
-                assert.deepStrictEqual(points, [[31, 0], [498, 700], [573, 700], [105, 0]]);
-            }
-        );
+        // The normalized coordinate is -0.4375 through avar and F2Dot14, -0.43748 unrounded: x 30.
+        it('gives the points of the static instance to the fraction slash at wght 300', function() {
+            const points = getPoints(fonts['wght 300'], glyphIndexes.fraction);
+            // instancer at wght=300, HEXP=0, glyph fraction (one tuple active): 20 + 24 * 0.4375 = 30.5
+            assert.deepStrictEqual(points, [[31, 0], [498, 700], [573, 700], [105, 0]]);
+        });
 
-        itFailsUntilFixed(
-            'gives the HVAR advance of HarfBuzz to o at wght 418',
-            'getNormalizedCoords (src/variationprocessor.mjs): does not round the normalized coordinate to F2Dot14 (0.06 instead of 983/16384): ' +
-            '615 + 25 * 0.06 rounds to 617 instead of 616',
-            function() {
-                const advances = shapeText(fonts['wght 418'], 'o').advances;
-                // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=418 ReadexPro-VF-gvar-shared-points-subset.ttf -u 006F
-                // [8=0+616]
-                // The hmtx of the instancer at wght=418 is 616 too.
-                assert.deepStrictEqual(advances, [616]);
-            }
-        );
+        // The normalized coordinate is 983/16384 in F2Dot14, 0.06 unrounded: 615 + 25 * 0.06 rounds to 617.
+        it('gives the HVAR advance of HarfBuzz to o at wght 418', function() {
+            const advances = shapeText(fonts['wght 418'], 'o').advances;
+            // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=418 ReadexPro-VF-gvar-shared-points-subset.ttf -u 006F
+            // [8=0+616]
+            // The hmtx of the instancer at wght=418 is 616 too.
+            assert.deepStrictEqual(advances, [616]);
+        });
 
+        // HVAR has no LSB map: the left side bearings vary with the outline, not 74, 98 and 30 at every weight
         for (const reference of leftSideBearingReferences) {
-            itFailsUntilFixed(
-                `takes the left side bearing from the varied outline when HVAR has no LSB map, at ${reference.location}`,
-                'getLeftSideBearing (src/variationprocessor.mjs): returns the default left side bearing when HVAR has no LSB map: 74, 98 and 30 for l, H and lacute at every weight',
-                function() {
-                    const leftSideBearings = getLeftSideBearings(fonts[reference.location]);
-                    assert.deepStrictEqual(leftSideBearings, reference.leftSideBearings);
-                }
-            );
+            it(`takes the left side bearing from the varied outline when HVAR has no LSB map, at ${reference.location}`, function() {
+                const leftSideBearings = getLeftSideBearings(fonts[reference.location]);
+                assert.deepStrictEqual(leftSideBearings, reference.leftSideBearings);
+            });
         }
     });
 
@@ -443,8 +422,8 @@ describe('regression: gvar tuples with all points next to shared point numbers (
 
         it('varies the advances through the phantom points of simple and empty glyphs', function() {
             // No composite glyph in the text, and l only where its all points tuples are not
-            // active, see the known failures below (the all points tuple of H is not active at
-            // these locations).
+            // active, see the tests below (the all points tuple of H is not active at these
+            // locations).
             const text = 'He o i';
             const expected = { glyphs: [1, 2, 12, 8, 12, 3], clusters: [0, 1, 2, 3, 4, 5], ends: [1, 2, 3, 4, 5, 6] };
             // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=700 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 0048,0065,0020,006F,0020,0069
@@ -477,7 +456,7 @@ describe('regression: gvar tuples with all points next to shared point numbers (
         });
 
         it('varies the advances of the composites lacute and U+066A once they were transformed', function() {
-            // The guard of the known failure of the composites that were not drawn yet.
+            // The guard of the test of the composites that were not drawn yet.
             const font = fonts['wght 700'];
             font.variation.getTransform(glyphIndexes.lacute);
             font.variation.getTransform(glyphIndexes.uni066A);
@@ -510,66 +489,53 @@ describe('regression: gvar tuples with all points next to shared point numbers (
             }
         });
 
+        // An empty private point list (all points) read as the shared points [0, 5] of l takes the
+        // delta of point 1 for the right phantom point, point 5: 248 at wght 700, 265 at wght 160.
         for (const reference of [
             // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=700 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 006C
             // [6=0+304]
-            { location: 'wght 700', advance: 304, forkAdvance: 248 },
+            { location: 'wght 700', advance: 304 },
             // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=160 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 006C
             // [6=0+216]
-            { location: 'wght 160', advance: 216, forkAdvance: 265 }
+            { location: 'wght 160', advance: 216 }
         ]) {
-            itFailsUntilFixed(
-                `varies the advance of l through the phantom points of its all points tuples, at ${reference.location}`,
-                'getPhantomPointDeltas (src/variationprocessor.mjs): reads an empty private point list (all points) as the shared points [0, 5] of l, ' +
-                `and takes the delta of point 1 for the right phantom point, point 5: ${reference.forkAdvance} instead of ${reference.advance}`,
-                function() {
-                    const advances = shapeText(fonts[reference.location], 'l').advances;
-                    assert.deepStrictEqual(advances, [reference.advance]);
-                }
-            );
+            it(`varies the advance of l through the phantom points of its all points tuples, at ${reference.location}`, function() {
+                const advances = shapeText(fonts[reference.location], 'l').advances;
+                assert.deepStrictEqual(advances, [reference.advance]);
+            });
         }
 
+        // With glyph.isComposite read before the glyf data of the glyph is parsed, the first advance
+        // is the default one, 251 and 682.
         for (const reference of [
             // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=700 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 013A
             // [7=0+304]
-            { name: 'lacute', text: '\u{13A}', advance: 304, defaultAdvance: 251 },
+            { name: 'lacute', text: '\u{13A}', advance: 304 },
             // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=700 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 066A
             // [13=0+694]
-            { name: 'U+066A', text: '\u{66A}', advance: 694, defaultAdvance: 682 }
+            { name: 'U+066A', text: '\u{66A}', advance: 694 }
         ]) {
-            itFailsUntilFixed(
-                `varies the advance of the composite ${reference.name} that was not drawn yet`,
-                'getPhantomPointDeltas (src/variationprocessor.mjs): reads glyph.isComposite before the glyf data of the glyph is parsed: ' +
-                `the first advance is ${reference.defaultAdvance}, the default, instead of ${reference.advance}; the next calls are right`,
-                function() {
-                    const advances = shapeText(fonts['wght 700'], reference.text).advances;
-                    assert.deepStrictEqual(advances, [reference.advance]);
-                }
-            );
+            it(`varies the advance of the composite ${reference.name} that was not drawn yet`, function() {
+                const advances = shapeText(fonts['wght 700'], reference.text).advances;
+                assert.deepStrictEqual(advances, [reference.advance]);
+            });
         }
 
-        itFailsUntilFixed(
-            'varies the advance of the composite i.loclTRK through the phantom points of its all points tuples',
-            'getPhantomPointDeltas (src/variationprocessor.mjs): reads an empty private point list (all points) as the shared points [1, 3] of this composite ' +
-            'of two components, and takes the delta of its second component for the right phantom point, point 3: 213 instead of 181',
-            function() {
-                const advanceWidth = fonts['wght 160'].variation.getTransform(glyphIndexes['i.loclTRK']).advanceWidth;
-                // hb-shape --no-glyph-names --cluster-level=1 --language=tr --variations=wght=160 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 0069
-                // [5=0+181]
-                assert.strictEqual(advanceWidth, 181);
-            }
-        );
+        // An empty private point list read as the shared points [1, 3] of this composite of two
+        // components takes the delta of its second component for the right phantom point, point 3: 213.
+        it('varies the advance of the composite i.loclTRK through the phantom points of its all points tuples', function() {
+            const advanceWidth = fonts['wght 160'].variation.getTransform(glyphIndexes['i.loclTRK']).advanceWidth;
+            // hb-shape --no-glyph-names --cluster-level=1 --language=tr --variations=wght=160 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 0069
+            // [5=0+181]
+            assert.strictEqual(advanceWidth, 181);
+        });
 
-        itFailsUntilFixed(
-            'gives the varied advance width to the transformed space glyph',
-            'getTransform (src/variationprocessor.mjs): does not vary the advance width of a glyph without points when the font has no HVAR: ' +
-            '280 instead of 319, while getAdvanceWidth gives 319',
-            function() {
-                const advanceWidth = fonts['wght 700'].variation.getTransform(glyphIndexes.space).advanceWidth;
-                // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=700 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 0020
-                // [12=0+319]
-                assert.strictEqual(advanceWidth, 319);
-            }
-        );
+        // getTransform and getAdvanceWidth give the same advance width to a glyph without points
+        it('gives the varied advance width to the transformed space glyph', function() {
+            const advanceWidth = fonts['wght 700'].variation.getTransform(glyphIndexes.space).advanceWidth;
+            // hb-shape --no-glyph-names --cluster-level=1 --language=en --variations=wght=700 ReadexPro-VF-gvar-shared-points-noHVAR-subset.ttf -u 0020
+            // [12=0+319]
+            assert.strictEqual(advanceWidth, 319);
+        });
     });
 });

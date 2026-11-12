@@ -12,6 +12,8 @@
  * system. Characters U+00C1, U+00E4, U+00E7, U+00F6, U+0160 and the small caps of their layout
  * closure (26 glyphs), with aalt, c2sc, smcp and a class kerning between the small caps (GPOS
  * PairPos format 2 in an extension lookup, its values vary with the GDEF variation store).
+ * The left side bearing of a composite with a scaled component is asserted on Changa variable
+ * (test/fonts/Changa-VariableFont_wght.ttf), in the last describe.
  *
  * Mechanism: each glyf composite is a base (offset 0, 0, USE_MY_METRICS) and a mark. Its gvar
  * data has one "point" per component, the delta of the offset of the component, and the 4
@@ -295,9 +297,7 @@ describe('regression: gvar deltas of the component offsets of composite glyphs (
         }
 
         // wdth 400 is over the maximum of its axis (100, its default too): the references clamp it,
-        // their instance is the default one. The fork does not clamp (see the known failures of the
-        // values out of the range of an axis) and is right here only because the wdth axis has no
-        // tuple over its default.
+        // their instance is the default one (see the tests of the values out of the range of an axis).
         // fontTools.varLib.instancer at wght=400, wdth=400: the glyf table of the fixture
         // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=400,wdth=400 NotoSans-VF-composite-diacritics-subset.ttf -u 00C1,00E4,00E7,00F6,0160
         // [9=0+639|10=1+561|11=2+480|12=3+605|13=4+549]
@@ -321,36 +321,23 @@ describe('regression: gvar deltas of the component offsets of composite glyphs (
             });
 
             // The normalized wdth is -0.70001 for the references (wdth 75 is -0.66669 in F2Dot14,
-            // a value of the avar map) and -0.69999 for the fork. The deltas of the dx of the mark,
-            // -3 (wght), -2 (wdth) and -3 (corner) in the gvar tuples of the glyph, add up to
-            // -3 - 5 * 0.70001 = -6.50006 (21 - 6.50006 rounds to 14) and to -6.49996 (15).
+            // a value of the avar map), -0.69999 without the F2Dot14 rounding. The deltas of the dx
+            // of the mark, -3 (wght), -2 (wdth) and -3 (corner) in the gvar tuples of the glyph, add
+            // up to -3 - 5 * 0.70001 = -6.50006 (21 - 6.50006 rounds to 14) and to -6.49996 (15).
             // fontTools.varLib.instancer at wght=100, wdth=75, x and y of glyf['odieresis.sc'].components
-            itFailsUntilFixed(
-                'moves the mark of odieresis.sc at wght 100, wdth 75',
-                'getNormalizedCoords (src/variationprocessor.mjs): does not round the normalized coordinates to ' +
-                'F2Dot14 before the avar map, dx 15 instead of 14',
-                function() {
-                    assert.deepStrictEqual(odieresisSmallCapOffsets, [[0, 0], [14, 0]]);
-                }
-            );
+            it('moves the mark of odieresis.sc at wght 100, wdth 75', function() {
+                assert.deepStrictEqual(odieresisSmallCapOffsets, [[0, 0], [14, 0]]);
+            });
 
             // The normalized wght is -0.5 for the references (wght 300 is -0.33331 in F2Dot14, a
-            // value of the avar map) and -0.500018 for the fork: the delta of the mark in the wght
-            // tuple, (29, -5), gives (14.5, -2.5) and the offset (44.5, 33.5), rounded to (45, 34).
-            // With the normalized coordinates rounded to F2Dot14 and nothing else the fork gives
-            // (44, 34): rounded before the avar map only, the Number.EPSILON terms of the avar
-            // interpolation give -0.49999999999999933; rounded after it too, the ones of the scalar
-            // of the tuple give 0.49999999999999989 at -0.5.
+            // value of the avar map), -0.500018 without the F2Dot14 rounding: the delta of the mark
+            // in the wght tuple, (29, -5), gives (14.5, -2.5) and the offset (44.5, 33.5), rounded
+            // to (45, 34). A scalar of 0.49999999999999989 instead of 0.5 (Number.EPSILON terms)
+            // gives (44, 34).
             // fontTools.varLib.instancer at wght=300, wdth=100, x and y of glyf['scaron.sc'].components
-            itFailsUntilFixed(
-                'moves the mark of scaron.sc at wght 300, wdth 100, the Light instance',
-                'getNormalizedCoords and getTupleScalar (src/variationprocessor.mjs): the normalized coordinates ' +
-                'are not rounded to F2Dot14 before and after the avar map, and Number.EPSILON is added to the ' +
-                'terms of the scalar of a tuple, dy 33 instead of 34',
-                function() {
-                    assert.deepStrictEqual(scaronSmallCapOffsets, [[0, 0], [45, 34]]);
-                }
-            );
+            it('moves the mark of scaron.sc at wght 300, wdth 100, the Light instance', function() {
+                assert.deepStrictEqual(scaronSmallCapOffsets, [[0, 0], [45, 34]]);
+            });
         });
     });
 
@@ -458,9 +445,6 @@ describe('regression: gvar deltas of the component offsets of composite glyphs (
             ]
         };
 
-        const roundingPerTupleReason = 'applyTupleVariationStore (src/variationprocessor.mjs): rounds the points of a ' +
-            'simple glyph after each active tuple instead of once after all of them';
-
         let cornerFont;
         let issueLocationFont;
         let intermediateFont;
@@ -488,36 +472,27 @@ describe('regression: gvar deltas of the component offsets of composite glyphs (
             assertOutlineClose(getPathOutline(path), expectedOutline, 0, 'line');
         });
 
-        // The tolerance of 1 unit is for the points of the simple glyphs: rounded once per active
-        // tuple and, at this location, moved by normalized coordinates not rounded to F2Dot14 (see
-        // the known failures below). The offsets of the components are exact. The outlines of
-        // upstream master are 85 and 52 units away.
-        it('draws Aacute and adieresis within 1 unit of the instance at wght 200, wdth 75', function() {
-            assertOutlinesOfComposites(issueLocationFont, expectedIssueLocationOutlines, 1);
+        // The points of the simple glyphs need their deltas rounded once after all the active
+        // tuples and, at this location, the normalized coordinates rounded to F2Dot14: with either
+        // one missing, values are 1 unit away. The outlines of upstream master are 85 and 52 units away.
+        it('draws Aacute and adieresis like the instance at wght 200, wdth 75, with the helper of the composites', function() {
+            assertOutlinesOfComposites(issueLocationFont, expectedIssueLocationOutlines, 0);
         });
 
-        // Same tolerance, for the rounding per tuple alone (see the known failure below). The
-        // outline of upstream master is 49 units away.
-        it('draws Scaron within 1 unit of the instance at wght 650, wdth 80', function() {
-            assertOutlinesOfComposites(intermediateFont, expectedIntermediateOutlines, 1);
+        // The deltas rounded after each tuple give values 1 unit away. The outline of upstream
+        // master is 49 units away.
+        it('draws Scaron like the instance at wght 650, wdth 80, with the helper of the composites', function() {
+            assertOutlinesOfComposites(intermediateFont, expectedIntermediateOutlines, 0);
         });
 
-        // Two causes at this location: with the points rounded once and nothing else, 2 values
-        // of each outline are still 1 unit away.
         for (const glyphName of Object.keys(expectedIssueLocationOutlines)) {
-            itFailsUntilFixed(
-                `draws ${glyphName} like the instance at wght 200, wdth 75`,
-                `${roundingPerTupleReason}; getNormalizedCoords (src/variationprocessor.mjs): does not round ` +
-                'the normalized coordinates to F2Dot14 before the avar map',
-                function() {
-                    const outline = getOutline(issueLocationFont, composites[glyphName].index);
-                    assertOutlineClose(outline, expectedIssueLocationOutlines[glyphName], 0, glyphName);
-                }
-            );
+            it(`draws ${glyphName} like the instance at wght 200, wdth 75`, function() {
+                const outline = getOutline(issueLocationFont, composites[glyphName].index);
+                assertOutlineClose(outline, expectedIssueLocationOutlines[glyphName], 0, glyphName);
+            });
         }
 
-        // When this one passes, the tolerance of the test of Scaron above goes to 0.
-        itFailsUntilFixed('draws Scaron like the instance at wght 650, wdth 80', roundingPerTupleReason, function() {
+        it('draws Scaron like the instance at wght 650, wdth 80', function() {
             const outline = getOutline(intermediateFont, composites.Scaron.index);
             assertOutlineClose(outline, expectedIntermediateOutlines.Scaron, 0, 'Scaron');
         });
@@ -564,17 +539,12 @@ describe('regression: gvar deltas of the component offsets of composite glyphs (
 
             // The HVAR delta of adieresis in the wdth region is -145: -101.502 at the normalized
             // wdth of the reference, -0.70001 (561 - 101.502 rounds to 459), and -101.499 at
-            // -0.69999, the coordinate of the fork (460).
-            itFailsUntilFixed(
-                'gives the advance of adieresis at wght 400, wdth 75',
-                'getNormalizedCoords (src/variationprocessor.mjs): does not round the normalized coordinates to ' +
-                'F2Dot14 before the avar map, 460 instead of 459',
-                function() {
-                    // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=400,wdth=75 NotoSans-VF-composite-diacritics-subset.ttf -u 00C1,00E4,00E7,00F6,0160
-                    // [9=0+507|10=1+459|11=2+387|12=3+493|13=4+454]
-                    assert.deepStrictEqual(shaped.advances, [507, 459, 387, 493, 454]);
-                }
-            );
+            // -0.69999, the coordinate without the F2Dot14 rounding (460).
+            it('gives the advance of adieresis at wght 400, wdth 75', function() {
+                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=400,wdth=75 NotoSans-VF-composite-diacritics-subset.ttf -u 00C1,00E4,00E7,00F6,0160
+                // [9=0+507|10=1+459|11=2+387|12=3+493|13=4+454]
+                assert.deepStrictEqual(shaped.advances, [507, 459, 387, 493, 454]);
+            });
         });
     });
 
@@ -582,9 +552,6 @@ describe('regression: gvar deltas of the component offsets of composite glyphs (
     // range of Open Sans (300 to 800), one of the fonts of the report. HarfBuzz, fontTools and
     // the browsers clamp a value to the range of its axis.
     describe('values out of the range of an axis', function() {
-        const clampingReason = 'getNormalizedCoords (src/variationprocessor.mjs): does not clamp a value to the ' +
-            'range of its axis, so that the tuples and the regions of that axis are skipped, like at its default';
-
         // fontTools.varLib.instancer at wght=50, wdth=80 (the same instance as at wght=100, wdth=80),
         // x and y of glyf[glyphName].components
         const expectedOffsetsBelowWeightRange = {
@@ -605,17 +572,18 @@ describe('regression: gvar deltas of the component offsets of composite glyphs (
             offsetsBelowWeightRange = getOffsetsOfComposites(fontBelowWeightRange, Object.keys(expectedOffsetsBelowWeightRange));
         });
 
-        // The line of the corner wght 900, wdth 62.5. The fork gives the advances of the default
-        // location, 639, 561, 480, 605 and 549.
-        itFailsUntilFixed('gives wght 1000, wdth 50 the advances of the corner wght 900, wdth 62.5', clampingReason, function() {
+        // The line of the corner wght 900, wdth 62.5. Without the clamping the tuples and the
+        // regions of an axis out of its range are skipped, like at its default: the advances of
+        // the default location, 639, 561, 480, 605 and 549.
+        it('gives wght 1000, wdth 50 the advances of the corner wght 900, wdth 62.5', function() {
             // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=1000,wdth=50 NotoSans-VF-composite-diacritics-subset.ttf -u 00C1,00E4,00E7,00F6,0160
             // [9=0+574|10=1+494|11=2+433|12=3+516|13=4+454]
             assert.deepStrictEqual(advancesBeyondBothRanges, [574, 494, 433, 516, 454]);
         });
 
-        // Only the axis out of its range falls back: the fork gives the advances of wght 400,
+        // Without the clamping only the axis out of its range falls back: the advances of wght 400,
         // wdth 80, 532, 479, 405, 514 and 472.
-        itFailsUntilFixed('gives wght 50, wdth 80 the advances of wght 100, wdth 80', clampingReason, function() {
+        it('gives wght 50, wdth 80 the advances of wght 100, wdth 80', function() {
             // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=50,wdth=80 NotoSans-VF-composite-diacritics-subset.ttf -u 00C1,00E4,00E7,00F6,0160
             // [9=0+464|10=1+429|11=2+382|12=3+478|13=4+456]
             // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=100,wdth=80 NotoSans-VF-composite-diacritics-subset.ttf -u 00C1,00E4,00E7,00F6,0160
@@ -623,8 +591,34 @@ describe('regression: gvar deltas of the component offsets of composite glyphs (
             assert.deepStrictEqual(advancesBelowWeightRange, [464, 429, 382, 478, 456]);
         });
 
-        itFailsUntilFixed('moves the marks at wght 50, wdth 80 like at wght 100, wdth 80', clampingReason, function() {
+        it('moves the marks at wght 50, wdth 80 like at wght 100, wdth 80', function() {
             assert.deepStrictEqual(offsetsBelowWeightRange, expectedOffsetsBelowWeightRange);
         });
+    });
+
+    // Changa-VariableFont_wght.ttf (test/fonts/), hbar (glyph 170): a composite of h and of uni0335
+    // scaled by 0.9 x 0.55, HVAR without LSB map, so the left side bearing comes from the varied outline.
+    // The unrounded xMin at wght 600 is 8.97 (the x 22.556 of uni0335, scaled, plus the offset -11.333),
+    // the fork has 9.70 (the rounded x 23 of uni0335, scaled, plus the rounded offset -11).
+    describe('left side bearing of a composite with a scaled component (Changa)', function() {
+        let changaFont;
+
+        before(function() {
+            changaFont = loadFont('../Changa-VariableFont_wght.ttf');
+        });
+
+        itFailsUntilFixed(
+            'has the left side bearing 9 of hbar at wght 600, like HarfBuzz and fontTools',
+            'VariationProcessor.getLeftSideBearingFromPoints (src/variationprocessor.mjs): takes the xMin of a ' +
+            'composite from the points of its components already rounded and offset by rounded deltas, 9.70 ' +
+            'instead of 8.97, which rounds to 10',
+            function() {
+                // hb-shape --no-glyph-names --show-extents --variations=wght=600 ../Changa-VariableFont_wght.ttf -u 0127
+                // [170=0+585<9,665,511,-665>]
+                // fontTools: instantiateVariableFont(TTFont('../Changa-VariableFont_wght.ttf'), {'wght': 600})['hmtx']['hbar']
+                // (585, 9)
+                assert.strictEqual(changaFont.variation.getLeftSideBearing(170, { wght: 600 }), 9);
+            }
+        );
     });
 });

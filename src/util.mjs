@@ -126,4 +126,31 @@ function copyComponent(c) {
     };
 }
 
-export { arraysEqual, binarySearch, binarySearchIndex, binarySearchInsert, isGzip, unGzip, copyPoint, copyComponent };
+/**
+ * Number of the points of a glyph in its gvar data, phantom points excluded: one per
+ * component (its offset) for a composite glyph, its outline points otherwise.
+ * @param {Glyph} glyph
+ * @returns {number}
+ */
+function getGlyphVariationPointCount(glyph) {
+    // the points first: reading them parses a lazy glyph, which sets isComposite
+    const points = glyph.points;
+    if (glyph.isComposite) {
+        return glyph.components.length;
+    }
+    return points ? points.length : 0;
+}
+
+/**
+ * Point numbers of a tuple of a tuple variation store (gvar, cvar): its private ones when
+ * it has the flag (an empty list means all the points, phantom points included), otherwise
+ * the shared ones.
+ * @param {Object} header - Tuple variation header.
+ * @param {Array<number>} sharedPoints
+ * @returns {Array<number>}
+ */
+function getTuplePointNumbers(header, sharedPoints) {
+    return header.privatePoints ? header.privatePoints : sharedPoints;
+}
+
+export { arraysEqual, binarySearch, binarySearchIndex, binarySearchInsert, isGzip, unGzip, copyPoint, copyComponent, getGlyphVariationPointCount, getTuplePointNumbers };
