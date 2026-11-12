@@ -460,18 +460,13 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
         });
 
         // the pair P.dec h.lop.ini of Phone is in lookup 2, a kern lookup of latn and not of DFLT. HarfBuzz
-        // takes the script of the text, the fork takes DFLT in two places, each one on its own: the text
+        // takes the script of the text, the fork takes latn in two places, each one on its own: the text
         // layout (forEachGlyph, behind getPath, draw and getAdvanceWidth) and Font.getKerningValue
         for (const weight of [400, 100]) {
-            itFailsUntilFixed(
-                `applies a pair of the kern lookup that only latn has to a text laid out without options.script, wght ${weight}`,
-                'forEachGlyph (src/font.mjs): without options.script takes the kern lookups of getDefaultScriptName (src/layout.mjs), ' +
-                'DFLT when the font has it, not the ones of the script of the text',
-                function() {
-                    const letters = layOutLetters(fonts[weight], phoneShape.text);
-                    assert.deepStrictEqual(letters, getLetterOrigins(phoneShapesByWeight[weight]));
-                }
-            );
+            it(`applies a pair of the kern lookup that only latn has to a text laid out without options.script, wght ${weight}`, function() {
+                const letters = layOutLetters(fonts[weight], phoneShape.text);
+                assert.deepStrictEqual(letters, getLetterOrigins(phoneShapesByWeight[weight]));
+            });
         }
 
         itFailsUntilFixed(
@@ -500,35 +495,24 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             }
         );
 
-        itFailsUntilFixed(
-            'gives Font.getKerningValue a pair of the kern lookup that only latn has',
-            'Position.init (src/position.mjs): defaultKerningTables, the lookups of Font.getKerningValue, are the kern lookups of ' +
-            'getDefaultScriptName (src/layout.mjs), DFLT when the font has it: the pairs that only latn has are never found',
-            function() {
-                // P.dec (45) and h.lop.ini (29): 845 - 855, the two outputs quoted above phoneShape
-                const kerning = fonts[400].getKerningValue(45, 29);
-                assert.strictEqual(kerning, -10);
-            }
-        );
+        it('gives Font.getKerningValue a pair of the kern lookup that only latn has', function() {
+            // P.dec (45) and h.lop.ini (29): 845 - 855, the two outputs quoted above phoneShape
+            const kerning = fonts[400].getKerningValue(45, 29);
+            assert.strictEqual(kerning, -10);
+        });
 
-        itFailsUntilFixed(
-            'applies the kern lookups of latn in the order of the LookupList, 2 then 3',
-            'getKerningTables (src/position.mjs): keeps the lookups in the order of the feature (3, 2) and not of the LookupList (2, 3), ' +
-            'and getKerningValue returns at the first class subtable that covers the left glyph (lookup 3, period, value 0) ' +
-            'without reading the pair of lookup 2',
-            function() {
-                // period P.dec, kerning -60: a class pair of lookup 2. Lookup 3, listed first in the feature, has a class
-                // subtable that covers period, with no value for this pair. options.script selects the kern lookups of latn,
-                // so that the DFLT known failures above are not involved. This fixture cannot tell a sum of the two lookups
-                // from a return at the first match in the right order: no pair has a value in lookup 3 with its left glyph
-                // covered by lookup 2
-                // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 002E,0050
-                // [6=0+253|45=1+855]
-                // hb-shape --no-glyph-names --cluster-level=1 --features=-kern PlaywriteUSTrad-VF-calt-subset.ttf -u 002E,0050
-                // [6=0+313|45=1+855]
-                const shape = shapeText(fonts[400], '.P', { script: 'latn' });
-                assertShape(shape, { glyphs: [6, 45], clusters: [0, 1], advances: [253, 855] }, 'period, P');
-            }
-        );
+        it('applies the -60 of lookup 2 to period P although lookup 3, listed first in the feature, covers period with no value', function() {
+            // period P.dec, kerning -60: a class pair of lookup 2. Lookup 3, listed first in the feature, has a class
+            // subtable that covers period, with no value for this pair: a guard of the old stop at the first lookup that
+            // covers the pair, in the order of the feature. options.script selects the kern lookups of latn, so that the
+            // script chosen without the option is not involved. The values of the lookups add up, so this pair cannot
+            // tell the order of the lookups: position.spec.mjs tests it ('lists the lookups in LookupList order...')
+            // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 002E,0050
+            // [6=0+253|45=1+855]
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern PlaywriteUSTrad-VF-calt-subset.ttf -u 002E,0050
+            // [6=0+313|45=1+855]
+            const shape = shapeText(fonts[400], '.P', { script: 'latn' });
+            assertShape(shape, { glyphs: [6, 45], clusters: [0, 1], advances: [253, 855] }, 'period, P');
+        });
     });
 });

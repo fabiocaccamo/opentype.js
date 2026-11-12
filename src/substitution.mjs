@@ -56,6 +56,7 @@ Substitution.prototype.createDefaultTable = function() {
 
 /**
  * List all single substitutions (lookup type 1) for a given script, language, and feature.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * @param {string} [script='DFLT']
  * @param {string} [language='dflt']
  * @param {string} feature - 4-character feature name ('aalt', 'salt', 'ss01'...)
@@ -89,6 +90,7 @@ Substitution.prototype.getSingle = function(feature, script, language) {
 
 /**
  * List all multiple substitutions (lookup type 2) for a given script, language, and feature.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * @param {string} [script='DFLT']
  * @param {string} [language='dflt']
  * @param {string} feature - 4-character feature name ('ccmp', 'stch')
@@ -116,6 +118,7 @@ Substitution.prototype.getMultiple = function(feature, script, language) {
 
 /**
  * List all alternates (lookup type 3) for a given script, language, and feature.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * @param {string} [script='DFLT']
  * @param {string} [language='dflt']
  * @param {string} feature - 4-character feature name ('aalt', 'salt'...)
@@ -140,6 +143,7 @@ Substitution.prototype.getAlternates = function(feature, script, language) {
 
 /**
  * List all ligatures (lookup type 4) for a given script, language, and feature.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * The result is an array of ligature objects like { sub: [ids], by: id }
  * @param {string} feature - 4-letter feature name ('liga', 'rlig', 'dlig'...)
  * @param {string} [script='DFLT']
@@ -296,6 +300,7 @@ Substitution.prototype.addLigature = function(feature, ligature, script, languag
 
 /**
  * List all feature data for a given script and language.
+ * A script or a language the table has not falls back like in getScriptTable and getLangSysTable.
  * @param {string} feature - 4-letter feature name
  * @param {string} [script='DFLT']
  * @param {string} [language='dflt']

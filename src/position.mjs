@@ -20,8 +20,7 @@ Position.prototype = Layout.prototype;
  * Init some data for faster and easier access later.
  */
 Position.prototype.init = function() {
-    const script = this.getDefaultScriptName();
-    this.defaultKerningTables = this.getKerningTables(script);
+    this.defaultKerningTables = this.getKerningTables();
 };
 
 /**
@@ -50,86 +49,117 @@ Position.prototype.getValueRecordXAdvance = function(valueRecord, variation) {
 };
 
 /**
- * Find a glyph pair in a list of lookup tables of type 2 and retrieve the xAdvance kerning value.
+ * Find the adjustment of a glyph pair in a pair adjustment subtable, if the subtable applies to the
+ * pair: format 1 applies to the pairs it lists, format 2 to any right glyph once it covers the left
+ * glyph (a class record of class 0 included), unless a class is out of the class counts (HarfBuzz).
  *
+ * @param {opentype.Layout} layout - the GPOS layout, for its coverage and class definition lookups
+ * @param {object} subtable - a pair adjustment subtable
+ * @param {integer} leftIndex - left glyph index
+ * @param {integer} rightIndex - right glyph index
+ * @returns {{value1: object, value2: object}|undefined} the record with the value records of the two
+ * glyphs (each one undefined when its value format is 0), undefined when the subtable does not apply
+ */
+function findPairAdjustment(layout, subtable, leftIndex, rightIndex) {
+    const coverageIndex = layout.getCoverageIndex(subtable.coverage, leftIndex);
+    if (coverageIndex < 0) {
+        return;
+    }
+    switch (subtable.posFormat) {
+        case 1:
+            return subtable.pairSets[coverageIndex].find(pairValueRecord => pairValueRecord.secondGlyph === rightIndex);
+        case 2: {
+            const class1Record = subtable.classRecords[layout.getGlyphClass(subtable.classDef1, leftIndex)];
+            return class1Record && class1Record[layout.getGlyphClass(subtable.classDef2, rightIndex)];
+        }
+    }
+}
+
+/**
+ * Get the xAdvance kerning value of a glyph pair in a list of lookup tables of type 2, like HarfBuzz:
+ * in each lookup the first subtable that applies to the pair gives the value of the lookup, and the
+ * values of the lookups add up.
+ *
+ * Without lookup tables (undefined, as getKerningTables gives it when the GPOS table has no kern feature
+ * for the script), the value is the one of the kern table.
+ *
+ * @param {object[]|undefined} kerningLookups - lookup tables of type 2, in the order they apply, or undefined
+ * for the kern table (see getKerningTables)
  * @param {integer} leftIndex - left glyph index
  * @param {integer} rightIndex - right glyph index
  * @param {object} [variation] - variation coordinates, the current font variation if omitted
  * @returns {integer}
  */
 Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIndex, variation) {
-    for (let i = 0; i < kerningLookups.length; i++) {
-        const subtables = kerningLookups[i].subtables;
-        for (let j = 0; j < subtables.length; j++) {
-            const subtable = subtables[j];
-            const covIndex = this.getCoverageIndex(subtable.coverage, leftIndex);
-            if (covIndex < 0) continue;
-            switch (subtable.posFormat) {
-                case 1: {
-                    // Search Pair Adjustment Positioning Format 1
-                    let pairSet = subtable.pairSets[covIndex];
-                    for (let k = 0; k < pairSet.length; k++) {
-                        let pair = pairSet[k];
-                        if (pair.secondGlyph === rightIndex) {
-                            return this.getValueRecordXAdvance(pair.value1, variation);
-                        }
-                    }
-                    break;      // left glyph found, not right glyph - try next subtable
-                }
-                case 2: {
-                    // Search Pair Adjustment Positioning Format 2
-                    const class1 = this.getGlyphClass(subtable.classDef1, leftIndex);
-                    const class2 = this.getGlyphClass(subtable.classDef2, rightIndex);
-                    const pair = subtable.classRecords[class1][class2];
-                    return this.getValueRecordXAdvance(pair.value1, variation);
-                }
+    if (!kerningLookups) {
+        return this.font.kerningPairs[leftIndex + ',' + rightIndex] || 0;
+    }
+    let kerningValue = 0;
+    for (const lookupTable of kerningLookups) {
+        for (const subtable of lookupTable.subtables) {
+            const pairAdjustment = findPairAdjustment(this, subtable, leftIndex, rightIndex);
+            if (pairAdjustment) {
+                kerningValue += this.getValueRecordXAdvance(pairAdjustment.value1, variation);
+                break;
             }
         }
     }
-    return 0;
+    return kerningValue;
 };
 
 /**
- * List all kerning lookup tables, including the pair adjustment subtables wrapped in extension lookups.
+ * List the kerning lookup tables of a script and language in LookupList order, the order they
+ * apply in, including the pair adjustment subtables wrapped in extension lookups.
+ * A script the font has not falls back to DFLT, dflt, then latn, and a language the script has
+ * not to the default language system of the script (see Layout.getScriptTable and getLangSysTable),
+ * except hebr: like the Hebrew shaper of HarfBuzz (its gpos_tag), a GPOS table without the hebr
+ * script does not apply to it.
  *
- * @param {string} [script='DFLT'] - use font.position.getDefaultScriptName() for a better default value
+ * @param {string} [script='latn']
  * @param {string} [language='dflt']
- * @return {object[]} The list of kerning lookup tables (may be empty), or undefined if there is no GPOS table (and we should use the kern table)
+ * @return {object[]|undefined} The list of kerning lookup tables (may be empty), or undefined if the GPOS
+ * table has no kern feature for the script and language, or if there is no GPOS table: the kern table
+ * applies then, like in HarfBuzz (see getKerningValue)
  */
 Position.prototype.getKerningTables = function(script, language) {
-    if (this.font.tables.gpos) {
-        const kerningTables = [];
-        const featureTable = this.getFeatureTable(script, language, 'kern');
-        if (featureTable) {
-            const allLookups = this.font.tables.gpos.lookups;
-            for (let i = 0; i < featureTable.lookupListIndexes.length; i++) {
-                const lookupTable = allLookups[featureTable.lookupListIndexes[i]];
-                if (!lookupTable) continue;
-                if (lookupTable.lookupType === 2) {
-                    kerningTables.push(lookupTable);
-                } else if (lookupTable.lookupType === 9) {
-                    // Extension Positioning lookup (used by fonts whose kerning data exceeds the 16-bit offsets):
-                    // expose its wrapped pair adjustment subtables as a lookup of type 2, keeping the lookup order.
-                    const subtables = [];
-                    for (let j = 0; j < lookupTable.subtables.length; j++) {
-                        const subtable = lookupTable.subtables[j];
-                        if (subtable.lookupType === 2) {
-                            subtables.push(subtable.extension);
-                        }
-                    }
-                    if (subtables.length) {
-                        kerningTables.push({
-                            lookupType: 2,
-                            lookupFlag: lookupTable.lookupFlag,
-                            subtables: subtables,
-                            markFilteringSet: lookupTable.markFilteringSet
-                        });
-                    }
+    script = script || 'latn';
+    if (script === 'hebr' && !this.getScriptNames().includes(script)) {
+        return;
+    }
+    const featureTable = this.getFeatureTable(script, language, 'kern');
+    if (!featureTable) {
+        return;
+    }
+    const allLookups = this.font.tables.gpos.lookups;
+    const lookupListIndexes = Array.from(new Set(featureTable.lookupListIndexes)).sort((indexA, indexB) => indexA - indexB);
+    const kerningTables = [];
+    for (const lookupListIndex of lookupListIndexes) {
+        const lookupTable = allLookups[lookupListIndex];
+        if (!lookupTable) {
+            continue;
+        }
+        if (lookupTable.lookupType === 2) {
+            kerningTables.push(lookupTable);
+        } else if (lookupTable.lookupType === 9) {
+            // Extension Positioning lookup (used by fonts whose kerning data exceeds the 16-bit offsets):
+            // expose its wrapped pair adjustment subtables as a lookup of type 2, keeping the lookup order.
+            const subtables = [];
+            for (const subtable of lookupTable.subtables) {
+                if (subtable.lookupType === 2) {
+                    subtables.push(subtable.extension);
                 }
             }
+            if (subtables.length) {
+                kerningTables.push({
+                    lookupType: 2,
+                    lookupFlag: lookupTable.lookupFlag,
+                    subtables: subtables,
+                    markFilteringSet: lookupTable.markFilteringSet
+                });
+            }
         }
-        return kerningTables;
     }
+    return kerningTables;
 };
 
 export default Position;

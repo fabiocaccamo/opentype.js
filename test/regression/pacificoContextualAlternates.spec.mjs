@@ -24,8 +24,8 @@
  * (ignoreMarks): lookup 0 has one subtable of format 2 covering comma and parenleft, lookup 1
  * has subtables of format 1, 2, 2, 2, 2. The scripts of GPOS (DFLT, latn) have only the default
  * language system. The forEachGlyph of upstream master kerns these pairs too (the H of "Hello"
- * is 1003 wide there): the kerning tests are guards and known failures, not regression tests
- * of a fix.
+ * is 1003 wide there): the kerning tests are guards and known failures, except the regression
+ * tests of the fork's fixes, the sum of the two kern lookups and the kerning with the language TRK.
  *
  * Glyph ids: 1 space, 2 H, 3 P, 4 H.ss01, 6 a, 8 c, 9 e, 10 f, 11 i, 13 i.loclTRK, 14 l, 15 n,
  * 16 o, 17 s, 18 a.fina, 19 b.fina, 21 e.fina, 22 i.fina, 23 dotlessi.fina, 26 n.fina,
@@ -333,9 +333,6 @@ describe('regression: calt final forms and GPOS class kerning of Pacifico (#372,
             // parenleft + H: lookup 0 subtable 0 (class 1, class 0) = 0, lookup 1 subtable 3 = +50.
             // comma + parenright: lookup 0 subtable 0 (class 0, class 1) = +50, lookup 1 subtable 3 = 0.
             // HarfBuzz applies each lookup of the feature and adds the values.
-            const twoLookupsReason = 'getKerningValue (src/position.mjs): returns the value of the first kern lookup ' +
-                'that covers the left glyph, 0 here, the values of the next lookups are not added';
-
             it('gives "a,b" and "(H" the glyphs and the advances without kerning', function() {
                 // Lookup 10 gives the a its final form before the comma (not a letter) and the b at the end.
                 // hb-shape --no-glyph-names --cluster-level=1 --language=en --features=-kern Pacifico-Regular-calt-kern-subset.ttf -u 0061,002C,0062
@@ -383,7 +380,7 @@ describe('regression: calt final forms and GPOS class kerning of Pacifico (#372,
                 // [41=0+663|2=1+873]
                 { name: 'the parenthesis and the H of "(H" with the second lookup (+50)', text: '(H', advances: [663, 873] }
             ]) {
-                itFailsUntilFixed(`kerns ${reference.name}`, twoLookupsReason, function() {
+                it(`kerns ${reference.name}`, function() {
                     const shaped = shapeText(font, reference.text);
                     assert.deepStrictEqual(shaped.advances, reference.advances);
                 });
@@ -469,16 +466,11 @@ describe('regression: calt final forms and GPOS class kerning of Pacifico (#372,
             );
         }
 
-        itFailsUntilFixed(
-            'keeps the kerning of "Hello" with the language TRK, which GPOS does not have',
-            'getLangSysTable (src/layout.mjs): returns no table for a language system the script does not have, ' +
-            'instead of its default language system, so getKerningTables (src/position.mjs) finds no kern lookup',
-            function() {
-                const shaped = shapeText(font, 'Hello', turkishOptions);
-                // hb-shape --no-glyph-names --cluster-level=1 --language=tr Pacifico-Regular-calt-kern-subset.ttf -u 0048,0065,006C,006C,006F
-                // [2=0+1003|9=1+393|14=2+326|14=3+326|27=4+453]
-                assert.deepStrictEqual(shaped.advances, [1003, 393, 326, 326, 453]);
-            }
-        );
+        it('keeps the kerning of "Hello" with the language TRK, which GPOS does not have', function() {
+            const shaped = shapeText(font, 'Hello', turkishOptions);
+            // hb-shape --no-glyph-names --cluster-level=1 --language=tr Pacifico-Regular-calt-kern-subset.ttf -u 0048,0065,006C,006C,006F
+            // [2=0+1003|9=1+393|14=2+326|14=3+326|27=4+453]
+            assert.deepStrictEqual(shaped.advances, [1003, 393, 326, 326, 453]);
+        });
     });
 });

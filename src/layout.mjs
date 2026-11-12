@@ -37,6 +37,35 @@ function binSearch(arr, value) {
     return -imin - 1;
 }
 
+// the scripts tried, in this order, for a script the table has not (hb_ot_layout_table_select_script of HarfBuzz):
+// DFLT, then dflt (a tag that fonts use by mistake), then latn (where old fonts put features for other scripts)
+const FALLBACK_SCRIPT_TAGS = ['DFLT', 'dflt', 'latn'];
+
+/**
+ * The script table of the first fallback script that a sorted list of script records has.
+ * @param {Array<{tag: string, script: Object}>} scripts
+ * @return {Object|undefined}
+ */
+function getFallbackScriptTable(scripts) {
+    for (const tag of FALLBACK_SCRIPT_TAGS) {
+        const index = searchTag(scripts, tag);
+        if (index >= 0) {
+            return scripts[index].script;
+        }
+    }
+}
+
+/**
+ * The default language system of a script table, like hb_ot_layout_script_select_language of HarfBuzz:
+ * the LangSysRecord tagged dflt (where some fonts put it by mistake), otherwise the DefaultLangSys.
+ * @param {{defaultLangSys: Object, langSysRecords: Array<{tag: string, langSys: Object}>}} scriptTable
+ * @return {Object|undefined}
+ */
+function getDefaultLangSysTable(scriptTable) {
+    const index = searchTag(scriptTable.langSysRecords, 'dflt');
+    return index >= 0 ? scriptTable.langSysRecords[index].langSys : scriptTable.defaultLangSys;
+}
+
 // binary search in a list of ranges (coverage, class definition)
 function searchRange(ranges, value) {
     // jshint bitwise: false
@@ -139,6 +168,8 @@ Layout.prototype = {
 
     /**
      * Returns all LangSysRecords in the given script.
+     * A script the table has not falls back, like HarfBuzz, to the first of DFLT, dflt and latn that
+     * the table has, unless the script table is created.
      * @instance
      * @param {string} [script='DFLT']
      * @param {boolean} create - forces the creation of this script table if it doesn't exist.
@@ -163,11 +194,16 @@ Layout.prototype = {
                 scripts.splice(-1 - pos, 0, scr);
                 return scr.script;
             }
+            return getFallbackScriptTable(scripts);
         }
     },
 
     /**
-     * Returns a language system table
+     * Returns a language system table.
+     * A language the script has not falls back to the default language system of the script
+     * (see getScriptTable for a script the table has not), unless the language system is created.
+     * Like HarfBuzz, the default language system is the LangSysRecord tagged dflt if the script has one,
+     * otherwise the DefaultLangSys, also with create (the writers add to the language system the readers use).
      * @instance
      * @param {string} [script='DFLT']
      * @param {string} [language='dlft']
@@ -178,7 +214,7 @@ Layout.prototype = {
         const scriptTable = this.getScriptTable(script, create);
         if (scriptTable) {
             if (!language || language === 'dflt' || language === 'DFLT') {
-                return scriptTable.defaultLangSys;
+                return getDefaultLangSysTable(scriptTable);
             }
             const pos = searchTag(scriptTable.langSysRecords, language);
             if (pos >= 0) {
@@ -191,11 +227,14 @@ Layout.prototype = {
                 scriptTable.langSysRecords.splice(-1 - pos, 0, langSysRecord);
                 return langSysRecord.langSys;
             }
+            return getDefaultLangSysTable(scriptTable);
         }
     },
 
     /**
      * Get a specific feature table.
+     * A script or a language the table has not falls back like in getScriptTable and getLangSysTable,
+     * unless the feature table is created.
      * @instance
      * @param {string} [script='DFLT']
      * @param {string} [language='dlft']
@@ -234,6 +273,8 @@ Layout.prototype = {
 
     /**
      * Get the lookup tables of a given type for a script/language/feature.
+     * A script or a language the table has not falls back like in getScriptTable and getLangSysTable,
+     * unless the lookup table is created.
      * @instance
      * @param {string} [script='DFLT']
      * @param {string} [language='dlft']

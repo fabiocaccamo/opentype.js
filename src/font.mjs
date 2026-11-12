@@ -12,6 +12,7 @@ import { SVGImageManager } from './svgimages.mjs';
 import { VariationManager } from './variation.mjs';
 import HintingTrueType from './hintingtt.mjs';
 import Bidi from './bidi.mjs';
+import { getCharKerningScript, KERNING_SCRIPT_TAGS } from './char.mjs';
 import { applyPaintType } from './tables/cff.mjs';
 
 function createDefaultNamesInfo(options) {
@@ -140,6 +141,8 @@ function Font(options) {
     this.encoding = new DefaultEncoding(this);
     this.position = new Position(this);
     this.substitution = new Substitution(this);
+    // the pairs of the kern table, set by parse
+    this.kerningPairs = {};
     this.tables = this.tables || {};
 
     this.tables = new Proxy(this.tables, {
@@ -352,8 +355,19 @@ Font.prototype.glyphIndexToName = function(gid) {
  * and the right glyph (or its index). If no kerning pair is found, return 0.
  * The kerning value gets added to the advance width when calculating the spacing
  * between glyphs.
- * For GPOS kerning, this method uses the default script and language, which covers
- * most use cases. To have greater control, use font.position.getKerningValue .
+ * For GPOS kerning, this method uses the kern feature of the default language of the script of the
+ * characters the cmap maps to the two glyphs, with the fallbacks of font.position.getKerningTables, adding the
+ * values of all its lookups. The script of a glyph is the one of its characters: thai, arab, hebr, cyrl or grek
+ * for Thai, Arabic, Hebrew, Cyrillic or Greek, latn for the other scripts, none for characters of no script
+ * (Common, Inherited or Unknown, like digits and punctuation), and latn for a glyph shared by characters of
+ * several scripts, a character of no script counting as latn (like a micro sign that is also the Greek mu).
+ * The pair takes the first of thai, arab, hebr, cyrl and grek that one of its glyphs has, otherwise latn,
+ * or DFLT when neither glyph has a script (e.g. digits, or glyphs no character maps to, like alternates).
+ * The pair is the left glyph then the right glyph: for a GPOS pair of right-to-left text, pass the glyphs in
+ * the order of the text. For another script or language, use
+ * font.position.getKerningValue(font.position.getKerningTables(script, language), leftIndex, rightIndex),
+ * or lay out the text (getAdvanceWidth, forEachGlyph), which takes the script of the text.
+ * The kern table is used when the GPOS table has no kern feature for that script, like HarfBuzz.
  * @param  {opentype.Glyph|number} leftGlyph
  * @param  {opentype.Glyph|number} rightGlyph
  * @param  {Object} [variation] - variation coordinates for GPOS kerning, the current font variation if omitted
@@ -361,24 +375,131 @@ Font.prototype.glyphIndexToName = function(gid) {
  */
 Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variation) {
     // glyph objects or indexes (index 0 is valid, so no `glyph.index || glyph`)
-    leftGlyph = typeof leftGlyph === 'object' ? leftGlyph.index : leftGlyph;
-    rightGlyph = typeof rightGlyph === 'object' ? rightGlyph.index : rightGlyph;
-    const gposKerning = this.position.defaultKerningTables;
-    if (gposKerning) {
-        return this.position.getKerningValue(gposKerning, leftGlyph, rightGlyph, variation);
+    leftGlyph = typeof leftGlyph === 'object' ? leftGlyph : getGlyphOfIndex(this, leftGlyph);
+    rightGlyph = typeof rightGlyph === 'object' ? rightGlyph : getGlyphOfIndex(this, rightGlyph);
+    if (!leftGlyph || !rightGlyph) {
+        return 0;
     }
-    // "kern" table
-    return this.kerningPairs[leftGlyph + ',' + rightGlyph] || 0;
+    const leftScript = getGlyphKerningScript(leftGlyph);
+    const rightScript = getGlyphKerningScript(rightGlyph);
+    const script = selectKerningScript([leftScript, rightScript], leftScript !== undefined || rightScript !== undefined);
+    return this.position.getKerningValue(this.position.getKerningTables(script), leftGlyph.index, rightGlyph.index, variation);
 };
+
+/**
+ * The glyph of an index of the font, undefined for an index the font has not.
+ * @param  {opentype.Font} font
+ * @param  {number} index
+ * @return {opentype.Glyph|undefined}
+ */
+function getGlyphOfIndex(font, index) {
+    // a font parsed with lowMemory loads its glyphs on request, its GlyphSet counts the glyphs loaded so far
+    const glyphCount = font.numGlyphs !== undefined ? font.numGlyphs : font.glyphs.length;
+    return index >= 0 && index < glyphCount ? font.glyphs.get(index) : undefined;
+}
+
+/**
+ * The script of the kerning of a pair when the options give no script: the first of thai, arab, hebr, cyrl and
+ * grek (KERNING_SCRIPT_TAGS) in the scripts of the pair, otherwise latn, or DFLT when the text has no character
+ * of a script, like HarfBuzz.
+ * @param  {Array<string|undefined>} scripts - the kerning scripts of the pair (see getCharKerningScript)
+ * @param  {boolean} hasScript - whether the text has a character of a script
+ * @return {string}
+ */
+function selectKerningScript(scripts, hasScript) {
+    const kerningScript = KERNING_SCRIPT_TAGS.find(tag => scripts.includes(tag));
+    if (kerningScript) {
+        return kerningScript;
+    }
+    return hasScript ? 'latn' : 'DFLT';
+}
+
+/**
+ * The script of the kerning of a glyph cluster, from its characters (see getCharKerningScript): the one
+ * selectKerningScript takes from them, or undefined when none of them has a script.
+ * @param  {string} characters - the characters of the cluster
+ * @return {string|undefined}
+ */
+function getClusterKerningScript(characters) {
+    const scripts = [];
+    // a for...of loop: Array.from with a map function is several times slower on a string
+    for (const character of characters) {
+        scripts.push(getCharKerningScript(character));
+    }
+    return scripts.some(script => script !== undefined) ? selectKerningScript(scripts, true) : undefined;
+}
+
+/**
+ * The script of the kerning of a glyph, from the characters the cmap maps to it (see getCharKerningScript):
+ * their script when they all have the same one, undefined when none has a script, latn otherwise (a glyph
+ * shared by characters of several scripts, a character of no script counting as latn, like a micro sign
+ * that is also the Greek mu), so that the other glyph of a pair chooses the script.
+ * @param  {number[]} unicodes - the code points of the glyph
+ * @return {string|undefined}
+ */
+function getUnicodesKerningScript(unicodes) {
+    const scripts = new Set(unicodes.map(unicode => getCharKerningScript(String.fromCodePoint(unicode))));
+    const hasCharacterOfNoScript = scripts.delete(undefined);
+    if (scripts.size === 1 && !hasCharacterOfNoScript) {
+        return scripts.values().next().value;
+    }
+    return scripts.size ? 'latn' : undefined;
+}
+
+// the kerning script of each glyph, with the array of code points and the number of code points it was computed
+// from (Glyph.addUnicode adds to the array, glyph.unicodes can be replaced): a glyph can have thousands of code
+// points (cmap format 13)
+const glyphKerningScripts = new WeakMap();
+
+/**
+ * The script of the kerning of a glyph (see getUnicodesKerningScript), computed once for its code points.
+ * @param  {opentype.Glyph} glyph
+ * @return {string|undefined}
+ */
+function getGlyphKerningScript(glyph) {
+    const unicodes = glyph.unicodes;
+    const cachedScript = glyphKerningScripts.get(glyph);
+    if (cachedScript && cachedScript.unicodes === unicodes && cachedScript.unicodeCount === unicodes.length) {
+        return cachedScript.script;
+    }
+    const script = getUnicodesKerningScript(unicodes);
+    glyphKerningScripts.set(glyph, { unicodes, unicodeCount: unicodes.length, script });
+    return script;
+}
+
+/**
+ * Two adjacent glyph clusters in the order of the text, the order of the kerning pairs of HarfBuzz:
+ * stringToGlyphClusters gives a right-to-left run in visual order, so its right cluster comes first.
+ * @param  {{start: number}} leftCluster - the cluster of the left glyph (see stringToGlyphClusters)
+ * @param  {{start: number}} rightCluster - the cluster of the right glyph
+ * @return {Array<{start: number}>} the first and the second cluster of the pair
+ */
+function getLogicalPair(leftCluster, rightCluster) {
+    return rightCluster.start < leftCluster.start ? [rightCluster, leftCluster] : [leftCluster, rightCluster];
+}
 
 /**
  * @typedef GlyphRenderOptions
  * @type Object
- * @property {string} [script] - script used to determine which features to apply. By default, 'DFLT' or 'latn' is used.
+ * @property {string} [script] - script of the GPOS kern feature (and of the kern table fallback). Without it, each
+ *                               pair of glyphs is kerned with the script of its characters: thai for Thai, arab for
+ *                               Arabic, hebr for Hebrew, cyrl for Cyrillic, grek for Greek, latn otherwise, or DFLT
+ *                               when the text has no character of a script (only digits, punctuation...). Like
+ *                               HarfBuzz, the GPOS pairs of a right-to-left run are looked up in the order of the text,
+ *                               the kern table pairs in visual order. The value of a GPOS pair of a right-to-left run is
+ *                               added between its two glyphs: right for the usual records whose x placement and x advance
+ *                               are the same, not yet for a record with an x advance only. A script the font has not falls back to 'DFLT', 'dflt', then
+ *                               'latn', like HarfBuzz; 'hebr' without a hebr script in the GPOS table uses the kern table,
+ *                               like the Hebrew shaper of HarfBuzz. The GSUB features do not use it yet: they use the
+ *                               default language system of the script of each run of text (latn, arab or thai) or of DFLT.
  *                               See https://www.microsoft.com/typography/otspec/scripttags.htm
- * @property {string} [language='dflt'] - language system used to determine which features to apply.
+ * @property {string} [language='dflt'] - language system of the GPOS kern feature. A language system the script has not
+ *                                        falls back to the default language system of the script (see
+ *                                        Layout.getLangSysTable). The GSUB features
+ *                                        do not use it yet (see script).
  *                                        See https://www.microsoft.com/typography/developers/opentype/languagetags.aspx
- * @property {boolean} [kerning=true] - whether to include kerning values
+ * @property {boolean} [kerning=true] - whether to include kerning values: the values of all the lookups of the GPOS kern
+ *                                      feature, or the values of the kern table when GPOS has no kern feature for the script
  * @property {object} [features] - OpenType Layout feature tags (e.g. `{ liga: false, ss01: true }`), enabling or disabling them over the default ones
  *                                 (for latin text: ccmp, locl, rlig, rclt, calt, liga and clig).
  *                                 See https://www.microsoft.com/typography/otspec/featuretags.htm
@@ -421,26 +542,37 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
     fontSize = fontSize !== undefined ? fontSize : 72;
     options = Object.assign({}, this.defaultRenderOptions, options);
     const fontScale = 1 / this.unitsPerEm * fontSize;
-    const glyphs = this.stringToGlyphs(text, options);
-    let kerningLookups;
-    if (options.kerning) {
-        const script = options.script || this.position.getDefaultScriptName();
-        kerningLookups = this.position.getKerningTables(script, options.language);
-    }
-    for (let i = 0; i < glyphs.length; i += 1) {
-        const glyph = glyphs[i];
+    const glyphClusters = this.stringToGlyphClusters(text, options);
+    const kerningLookupsByScript = new Map();
+    const getKerningLookups = script => {
+        if (!kerningLookupsByScript.has(script)) {
+            kerningLookupsByScript.set(script, this.position.getKerningTables(script, options.language));
+        }
+        return kerningLookupsByScript.get(script);
+    };
+    const clusterScripts = options.kerning && !options.script ?
+        glyphClusters.map(cluster => getClusterKerningScript(text.slice(cluster.start, cluster.end))) :
+        [];
+    const hasScript = clusterScripts.some(script => script !== undefined);
+    for (let i = 0; i < glyphClusters.length; i += 1) {
+        const glyph = glyphClusters[i].glyph;
         callback.call(this, glyph, x, y, fontSize, options);
         const advanceWidth = glyph.getAdvanceWidth(this, options.variation);
         if (advanceWidth) {
             x += advanceWidth * fontScale;
         }
 
-        if (options.kerning && i < glyphs.length - 1) {
+        if (options.kerning && i < glyphClusters.length - 1) {
             // We should apply position adjustment lookups in a more generic way.
             // Here we only use the xAdvance value.
-            const kerningValue = kerningLookups ?
-                this.position.getKerningValue(kerningLookups, glyph.index, glyphs[i + 1].index, options.variation) :
-                this.getKerningValue(glyph, glyphs[i + 1], options.variation);
+            const script = options.script || selectKerningScript([clusterScripts[i], clusterScripts[i + 1]], hasScript);
+            const kerningLookups = getKerningLookups(script);
+            // the GPOS pairs are in the order of the text; the kern table has no direction, HarfBuzz looks its
+            // pairs up in visual order
+            const [firstCluster, secondCluster] = kerningLookups ?
+                getLogicalPair(glyphClusters[i], glyphClusters[i + 1]) :
+                [glyphClusters[i], glyphClusters[i + 1]];
+            const kerningValue = this.position.getKerningValue(kerningLookups, firstCluster.glyph.index, secondCluster.glyph.index, options.variation);
             x += kerningValue * fontScale;
         }
 

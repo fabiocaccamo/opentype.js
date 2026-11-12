@@ -35,7 +35,7 @@
  * system other than the default one (EB Garamond: DFLT, cyrl, grek, latn; Work Sans: DFLT, latn;
  * TestGPOS-KernTwoLookups.ttf: DFLT only), that HarfBuzz uses for any language, and HarfBuzz
  * uses DFLT for a script the font has not: its kerning depends neither on the language nor on
- * the script. The fork falls back to neither (see the known failures of the text layout).
+ * the script. The fork falls back the same way (see the tests of the text layout).
  */
 
 import assert from 'assert';
@@ -44,10 +44,6 @@ import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './helpers.m
 const ebGaramondFixture = 'EBGaramond-VF-kern-subset.ttf';
 const workSansFixture = 'WorkSans-VF-kern-subset.ttf';
 const twoLookupsFixture = 'TestGPOS-KernTwoLookups.ttf';
-
-const firstSubtableReason = 'Position.getKerningValue (src/position.mjs): returns the value of the first subtable that ' +
-    'has the pair (PairPos format 1) or that covers the left glyph (format 2), whatever its lookup, instead of ' +
-    'adding the value of each lookup of the kern feature';
 
 // -u 0041,0056,0054,006F,0054,0079,004C,0054,0050,002E
 const classPairsText = 'AVToTyLTP.';
@@ -147,11 +143,6 @@ function getClassPairsShape(reference, weight) {
         advances: reference.advances[weight],
         advancesWithoutKerning: reference.advancesWithoutKerning[weight]
     };
-}
-
-// kerning of a pair of glyph indexes (+ 0: a negative zero is the subject of its own known failure below)
-function getPairKerning(font, leftGlyphIndex, rightGlyphIndex) {
-    return font.getKerningValue(leftGlyphIndex, rightGlyphIndex) + 0;
 }
 
 function sum(values) {
@@ -326,8 +317,8 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
             // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=800 --features=-kern /tmp/EBGaramond-VF-kern-a01.ttf -u 002E,E000,002C,E000,0041,E000
             // [14=0+251|12=1+572|15=2+251|12=3+572|1=4+726|12=5+572]
             // Period and comma before a.01 are in the plain lookup 1 only (the extension lookup has a record of 0
-            // for them), A before a.01 is in the extension lookup only: a fix of the known failures below that kept
-            // the value of the extension lookup 0 (the last one the kern feature lists), without adding, would break
+            // for them), A before a.01 is in the extension lookup only: a kerning that kept the value of the
+            // extension lookup 0 (the last one the kern feature lists), without adding, would break
             // the first two. One that kept the first value other than 0 passes every test of this font: the sum is
             // tested on TestGPOS-KernTwoLookups.ttf.
             // The -25 of the default instance is a guard (the plain lookup was always read), the other values
@@ -340,30 +331,38 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
             };
             for (const weight of [400, 600, 800]) {
                 assert.deepStrictEqual(
-                    pairs.map(([leftGlyphIndex, rightGlyphIndex]) => getPairKerning(instances[weight], leftGlyphIndex, rightGlyphIndex)),
+                    pairs.map(([leftGlyphIndex, rightGlyphIndex]) => instances[weight].getKerningValue(leftGlyphIndex, rightGlyphIndex)),
                     kerningByWeight[weight],
                     `wght ${weight}`
                 );
             }
         });
 
-        // With Number.EPSILON added to the normalized coordinate and to the scalar of a region, the delta
-        // at the default instance is a tiny negative number, that Position.getValueRecordXAdvance
-        // (src/position.mjs) rounds to -0.
         it('kerns o T by 0 at the default instance, not by a negative zero', function() {
             // hb-shape --no-glyph-names --cluster-level=1 EBGaramond-VF-kern-subset.ttf -u 006F,0054
             // [9=0+495|4=1+670]
             // hb-shape --no-glyph-names --cluster-level=1 --features=-kern EBGaramond-VF-kern-subset.ttf -u 006F,0054
             // [9=0+495|4=1+670]
             // The record of o T is 0 with a delta of -105 at wght 800. strictEqual tells 0 and -0 apart.
-            // A getKerningValue that adds the values of the kern lookups to 0 returns 0 too (0 + -0 is 0):
-            // this test then passes whatever the delta.
+            // getKerningValue adds the values of the kern lookups to 0 and returns 0 (0 + -0 is 0) whatever the
+            // delta: the test of the record below tells them apart.
             const kerning = font.getKerningValue(9, 4);
             assert.strictEqual(kerning, 0);
         });
 
+        // the record of o T, in the format 2 subtable (the third one) of the extension lookup 0, the first kern lookup
+        // in LookupList order: 0 at the default instance, as above. With Number.EPSILON added to the normalized
+        // coordinate and to the scalar of a region, its delta was a tiny negative number, that
+        // Position.getValueRecordXAdvance (src/position.mjs) rounded to -0.
+        it('gives the record of o T an x advance of 0 at the default instance, not a negative zero', function() {
+            const classSubtable = font.position.getKerningTables()[0].subtables[2];
+            const classRecord = classSubtable.classRecords[font.position.getGlyphClass(classSubtable.classDef1, 9)];
+            const pairRecord = classRecord[font.position.getGlyphClass(classSubtable.classDef2, 4)];
+            assert.strictEqual(font.position.getValueRecordXAdvance(pairRecord.value1), 0);
+        });
+
         describe('pairs after period and comma, the glyphs that both kern lookups cover', function() {
-            it('kerns P period and V comma, whose left glyph only the extension lookup covers, and maps the texts of the known failures below', function() {
+            it('kerns P period and V comma, whose left glyph only the extension lookup covers, and maps the texts of the tests below', function() {
                 // hb-shape --no-glyph-names --cluster-level=1 --features=-kern EBGaramond-VF-kern-subset.ttf -u 0050,002E,0056,002C,0054
                 // [3=0+552|14=1+230|5=2+672|15=3+230|4=4+670]
                 assertShape(
@@ -386,7 +385,7 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
                 );
             });
 
-            itFailsUntilFixed('kerns period V (-100) and comma T (-75) of "P.V,T"', firstSubtableReason, function() {
+            it('kerns period V (-100) and comma T (-75) of "P.V,T"', function() {
                 // hb-shape --no-glyph-names --cluster-level=1 EBGaramond-VF-kern-subset.ttf -u 0050,002E,0056,002C,0054
                 // [3=0+477|14=1+130|5=2+572|15=3+155|4=4+670]
                 // the plain lookup 1, that the kern feature lists first, has a record of 0 for these pairs, the
@@ -395,17 +394,13 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
                 assert.deepStrictEqual(shaped.advances, [477, 130, 572, 155, 670]);
             });
 
-            itFailsUntilFixed(
-                'kerns comma V (-150) and period T (-130) of ",V.T" at wght 800, with the deltas of the extension lookup',
-                firstSubtableReason,
-                function() {
-                    // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=800 EBGaramond-VF-kern-subset.ttf -u 002C,0056,002E,0054
-                    // [15=0+101|5=1+564|14=2+121|4=3+701]
-                    // (V period, -150 too, is kerned today: only the extension lookup covers V)
-                    const shaped = shapeText(instances[800], ',V.T');
-                    assert.deepStrictEqual(shaped.advances, [101, 564, 121, 701]);
-                }
-            );
+            it('kerns comma V (-150) and period T (-130) of ",V.T" at wght 800, with the deltas of the extension lookup', function() {
+                // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=800 EBGaramond-VF-kern-subset.ttf -u 002C,0056,002E,0054
+                // [15=0+101|5=1+564|14=2+121|4=3+701]
+                // (V period, -150 too: only the extension lookup covers V)
+                const shaped = shapeText(instances[800], ',V.T');
+                assert.deepStrictEqual(shaped.advances, [101, 564, 121, 701]);
+            });
         });
     });
 
@@ -538,7 +533,7 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
                     ebGaramondFont, classPairsText, getClassPairsShape(ebGaramondClassPairs, weight), { variation: { wght: weight } }
                 );
             }
-            // DFLT, latn, cyrl and grek have the same kern feature (without a script the fork takes the one of DFLT):
+            // DFLT, latn, cyrl and grek have the same kern feature (without a script the fork takes the one of latn):
             // the test proves that the layout still finds the kern feature when it is given a script, it cannot tell
             // a layout that ignores the option
             // hb-shape --no-glyph-names --cluster-level=1 --script=latn EBGaramond-VF-kern-subset.ttf -u 0041,0056,0054,006F,0054,0079,004C,0054,0050,002E
@@ -549,34 +544,23 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
             );
         });
 
-        itFailsUntilFixed(
-            'kerns with the default language system of the script for a language the font has not (TRK)',
-            'Layout.getLangSysTable (src/layout.mjs): returns nothing for a language without a LangSysRecord in the ' +
-            'script, instead of the defaultLangSys of the script, so Position.getKerningTables (src/position.mjs) ' +
-            'returns no lookup and forEachGlyph kerns nothing',
-            function() {
-                // AV -140, the pair of the issue (692 without kerning, see the first test of EB Garamond)
-                // hb-shape --no-glyph-names --cluster-level=1 --script=latn --language=tr EBGaramond-VF-kern-subset.ttf -u 0041,0056
-                // [1=0+552|5=1+672]
-                const shaped = shapeText(ebGaramondFont, 'AV', { script: 'latn', language: 'TRK ' });
-                assert.deepStrictEqual(shaped.advances, [552, 672]);
-            }
-        );
+        it('kerns with the default language system of the script for a language the font has not (TRK)', function() {
+            // AV -140, the pair of the issue (692 without kerning, see the first test of EB Garamond)
+            // hb-shape --no-glyph-names --cluster-level=1 --script=latn --language=tr EBGaramond-VF-kern-subset.ttf -u 0041,0056
+            // [1=0+552|5=1+672]
+            const shaped = shapeText(ebGaramondFont, 'AV', { script: 'latn', language: 'TRK ' });
+            assert.deepStrictEqual(shaped.advances, [552, 672]);
+        });
 
-        itFailsUntilFixed(
-            'kerns with the DFLT script for a script the font has not (latn in TestGPOS-KernTwoLookups.ttf)',
-            'Layout.getScriptTable (src/layout.mjs): returns nothing for a script the font has not, without falling ' +
-            'back to DFLT, so Position.getKerningTables (src/position.mjs) returns no lookup and forEachGlyph kerns nothing',
-            function() {
-                // A T -30, from lookup 0 only (lookup 1 has a class record of 0): kerned without the script option
-                // hb-shape --no-glyph-names --cluster-level=1 --script=latn TestGPOS-KernTwoLookups.ttf -u 0041,0054
-                // [2=0+570|4=1+500]
-                // hb-shape --no-glyph-names --cluster-level=1 --script=latn --features=-kern TestGPOS-KernTwoLookups.ttf -u 0041,0054
-                // [2=0+600|4=1+500]
-                const shaped = shapeText(twoLookupsFont, 'AT', { script: 'latn' });
-                assert.deepStrictEqual(shaped.advances, [570, 500]);
-            }
-        );
+        it('kerns with the DFLT script for a script the font has not (latn in TestGPOS-KernTwoLookups.ttf)', function() {
+            // A T -30, from lookup 0 only (lookup 1 has a class record of 0): kerned without the script option
+            // hb-shape --no-glyph-names --cluster-level=1 --script=latn TestGPOS-KernTwoLookups.ttf -u 0041,0054
+            // [2=0+570|4=1+500]
+            // hb-shape --no-glyph-names --cluster-level=1 --script=latn --features=-kern TestGPOS-KernTwoLookups.ttf -u 0041,0054
+            // [2=0+600|4=1+500]
+            const shaped = shapeText(twoLookupsFont, 'AT', { script: 'latn' });
+            assert.deepStrictEqual(shaped.advances, [570, 500]);
+        });
 
         itFailsUntilFixed(
             'substitutes dollar with dollar.BRACKET.202 at the wght 900 of the options, on a font left at its default instance (rvrn)',
@@ -647,7 +631,7 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
                 // [2=0+600|4=1+500|5=2+600|6=3+500|4=4+500|3=5+500|7=6+250]
                 advancesWithoutKerning: [600, 500, 600, 500, 500, 500, 250]
             });
-            // the glyphs of the pairs of the known failures below
+            // the glyphs of the pairs of the tests below
             // hb-shape --no-glyph-names --cluster-level=1 --features=-kern TestGPOS-KernTwoLookups.ttf -u 0041,0056,0054,006F,0054,002E,004C,006F
             // [2=0+600|5=1+600|4=2+500|6=3+500|4=4+500|7=5+250|3=6+500|6=7+500]
             assertShape(
@@ -657,7 +641,7 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
         });
 
         for (const reference of pairsOfBothLookups) {
-            itFailsUntilFixed(`adds the values of the two lookups: ${reference.name}`, firstSubtableReason, function() {
+            it(`adds the values of the two lookups: ${reference.name}`, function() {
                 const shaped = shapeText(font, reference.text);
                 assert.deepStrictEqual(shaped.advances, reference.advances);
             });

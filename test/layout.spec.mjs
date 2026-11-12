@@ -61,6 +61,97 @@ describe('layout.mjs', function() {
             assert.notEqual(scriptTable.defaultLangSys, undefined);
             assert.equal(layout.getScriptTable('DFLT', true), scriptTable, 'must create only one instance for each tag');
         });
+
+        // hb_ot_layout_table_select_script of HarfBuzz, checked with hb-shape --script=cyrl on fonts built by fontTools
+        // with these scripts (the kern feature of DFLT applies, of dflt without DFLT, of latn without both)
+        it('falls back to DFLT, then dflt, then latn for a script the table has not', function() {
+            const scriptTables = {};
+            for (const tag of ['DFLT', 'dflt', 'grek', 'latn']) {
+                scriptTables[tag] = { defaultLangSys: { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [] }, langSysRecords: [] };
+            }
+            const setScripts = tags => {
+                font.tables.gsub = { version: 1, scripts: tags.map(tag => ({ tag, script: scriptTables[tag] })), features: [], lookups: [] };
+            };
+            setScripts(['DFLT', 'dflt', 'grek', 'latn']);
+            assert.equal(layout.getScriptTable('grek'), scriptTables.grek);
+            assert.equal(layout.getScriptTable('cyrl'), scriptTables.DFLT);
+            setScripts(['dflt', 'grek', 'latn']);
+            assert.equal(layout.getScriptTable('cyrl'), scriptTables.dflt);
+            assert.equal(layout.getScriptTable(), scriptTables.dflt);
+            setScripts(['grek', 'latn']);
+            assert.equal(layout.getScriptTable('cyrl'), scriptTables.latn);
+            setScripts(['grek']);
+            assert.equal(layout.getScriptTable('cyrl'), undefined);
+        });
+
+        it('creates a script the table has not instead of falling back', function() {
+            const latinScriptTable = { defaultLangSys: { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [] }, langSysRecords: [] };
+            font.tables.gsub = { version: 1, scripts: [{ tag: 'latn', script: latinScriptTable }], features: [], lookups: [] };
+            const cyrillicScriptTable = layout.getScriptTable('cyrl', true);
+            assert.notEqual(cyrillicScriptTable, latinScriptTable);
+            assert.deepStrictEqual(font.tables.gsub.scripts.map(script => script.tag), ['cyrl', 'latn']);
+        });
+    });
+
+    describe('getLangSysTable', function() {
+        const defaultLangSys = { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [0] };
+        const turkishLangSys = { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [1] };
+
+        beforeEach(function() {
+            font.tables.gsub = {
+                version: 1,
+                scripts: [{ tag: 'latn', script: { defaultLangSys, langSysRecords: [{ tag: 'TRK ', langSys: turkishLangSys }] } }],
+                features: [],
+                lookups: []
+            };
+        });
+
+        it('returns the language system of a language, the default one without a language', function() {
+            assert.equal(layout.getLangSysTable('latn', 'TRK '), turkishLangSys);
+            assert.equal(layout.getLangSysTable('latn'), defaultLangSys);
+            assert.equal(layout.getLangSysTable('latn', 'dflt'), defaultLangSys);
+        });
+
+        it('falls back to the default language system of the script for a language the script has not', function() {
+            // the OpenType specification (Script table: the default LangSys table is used for a language the script
+            // has no LangSys table for) and hb_ot_layout_script_select_language of HarfBuzz
+            assert.equal(layout.getLangSysTable('latn', 'ROM '), defaultLangSys);
+            assert.equal(layout.getLangSysTable('cyrl', 'ROM '), defaultLangSys, 'with the fallback of the script');
+        });
+
+        it('takes the language system tagged dflt as the default one, before the DefaultLangSys', function() {
+            // hb_ot_layout_script_select_language of HarfBuzz: the language, then the LangSysRecord dflt, then the
+            // DefaultLangSys. Fonts built by fontTools (feaLib, then the DefaultLangSys moved to a record dflt):
+            // latn with the record dflt (kern A V -50 and dist T o -30) and TRK (dist), without a DefaultLangSys
+            // or with a DefaultLangSys of dist only, give the same lines:
+            // hb-shape --no-glyph-names --script=latn <font> -u 41,56,54,6f
+            // [1=0+450|2=1+500|3=2+470|4=3+500], the same with --language=ro
+            // hb-shape --no-glyph-names --script=latn --language=tr <font> -u 41,56,54,6f
+            // [1=0+500|2=1+500|3=2+470|4=3+500]
+            const recordLangSys = { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [0, 1] };
+            const latinScriptTable = {
+                defaultLangSys: undefined,
+                langSysRecords: [{ tag: 'TRK ', langSys: turkishLangSys }, { tag: 'dflt', langSys: recordLangSys }]
+            };
+            font.tables.gsub.scripts[0].script = latinScriptTable;
+            for (const latinDefaultLangSys of [undefined, defaultLangSys]) {
+                latinScriptTable.defaultLangSys = latinDefaultLangSys;
+                assert.equal(layout.getLangSysTable('latn'), recordLangSys);
+                assert.equal(layout.getLangSysTable('latn', 'dflt'), recordLangSys);
+                assert.equal(layout.getLangSysTable('latn', 'ROM '), recordLangSys);
+                assert.equal(layout.getLangSysTable('latn', 'TRK '), turkishLangSys);
+            }
+            // the writers of the substitutions add to the language system the readers use
+            assert.equal(layout.getLangSysTable('latn', 'dflt', true), recordLangSys);
+            assert.equal(layout.getLangSysTable('latn', undefined, true), recordLangSys);
+        });
+
+        it('creates a language system the script has not instead of falling back', function() {
+            const romanianLangSys = layout.getLangSysTable('latn', 'ROM ', true);
+            assert.notEqual(romanianLangSys, defaultLangSys);
+            assert.deepStrictEqual(romanianLangSys.featureIndexes, []);
+            assert.deepStrictEqual(font.tables.gsub.scripts[0].script.langSysRecords.map(record => record.tag), ['ROM ', 'TRK ']);
+        });
     });
 
     describe('getGlyphClass', function() {
