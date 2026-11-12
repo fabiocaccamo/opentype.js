@@ -521,6 +521,8 @@ Tokenizer.prototype.tokenize = function (text) {
         this.runContextCheck(contextParams);
         let token = new Token(char);
         token.charOffset = charOffset;
+        // the start of the cluster of the token in the text, until a ligature merges it with the clusters of other tokens
+        token.cluster = charOffset;
         charOffset += char.length;
         this.tokens.push(token);
         this.dispatch('newToken', [token, contextParams]);

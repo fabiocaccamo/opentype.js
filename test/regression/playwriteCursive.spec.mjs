@@ -201,9 +201,8 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
 
         it('picks the initial, medial and final letters of HarfBuzz', function() {
             // the hb-shape outputs quoted above, without the glyphs of GDEF class mark. When lookup 17 runs,
-            // the accent of the multiple substitution is still in the token of e and the context is matched
-            // on the first glyph of each token: the initial e of accentedShape does not depend on the
-            // IgnoreMarks flag (a mark typed in the text is the test of the combining mark below)
+            // the accent of the multiple substitution of lookup 7 is a glyph of its own after e.ful, that
+            // lookup 17 skips (IgnoreMarks) to match the l after it
             for (const reference of [helloShape, minimumShape, phoneShape, whoShape, accentedShape]) {
                 assert.deepStrictEqual(getLetters(shapeText(fonts[400], reference.text)), getLetters(reference), reference.text);
             }
@@ -223,10 +222,8 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
     });
 
     describe('connectors (chaining context format 3 with nested multiple substitutions)', function() {
-        const reason = 'chainingSubstitutionFormat3 (src/features/applySubstitution.mjs): keeps only the first glyph of a nested multiple substitution';
-
         // the whole shape: the advances of hello only need the connectors
-        itFailsUntilFixed('adds a connector after each joined letter of hello, in the cluster of the letter, at each instance', reason, function() {
+        it('adds a connector after each joined letter of hello, in the cluster of the letter, at each instance', function() {
             const shapesByWeight = {};
             const referencesByWeight = {};
             for (const weight of [400, 100]) {
@@ -237,7 +234,7 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
         });
 
         // glyphs and clusters only: the advances of these texts also need dist or the kerning of latn
-        itFailsUntilFixed('adds the connectors of minimum, Phone and who', reason, function() {
+        it('adds the connectors of minimum, Phone and who', function() {
             const shapesByText = {};
             const referencesByText = {};
             for (const reference of [minimumShape, phoneShape, whoShape]) {
@@ -261,7 +258,7 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
         });
 
         it('decomposes a precomposed letter alone into the letter and its accent, in one cluster', function() {
-            // baseline of the known failure below: the multiple substitution itself keeps the accent
+            // baseline of the tests below: the multiple substitution itself keeps the accent
             // e with acute (U+00E9): e.ful acutecomb
             // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 00E9
             // [19=0+444|8=0@-267,0+0]
@@ -272,30 +269,18 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             }, 'e acute');
         });
 
-        itFailsUntilFixed(
-            'keeps the accent of a letter decomposed by calt when the letter takes a positional form',
-            'chainingSubstitutionFormat3 (src/features/applySubstitution.mjs): a nested substitution replaces the whole token that holds ' +
-            'the two glyphs of the multiple substitution, the accent is lost: by the nested single substitution of lookup 17 (the ' +
-            'positional form) and again by the first glyph of the nested multiple substitution of lookup 23 (the connector)',
-            function() {
-                // accentedShape without its connectors (e.ful.ini acutecomb l.lop.med u.mod.fin), so that
-                // the missing connectors, the known failures above, are not what fails here
-                const shape = withoutGlyphs(shapeText(fonts[400], accentedShape.text), connectorGlyphIndexes);
-                assertShape(shape, withoutGlyphs(accentedShape, connectorGlyphIndexes), 'e acute, l, u');
-            }
-        );
+        it('keeps the accent of a letter decomposed by calt when the letter takes a positional form', function() {
+            // accentedShape without its connectors (e.ful.ini acutecomb l.lop.med u.mod.fin): the nested
+            // single substitution of lookup 17 replaces e.ful only, not the accent after it
+            const shape = withoutGlyphs(shapeText(fonts[400], accentedShape.text), connectorGlyphIndexes);
+            assertShape(shape, withoutGlyphs(accentedShape, connectorGlyphIndexes), 'e acute, l, u');
+        });
 
-        itFailsUntilFixed(
-            'puts the connector of a decomposed letter between the letter and its accent, all three in its cluster',
-            'chainingSubstitutionFormat3 (src/features/applySubstitution.mjs): keeps only the first glyph of a nested multiple ' +
-            'substitution, the connectors are dropped, and a nested substitution replaces the whole token that holds e.ful and ' +
-            'acutecomb, the accent is lost (lookups 17 and 23)',
-            function() {
-                // the whole accentedShape, in the order of HarfBuzz: e.ful.ini cnct.ful_e_f acutecomb
-                const shape = shapeText(fonts[400], accentedShape.text);
-                assertShape(shape, accentedShape, 'e acute, l, u');
-            }
-        );
+        it('puts the connector of a decomposed letter between the letter and its accent, all three in its cluster', function() {
+            // the whole accentedShape, in the order of HarfBuzz: e.ful.ini cnct.ful_e_f acutecomb
+            const shape = shapeText(fonts[400], accentedShape.text);
+            assertShape(shape, accentedShape, 'e acute, l, u');
+        });
     });
 
     describe('combining mark in the text (lookupFlag IgnoreMarks, clusters, composition)', function() {
@@ -314,10 +299,9 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             // h, combining acute accent (U+0301), e: h.lop.ini cnct.ful_n_e acutecomb e.ful.fin
             // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 0068,0301,0065
             // [29=0+676|26=0+0|8=1@-297,455+0|22=2+444]
-            // the letters only (h.lop.ini and e.ful.fin, clusters 0 and 2): the connector is a known failure above
             const reference = { glyphs: [29, 26, 8, 22], clusters: [0, 0, 1, 2], advances: [676, 0, 0, 444] };
-            const letters = getLetters(shapeText(fonts[400], 'h\u{301}e'));
-            assert.deepStrictEqual(letters, getLetters(reference));
+            const shape = shapeText(fonts[400], 'h\u{301}e');
+            assert.deepStrictEqual(getGlyphsAndClusters(shape), getGlyphsAndClusters(reference));
         });
 
         itFailsUntilFixed(
@@ -335,17 +319,16 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
 
         itFailsUntilFixed(
             'decomposes and joins a composed letter with calt, its accent in the cluster of the two characters',
-            '_createBidi (src/font.mjs): does not compose e and U+0301 into eacute, acutecomb stays in a cluster of its own; the ' +
-            'composed letter then loses its accent like the precomposed one (chainingSubstitutionFormat3, src/features/applySubstitution.mjs)',
+            '_createBidi (src/font.mjs): does not compose e and U+0301 into eacute, acutecomb stays in a cluster of its own: ' +
+            'the clusters [0, 0, 1, 2, 2, 3] instead of [0, 0, 0, 2, 2, 3]',
             function() {
                 // e, combining acute accent (U+0301), l, u: e.ful.ini cnct.ful_e_f acutecomb l.lop.med cnct.mod_n_n u.mod.fin,
                 // composed into eacute and decomposed again by lookup 7: l is in cluster 2
                 // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 0065,0301,006C,0075
                 // [20=0+444|25=0+0|8=0@-267,0+0|32=2+394|18=2+0|16=3+671]
-                // without the connectors, the known failures of the connectors
+                // the whole shape, the connectors of the composed letter included
                 const reference = { glyphs: [20, 25, 8, 32, 18, 16], clusters: [0, 0, 0, 2, 2, 3], advances: [444, 0, 0, 394, 0, 671] };
-                const shape = withoutGlyphs(shapeText(fonts[400], 'e\u{301}lu'), connectorGlyphIndexes);
-                assertShape(shape, withoutGlyphs(reference, connectorGlyphIndexes), 'e, combining acute, l, u');
+                assertShape(shapeText(fonts[400], 'e\u{301}lu'), reference, 'e, combining acute, l, u');
             }
         );
     });

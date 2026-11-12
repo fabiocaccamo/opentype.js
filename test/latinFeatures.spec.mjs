@@ -2,7 +2,17 @@ import assert from 'assert';
 import { Font, Glyph, Path, parse } from '../src/opentype.mjs';
 import { Parser } from '../src/parse.mjs';
 import { unhex } from './testutil.mjs';
-import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
+import {
+    glyphIndexes,
+    createLookupFlagsFont,
+    createLayoutTable,
+    createCoverage,
+    createCoverages,
+    createSingleLookup,
+    createMultipleLookup,
+    multipleCLookup,
+    subAcuteBLookup
+} from './lookup-flags-font.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
 import { readFileSync } from 'fs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
@@ -299,15 +309,22 @@ describe('the lookupFlag of the latin features', function() {
         assert.deepEqual(shapeNames(font, 'a\u{301}b'), ['a_b', 'acute']);
     });
 
-    itFailsUntilFixed('merges the clusters of a ligature and of the marks between its components, like HarfBuzz',
-        'getTextGlyphClusters (src/bidi.mjs): the character of a deleted ligature component belongs to the glyph before it in ' +
-        'the text, here the mark that the ligature lookup skipped: the cluster of a_b is [0, 1), the one of acute [1, 3)',
-        function() {
-            // -u 0061,0301,0062 with the ligature lookup with IgnoreMarks: [9=0+500|5=0+0], a b and the acute are one cluster
-            const font = createFlagsFont([{ lookupType: 4, lookupFlag: IGNORE_MARKS, subtables: [abLigatureSubtable] }], [0]);
-            const clusters = font.stringToGlyphClusters('a\u{301}b');
-            assert.deepStrictEqual(clusters.map(cluster => [cluster.start, cluster.end]), [[0, 3], [0, 3]]);
-        });
+    it('merges the clusters of a ligature and of the marks between its components, like HarfBuzz', function() {
+        // -u 0061,0301,0062 with the ligature lookup with IgnoreMarks: [9=0+500|5=0+0], a b and the acute are one cluster
+        const font = createFlagsFont([{ lookupType: 4, lookupFlag: IGNORE_MARKS, subtables: [abLigatureSubtable] }], [0]);
+        const clusters = font.stringToGlyphClusters('a\u{301}b');
+        assert.deepStrictEqual(clusters.map(cluster => [cluster.start, cluster.end]), [[0, 3], [0, 3]]);
+    });
+
+    it('merges the clusters of a ligature of three components, to its last component, like HarfBuzz', function() {
+        // ss04: lookupflag IgnoreMarks; sub a b c by a_b_c; sub a b by a_b;
+        const font = createFlagsFont([{ lookupType: 4, lookupFlag: IGNORE_MARKS, subtables: [abLigatureSubtable] }], [0]);
+        const describeClusters = text => font.stringToGlyphClusters(text).map(cluster => [cluster.glyph.name, cluster.start, cluster.end]);
+        // -u 0061,0062,0301,0063: [10=0+500|5=0+0]
+        assert.deepStrictEqual(describeClusters('ab\u{301}c'), [['a_b_c', 0, 4], ['acute', 0, 4]]);
+        // -u 0061,0301,0062,0323,0063: [10=0+500|5=0+0|6=0+0]
+        assert.deepStrictEqual(describeClusters('a\u{301}b\u{323}c'), [['a_b_c', 0, 5], ['acute', 0, 5], ['dotbelow', 0, 5]]);
+    });
 
     it('skips the base glyphs with IgnoreBaseGlyphs, and does not apply the lookup at a base glyph', function() {
         // lookupflag IgnoreBaseGlyphs; sub acute' dotbelow by acute.alt;
@@ -393,13 +410,162 @@ describe('the lookupFlag of the latin features', function() {
         assert.deepEqual(shapeNames(font, 'bc'), ['b.alt', 'a', 'acute']);
     });
 
-    itFailsUntilFixed('goes on after the last input glyph of a contextual match, like HarfBuzz',
-        'applyLookup (src/features/latn/latinFeatures.mjs): after a contextual match the lookup is tried again at the next glyph, ' +
-        'HarfBuzz goes on after the last matched input glyph (apply_lookup, buffer move_to end): a a a gives a.alt a.alt a',
-        function() {
-            // ss16: sub a' lookup SUB_A a';
-            // -u 0061,0061,0061: [7=0+500|1=1+500|1=2+500]
-            const font = createFlagsFont([singleLookup(glyphA, glyphIndexes['a.alt']), chainingFormat3Lookup([], [glyphA, glyphA], [], 0)], [1]);
-            assert.deepEqual(shapeNames(font, 'aaa'), ['a.alt', 'a', 'a']);
-        });
+    it('goes on after the last input glyph of a contextual match, like HarfBuzz', function() {
+        // ss16: sub a' lookup SUB_A a'; HarfBuzz goes on after the last matched input glyph (apply_lookup, buffer move_to end)
+        // -u 0061,0061,0061: [7=0+500|1=1+500|1=2+500]
+        const font = createFlagsFont([singleLookup(glyphA, glyphIndexes['a.alt']), chainingFormat3Lookup([], [glyphA, glyphA], [], 0)], [1]);
+        assert.deepEqual(shapeNames(font, 'aaa'), ['a.alt', 'a', 'a']);
+    });
+
+    it('goes on after the input glyphs of a contextual rule that substitutes nothing (an exception rule), like HarfBuzz', function() {
+        // calt: ignore sub a' b'; sub b' lookup SUB_B; (two ContextSubst format 3), the lookup does not apply at the b of the
+        // input of the exception: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsExceptionRules.ttf
+        const exceptionLookup = {
+            lookupType: 5,
+            lookupFlag: 0,
+            subtables: [
+                { substFormat: 3, coverages: createCoverages([glyphA, glyphB]), lookupRecords: [] },
+                { substFormat: 3, coverages: createCoverages([glyphB]), lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] }
+            ]
+        };
+        const font = createFlagsFont([singleLookup(glyphB, glyphIndexes['b.alt']), exceptionLookup], [1]);
+        // -u 0061,0062,0062: [1=0+500|2=1+500|8=2+500]
+        assert.deepEqual(shapeNames(font, 'abb'), ['a', 'b', 'b.alt']);
+        // -u 0062,0062: [8=0+500|8=1+500]
+        assert.deepEqual(shapeNames(font, 'bb'), ['b.alt', 'b.alt']);
+    });
+});
+
+describe('multiple substitutions of the latin features', function() {
+    // the font of test/lookup-flags-font.mjs, whose calt feature has the given lookups; each lookup in the feaLib syntax,
+    // then its hb-shape outputs, each glyph with the start of its cluster
+    // (hb-shape --no-glyph-names --cluster-level=1 --features=-kern,+<feature of the lookups> LookupFlags.ttf -u <code points>)
+    const { a: glyphA, b: glyphB, c: glyphC, acute } = glyphIndexes;
+
+    function createMultipleFont(lookups) {
+        return createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', lookups.map((lookup, index) => index), lookups) });
+    }
+
+    // sub a b by a_b;
+    const abLigatureLookup = {
+        lookupType: 4,
+        lookupFlag: 0,
+        subtables: [{ substFormat: 1, coverage: { format: 1, glyphs: [glyphA] }, ligatureSets: [[{ ligGlyph: glyphIndexes.a_b, components: [glyphB] }]] }]
+    };
+
+    // the name of each glyph, with the range of its characters
+    const shapeClusters = (font, text) => font.stringToGlyphClusters(text).map(cluster => [cluster.glyph.name, cluster.start, cluster.end]);
+
+    it('applies the following lookups to each glyph of a multiple substitution', function() {
+        // ss30: sub c by a acute; then sub acute by acute.alt; sub b by b.alt;
+        // -u 0063,0062: [1=0+500|11=0+0|8=1+500]
+        const font = createMultipleFont([multipleCLookup, subAcuteBLookup]);
+        assert.deepEqual(shapeClusters(font, 'cb'), [['a', 0, 1], ['acute.alt', 0, 1], ['b.alt', 1, 2]]);
+    });
+
+    it('forms a ligature of the glyphs of a multiple substitution, in the cluster of its character', function() {
+        // ss25: sub c by a b; then sub a b by a_b;
+        // -u 0063,0062: [9=0+500|2=1+500]
+        const font = createMultipleFont([createMultipleLookup([glyphC], [[glyphA, glyphB]]), abLigatureLookup]);
+        assert.deepEqual(shapeClusters(font, 'cb'), [['a_b', 0, 1], ['b', 1, 2]]);
+    });
+
+    it('merges the whole cluster of a multiple substitution with the cluster of a ligature of one of its glyphs', function() {
+        // ss26: sub c by b a; then sub a b by a_b;
+        // -u 0063,0062: [2=0+500|9=0+500]
+        const font = createMultipleFont([createMultipleLookup([glyphC], [[glyphB, glyphA]]), abLigatureLookup]);
+        assert.deepEqual(shapeClusters(font, 'cb'), [['b', 0, 2], ['a_b', 0, 2]]);
+    });
+
+    it('gives each glyph of a multiple substitution of a ligature the characters of the ligature', function() {
+        // ss27: sub a b by a_b; then sub a_b by a.alt b.alt;
+        // -u 0061,0062,0063: [7=0+500|8=0+500|3=2+500]
+        const font = createMultipleFont([abLigatureLookup, createMultipleLookup([glyphIndexes.a_b], [[glyphIndexes['a.alt'], glyphIndexes['b.alt']]])]);
+        assert.deepEqual(shapeClusters(font, 'abc'), [['a.alt', 0, 2], ['b.alt', 0, 2], ['c', 2, 3]]);
+    });
+
+    it('does not apply a multiple substitution to the glyphs it gives', function() {
+        // ss28: sub c by a c;
+        // -u 0063,0063: [1=0+500|3=0+500|1=1+500|3=1+500]
+        const font = createMultipleFont([createMultipleLookup([glyphC], [[glyphA, glyphC]])]);
+        assert.deepEqual(shapeClusters(font, 'cc'), [['a', 0, 1], ['c', 0, 1], ['a', 1, 2], ['c', 1, 2]]);
+    });
+
+    it('applies the lookup that deletes a glyph to the glyph after it, which takes the characters of the deleted one', function() {
+        // calt: sub c by NULL; sub b by a b; (a lookup of type 2)
+        // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsDeletionThenMultiple.ttf -u 0063,0062
+        // [1=0+500|2=0+500]
+        const font = createMultipleFont([createMultipleLookup([glyphB, glyphC], [[glyphA, glyphB], []])]);
+        assert.deepEqual(shapeClusters(font, 'cb'), [['a', 0, 2], ['b', 0, 2]]);
+    });
+
+    // ss32: sub c by a acute; sub acute by acute.alt; (a lookup of type 2, the sequence of acute of one glyph)
+    const multipleThenAcuteLookup = createMultipleLookup([glyphC, acute], [[glyphA, acute], [glyphIndexes['acute.alt']]]);
+
+    it('goes on after the glyphs of a multiple substitution, which its lookup does not substitute again', function() {
+        // ss32: -u 0063,0062: [1=0+500|5=0+0|2=1+500], -u 0063,0301: [1=0+500|5=0+0|11=1+0], the acute of the text only
+        const font = createMultipleFont([multipleThenAcuteLookup]);
+        assert.deepEqual(shapeClusters(font, 'cb'), [['a', 0, 1], ['acute', 0, 1], ['b', 1, 2]]);
+        assert.deepEqual(shapeClusters(font, 'c\u{301}'), [['a', 0, 1], ['acute', 0, 1], ['acute.alt', 1, 2]]);
+    });
+
+    it('goes on after the glyphs of a nested multiple substitution, which its contextual lookup does not substitute again', function() {
+        // ss33: sub [c acute]' lookup MULTIPLE_C_THEN_ACUTE; (the lookup of ss32)
+        // -u 0063,0062: [1=0+500|5=0+0|2=1+500], -u 0063,0301: [1=0+500|5=0+0|11=1+0]
+        const contextLookup = {
+            lookupType: 5,
+            lookupFlag: 0,
+            subtables: [{ substFormat: 3, coverages: [createCoverage([glyphC, acute])], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] }]
+        };
+        const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [1], [multipleThenAcuteLookup, contextLookup]) });
+        assert.deepEqual(shapeClusters(font, 'cb'), [['a', 0, 1], ['acute', 0, 1], ['b', 1, 2]]);
+        assert.deepEqual(shapeClusters(font, 'c\u{301}'), [['a', 0, 1], ['acute', 0, 1], ['acute.alt', 1, 2]]);
+    });
+
+    it('goes on after a nested multiple substitution of the last input glyph, whose glyphs match the rule again', function() {
+        // ss34: sub a' b' lookup MULTIPLE_B_A_B; (sub b by a b;)
+        // -u 0061,0062: [1=0+500|1=1+500|2=1+500], -u 0061,0062,0062: [1=0+500|1=1+500|2=1+500|2=2+500]
+        const contextLookup = {
+            lookupType: 5,
+            lookupFlag: 0,
+            subtables: [{ substFormat: 3, coverages: createCoverages([glyphA, glyphB]), lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 0 }] }]
+        };
+        const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [1], [createMultipleLookup([glyphB], [[glyphA, glyphB]]), contextLookup]) });
+        assert.deepEqual(shapeClusters(font, 'ab'), [['a', 0, 1], ['a', 1, 2], ['b', 1, 2]]);
+        assert.deepEqual(shapeClusters(font, 'abb'), [['a', 0, 1], ['a', 1, 2], ['b', 1, 2], ['b', 2, 3]]);
+    });
+
+    it('does not apply a later rule of the lookup to the glyphs of a nested multiple substitution of the input', function() {
+        // ss35: sub a' c' lookup MULTIPLE_C_B_A; sub a' lookup SUB_A; (sub c by b a;), feaLib: ContextSubst format 1
+        // -u 0061,0063: [1=0+500|2=1+500|1=1+500], -u 0061,0063,0061: [1=0+500|2=1+500|1=1+500|7=2+500]
+        const contextLookup = {
+            lookupType: 5,
+            lookupFlag: 0,
+            subtables: [{
+                substFormat: 1,
+                coverage: createCoverage([glyphA]),
+                ruleSets: [[
+                    { input: [glyphC], lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 0 }] },
+                    { input: [], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 1 }] }
+                ]]
+            }]
+        };
+        const lookups = [createMultipleLookup([glyphC], [[glyphB, glyphA]]), createSingleLookup([glyphA], [glyphIndexes['a.alt']]), contextLookup];
+        const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [2], lookups) });
+        assert.deepEqual(shapeClusters(font, 'ac'), [['a', 0, 1], ['b', 1, 2], ['a', 1, 2]]);
+        assert.deepEqual(shapeClusters(font, 'aca'), [['a', 0, 1], ['b', 1, 2], ['a', 1, 2], ['a.alt', 2, 3]]);
+    });
+
+    it('merges the whole clusters of the components of a ligature, with the glyphs they share them with', function() {
+        // ss31: lookupflag IgnoreMarks; sub a b by a_b; then sub c a_b by a_b_c; the acute that the first ligature skipped
+        // is in the cluster of a_b: -u 0063,0061,0301,0062: [10=0+500|5=0+0]
+        const ignoreMarksLigatureLookup = Object.assign({}, abLigatureLookup, { lookupFlag: 0x0008 });
+        const cLigatureLookup = {
+            lookupType: 4,
+            lookupFlag: 0,
+            subtables: [{ substFormat: 1, coverage: { format: 1, glyphs: [glyphC] }, ligatureSets: [[{ ligGlyph: glyphIndexes.a_b_c, components: [glyphIndexes.a_b] }]] }]
+        };
+        const font = createMultipleFont([ignoreMarksLigatureLookup, cLigatureLookup]);
+        assert.deepEqual(shapeClusters(font, 'ca\u{301}b'), [['a_b_c', 0, 4], ['acute', 0, 4]]);
+    });
 });

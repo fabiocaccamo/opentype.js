@@ -2,21 +2,7 @@
  * Apply Arabic required ligatures feature to a range of tokens
  */
 
-import { ContextParams } from '../../tokenizer.mjs';
-import applySubstitution from '../applySubstitution.mjs';
-
-// @TODO: use commonFeatureUtils.js for reduction of code duplication
-// once #564 has been merged.
-
-/**
- * Update context params
- * @param {any} tokens a list of tokens
- * @param {number} index current item index
- */
-function getContextParams(tokens, index) {
-    const context = tokens.map(token => token.activeState.value);
-    return new ContextParams(context, index || 0);
-}
+import { applyFeaturesToTokens } from '../applySubstitution.mjs';
 
 /**
  * Apply Arabic required ligatures to a context range: the glyphs deleted by a ligature
@@ -24,24 +10,7 @@ function getContextParams(tokens, index) {
  * @param {ContextRange} range a range of tokens
  */
 function arabicRequiredLigatures(range) {
-    const script = 'arab';
-    const rangeTokens = this.tokenizer.getRangeTokens(range);
-    let tokens = rangeTokens.filter(token => !token.state.deleted);
-    let contextParams = getContextParams(tokens);
-    for (let index = 0; index < contextParams.context.length; index++) {
-        contextParams.setCurrentIndex(index);
-        let substitutions = this.query.lookupFeature({
-            tag: 'rlig', script, contextParams
-        });
-        if (substitutions.length) {
-            for(let i = 0; i < substitutions.length; i++) {
-                const action = substitutions[i];
-                applySubstitution(action, tokens, index);
-            }
-            tokens = rangeTokens.filter(token => !token.state.deleted);
-            contextParams = getContextParams(tokens);
-        }
-    }
+    applyFeaturesToTokens(this.query, ['rlig'], 'arab', this.tokenizer.getRangeTokens(range));
 }
 
 export default arabicRequiredLigatures;

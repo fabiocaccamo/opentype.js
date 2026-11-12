@@ -13,6 +13,10 @@ describe('tokenizer.mjs', function() {
             assert.equal(tokens[0].char, 'A');
             assert.equal(tokens[1].char, 'B');
         });
+        it('gives each token the UTF-16 offset of its character, the start of its cluster', function() {
+            const tokens = tokenizer.tokenize('A\u{1F600}B');
+            assert.deepStrictEqual(tokens.map(token => [token.charOffset, token.cluster]), [[0, 0], [1, 1], [3, 3]]);
+        });
         describe('tokenizer events', function () {
             it('should dispatch events start, next, newToken and end', function() {
                 let start = false;

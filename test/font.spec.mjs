@@ -801,10 +801,12 @@ describe('font.mjs', function() {
                 //   lookup KERN_IGNORE_MARKS { lookupflag IgnoreMarks; pos a b -50; pos a acute -40; pos acute b -30;
                 //       pos b reh -60; pos reh b -70; pos reh alef <-100 0 -100 0>; pos dal.alt waw <-40 0 -40 0>;
                 //       pos waw dal.alt <-30 0 -30 0>; pos a_b c -25; }
-                //   lookup KERN_NO_FLAG { pos a acute -20; }
+                //   lookup KERN_NO_FLAG { pos a acute -20; pos lam_alef fatha <-40 0 -40 0>; pos lam_alef waw <-100 0 -100 0>;
+                //       pos waw lam_alef <-50 0 -50 0>; }
                 // hb-shape --no-glyph-names --cluster-level=1 LookupFlags.ttf -u <code points>
-                const { a: glyphA, b: glyphB, c: glyphC, acute, alef, reh, fatha, dal, waw } = glyphIndexes;
+                const { a: glyphA, b: glyphB, c: glyphC, acute, alef, reh, fatha, dal, waw, lam } = glyphIndexes;
                 const dalAlternate = glyphIndexes['dal.alt'];
+                const lamAlef = glyphIndexes.lam_alef;
                 // gsub: the GSUB table of the font, if any
                 function createFlagsKerningFont(scriptTag, gsub) {
                     const pairSubtable = (leftIndex, rightIndex, value1) => ({
@@ -830,7 +832,16 @@ describe('font.mjs', function() {
                                 pairSubtable(glyphIndexes.a_b, glyphC, { xAdvance: -25 })
                             ]
                         },
-                        { lookupType: 2, lookupFlag: 0, subtables: [pairSubtable(glyphA, acute, { xAdvance: -20 })] }
+                        {
+                            lookupType: 2,
+                            lookupFlag: 0,
+                            subtables: [
+                                pairSubtable(glyphA, acute, { xAdvance: -20 }),
+                                pairSubtable(lamAlef, fatha, { xPlacement: -40, xAdvance: -40 }),
+                                pairSubtable(lamAlef, waw, { xPlacement: -100, xAdvance: -100 }),
+                                pairSubtable(waw, lamAlef, { xPlacement: -50, xAdvance: -50 })
+                            ]
+                        }
                     ];
                     return createLookupFlagsFont({ gsub, gpos: createLayoutTable(scriptTag, 'kern', [0, 1], lookups) });
                 }
@@ -932,6 +943,25 @@ describe('font.mjs', function() {
                     // dal, waw: -u 062F,0648: [16=1+500|14=0+0|17=0@-40,0+460], the dal.alt waw -40 across the fatha
                     assert.equal(flagsFont.getAdvanceWidth('\u{62F}\u{648}', 1000), 960);
                 });
+
+                it('kerns a right-to-left ligature and the mark in its cluster in the order of the text', function() {
+                    // rlig: lookupflag IgnoreMarks; sub lam alef by lam_alef; merges the fatha between lam and alef into the
+                    // cluster of the ligature, the fatha comes after the ligature in the order of the text
+                    const ligatureLookup = {
+                        lookupType: 4,
+                        lookupFlag: 0x0008,
+                        subtables: [{ substFormat: 1, coverage: { format: 1, glyphs: [lam] }, ligatureSets: [[{ ligGlyph: lamAlef, components: [alef] }]] }]
+                    };
+                    const flagsFont = createFlagsKerningFont('arab', createLayoutTable('arab', 'rlig', [0], [ligatureLookup]));
+                    // lam, fatha, alef, waw: -u 0644,064E,0627,0648: [16=3+500|14=0+0|19=0@-40,0+460], the lam_alef fatha -40,
+                    // not the lam_alef waw -100 across the fatha: waw at 0, fatha at 500, lam_alef at 460
+                    assert.deepStrictEqual(getOrigins(flagsFont, '\u{644}\u{64E}\u{627}\u{648}'), [0, 500, 460]);
+                    assert.equal(flagsFont.getAdvanceWidth('\u{644}\u{64E}\u{627}\u{648}', 1000), 960);
+                    // waw, lam, fatha, alef: -u 0648,0644,064E,0627: [14=1+0|19=1@-40,0+460|16=0@-50,0+450], the waw lam_alef -50
+                    // and the lam_alef fatha -40: fatha at 0, lam_alef at -40, waw at 410
+                    assert.deepStrictEqual(getOrigins(flagsFont, '\u{648}\u{644}\u{64E}\u{627}'), [0, -40, 410]);
+                    assert.equal(flagsFont.getAdvanceWidth('\u{648}\u{644}\u{64E}\u{627}', 1000), 910);
+                });
             });
 
             itFailsUntilFixed('adds the x advance of a right-to-left GPOS pair to the first glyph of the text',
@@ -999,6 +1029,11 @@ describe('font.mjs', function() {
             assert.deepStrictEqual(clusters.map(({ glyph, start, end }) => [glyph.index, start, end]), [[2, 0, 1], [13, 1, 2]]);
         });
 
+        it('gives no glyph and no cluster for an empty text', function() {
+            assert.deepStrictEqual(lookupFlagsFont.stringToGlyphIndexes(''), []);
+            assert.deepStrictEqual(lookupFlagsFont.stringToGlyphClusters(''), []);
+        });
+
         it('applies the kern lookups with their lookupFlag, like HarfBuzz', function() {
             // -u 0061,0301,0062: [1=0+430|5=1+0|2=2+500]
             assert.equal(lookupFlagsFont.getAdvanceWidth('a\u{301}b', 1000), 930);
@@ -1014,24 +1049,60 @@ describe('font.mjs', function() {
             assert.equal(lowMemoryFont.getAdvanceWidth('AV', 1000), 900);
         });
 
-        itFailsUntilFixed('keeps the other glyphs of a multiple substitution when a contextual lookup substitutes the first one',
-            'chainingSubstitutionFormat3 (src/features/applySubstitution.mjs): the substitute of the first glyph of the glyphs ' +
-            'of a multiple substitution replaces all of them: c gives a acute, then a.alt without the acute',
-            function() {
-                // ss20: sub c by a acute; then sub a' lookup SUB_A;
-                // --features=-kern,+ss20 -u 0063,0062: [7=0+500|5=0+0|2=1+500]
-                assert.deepStrictEqual(lookupFlagsFont.stringToGlyphIndexes('cb', { features: { ss20: true } }), [7, 5, 2]);
-            });
+        it('keeps the other glyphs of a multiple substitution when a contextual lookup substitutes the first one', function() {
+            // ss20: sub c by a acute; then sub a' lookup SUB_A;
+            // --features=-kern,+ss20 -u 0063,0062: [7=0+500|5=0+0|2=1+500]
+            assert.deepStrictEqual(lookupFlagsFont.stringToGlyphIndexes('cb', { features: { ss20: true } }), [7, 5, 2]);
+        });
 
-        itFailsUntilFixed('forms a ligature at the first glyph of a multiple substitution',
-            'ligatureSubstitutionFormat1 (src/features/featureQuery.mjs): the coverage and the components are matched on the ' +
-            'token of the multiple substitution, the array of its glyphs a acute, not on its glyphs (the same root as the known ' +
-            'failure above): c gives a acute b, no a_b',
-            function() {
-                // ss22: sub c by a acute; then lookupflag IgnoreMarks; sub a b by a_b;
-                // --features=-kern,+ss22 -u 0063,0062: [9=0+500|5=0+0]
-                assert.deepStrictEqual(lookupFlagsFont.stringToGlyphIndexes('cb', { features: { ss22: true } }), [9, 5]);
-            });
+        it('forms a ligature at the first glyph of a multiple substitution', function() {
+            // ss22: sub c by a acute; then lookupflag IgnoreMarks; sub a b by a_b;
+            // --features=-kern,+ss22 -u 0063,0062: [9=0+500|5=0+0]
+            assert.deepStrictEqual(lookupFlagsFont.stringToGlyphIndexes('cb', { features: { ss22: true } }), [9, 5]);
+        });
+
+        it('applies the following lookups and lookup records to each glyph of a multiple substitution, like HarfBuzz', function() {
+            // each glyph with the start of its cluster (of hb-shape) and its end, the start of the next cluster of the text
+            const shapeClusters = (text, featureTag) => lookupFlagsFont.stringToGlyphClusters(text, { features: { [featureTag]: true } })
+                .map(({ glyph, start, end }) => [glyph.index, start, end]);
+            // ss23: sub c' lookup MULTIPLE_C b' lookup SUB_ACUTE_B; (the second record at the acute of the glyphs of c)
+            // --features=-kern,+ss23 -u 0063,0062: [1=0+500|11=0+0|2=1+500]
+            assert.deepStrictEqual(shapeClusters('cb', 'ss23'), [[1, 0, 1], [11, 0, 1], [2, 1, 2]]);
+            // ss24: lookupflag IgnoreMarks; sub c' lookup MULTIPLE_C b' lookup SUB_ACUTE_B c;
+            // --features=-kern,+ss24 -u 0063,0062,0063: [1=0+500|11=0+0|2=1+500|3=2+500]
+            assert.deepStrictEqual(shapeClusters('cbc', 'ss24'), [[1, 0, 1], [11, 0, 1], [2, 1, 2], [3, 2, 3]]);
+            // ss25: sub c by a b; then sub a b by a_b;
+            // --features=-kern,+ss25 -u 0063,0062: [9=0+500|2=1+500]
+            assert.deepStrictEqual(shapeClusters('cb', 'ss25'), [[9, 0, 1], [2, 1, 2]]);
+            // ss26: sub c by b a; then sub a b by a_b; (the ligature merges the whole cluster of c with the one of b)
+            // --features=-kern,+ss26 -u 0063,0062: [2=0+500|9=0+500]
+            assert.deepStrictEqual(shapeClusters('cb', 'ss26'), [[2, 0, 2], [9, 0, 2]]);
+            // ss27: sub a b by a_b; then sub a_b by a.alt b.alt;
+            // --features=-kern,+ss27 -u 0061,0062,0063: [7=0+500|8=0+500|3=2+500]
+            assert.deepStrictEqual(shapeClusters('abc', 'ss27'), [[7, 0, 2], [8, 0, 2], [3, 2, 3]]);
+            // ss29: sub c' lookup MULTIPLE_C_A_C; (with sub c by a c;)
+            // --features=-kern,+ss29 -u 0063,0063: [1=0+500|3=0+500|1=1+500|3=1+500]
+            assert.deepStrictEqual(shapeClusters('cc', 'ss29'), [[1, 0, 1], [3, 0, 1], [1, 1, 2], [3, 1, 2]]);
+            // ss30: sub c by a acute; then sub acute by acute.alt; sub b by b.alt;
+            // --features=-kern,+ss30 -u 0063,0062: [1=0+500|11=0+0|8=1+500]
+            assert.deepStrictEqual(shapeClusters('cb', 'ss30'), [[1, 0, 1], [11, 0, 1], [8, 1, 2]]);
+            // ss31: lookupflag IgnoreMarks; sub a b by a_b; then sub c a_b by a_b_c; (the acute in the merged cluster)
+            // --features=-kern,+ss31 -u 0063,0061,0301,0062: [10=0+500|5=0+0]
+            assert.deepStrictEqual(shapeClusters('ca\u{301}b', 'ss31'), [[10, 0, 4], [5, 0, 4]]);
+            // ss32: sub c by a acute; sub acute by acute.alt; (the acute of the substitution is not substituted again)
+            // --features=-kern,+ss32 -u 0063,0301: [1=0+500|5=0+0|11=1+0]
+            assert.deepStrictEqual(shapeClusters('c\u{301}', 'ss32'), [[1, 0, 1], [5, 0, 1], [11, 1, 2]]);
+            // ss33: sub [c acute]' lookup MULTIPLE_C_THEN_ACUTE; --features=-kern,+ss33 -u 0063,0301: [1=0+500|5=0+0|11=1+0]
+            assert.deepStrictEqual(shapeClusters('c\u{301}', 'ss33'), [[1, 0, 1], [5, 0, 1], [11, 1, 2]]);
+        });
+
+        it('kerns a right-to-left ligature and the mark in its cluster in the order of the text, like HarfBuzz', function() {
+            // rlig: lookupflag IgnoreMarks; sub lam alef by lam_alef; kern: pos lam_alef fatha <-40 0 -40 0>; pos waw lam_alef
+            // <-50 0 -50 0>; (KERN_NO_FLAG) -u 0644,064E,0627,0648: [16=3+500|14=0+0|19=0@-40,0+460]
+            assert.equal(lookupFlagsFont.getAdvanceWidth('\u{644}\u{64E}\u{627}\u{648}', 1000), 960);
+            // -u 0648,0644,064E,0627: [14=1+0|19=1@-40,0+460|16=0@-50,0+450]
+            assert.equal(lookupFlagsFont.getAdvanceWidth('\u{648}\u{644}\u{64E}\u{627}', 1000), 910);
+        });
 
         itFailsUntilFixed('does not kern the bases of a letter and a combining mark that HarfBuzz composes into the precomposed glyph',
             '_createBidi (src/font.mjs): A and gravecomb are not composed into Agrave (the root cause of the known failure ' +

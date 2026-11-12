@@ -344,7 +344,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
         itFailsUntilFixed(
             'forms the f_f_t ligature across zero width joiners, which are not drawn',
             'Font.prototype._createBidi (src/font.mjs): a default ignorable character without a glyph in the cmap is mapped to .notdef and drawn, ' +
-            'and applyLookup (src/features/latn/latinFeatures.mjs) does not skip it between the components of a ligature',
+            'and applyLookupToTokens (src/features/applySubstitution.mjs) does not skip it between the components of a ligature',
             function() {
                 // f, U+200D (zero width joiner), f, U+200D, t
                 const shape = shapeText(font, 'f\u{200D}f\u{200D}t');
@@ -363,7 +363,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
         itFailsUntilFixed(
             'skips a zero width non-joiner in the lookahead of a chaining rule: an a followed by it and a letter keeps its plain form',
             'Font.prototype._createBidi (src/font.mjs): a default ignorable character without a glyph in the cmap is mapped to .notdef and drawn, ' +
-            'and applyLookup (src/features/latn/latinFeatures.mjs) keeps it in the context of the chaining rules: the lookahead of the first rule ' +
+            'and applyLookupToTokens (src/features/applySubstitution.mjs) keeps it in the context of the chaining rules: the lookahead of the first rule ' +
             'of lookup 5 sees .notdef instead of d, the second rule gives a its end form',
             function() {
                 // a, U+200C (zero width non-joiner), d
