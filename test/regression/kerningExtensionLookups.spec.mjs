@@ -39,7 +39,7 @@
  */
 
 import assert from 'assert';
-import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './helpers.mjs';
+import { loadFont, shapeText, assertShape } from './helpers.mjs';
 
 const ebGaramondFixture = 'EBGaramond-VF-kern-subset.ttf';
 const workSansFixture = 'WorkSans-VF-kern-subset.ttf';
@@ -453,8 +453,7 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
                 advancesWithoutKerning: [516, 648, 266, 648, 622, 648]
             });
             // wght 900: V period -120, period V -105, the deltas of the other pairs cancel their value. HarfBuzz
-            // replaces dollar with dollar.BRACKET.202 (rvrn): the feature is asked for here, the fork does not apply
-            // it by default (see the known failure below)
+            // replaces dollar with dollar.BRACKET.202 (rvrn, on by default)
             assertKernedShape(instances[900], 'yV.V$V', {
                 glyphs: [7, 5, 8, 5, 10, 5],
                 clusters: [0, 1, 2, 3, 4, 5],
@@ -464,7 +463,7 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
                 // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900 --features=-kern WorkSans-VF-kern-subset.ttf -u 0079,0056,002E,0056,0024,0056
                 // [7=0+594|5=1+707|8=2+306|5=3+707|10=4+653|5=5+707]
                 advancesWithoutKerning: [594, 707, 306, 707, 653, 707]
-            }, { features: { rvrn: true } });
+            });
             // P T: a format 1 record of 0 at the default instance, with a delta of -20 at wght 900
             assertKernedShape(instances[900], 'PT', {
                 glyphs: [3, 4],
@@ -478,10 +477,8 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
             });
         });
 
-        itFailsUntilFixed(
+        it(
             'substitutes dollar with dollar.BRACKET.202 at wght 900, like HarfBuzz (required variation alternates, rvrn)',
-            'Font.defaultRenderOptions (src/font.mjs): rvrn is not among the default features, the substitutions of the ' +
-            'GSUB FeatureVariations are applied only with { features: { rvrn: true } }',
             function() {
                 // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900 WorkSans-VF-kern-subset.ttf -u 0041,0024
                 // [1=0+689|10=1+653]
@@ -562,17 +559,13 @@ describe('regression: GPOS kerning in extension lookups (#515, #491)', function(
             assert.deepStrictEqual(shaped.advances, [570, 500]);
         });
 
-        itFailsUntilFixed(
+        it(
             'substitutes dollar with dollar.BRACKET.202 at the wght 900 of the options, on a font left at its default instance (rvrn)',
-            'FeatureQuery.getFeatureVariationSubstitutions (src/features/featureQuery.mjs): chooses the feature ' +
-            'variation record at the variation of the font (getNormalizedCoords() without coordinates), and ' +
-            'Font._createBidi (src/font.mjs) gives the substitutions options.features only, never options.variation, ' +
-            'that forEachGlyph uses for the advances and the kerning',
             function() {
-                // the advances of the fork are the ones of wght 900, its glyph the dollar of wght 400 (9)
                 // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900 WorkSans-VF-kern-subset.ttf -u 0041,0024
                 // [1=0+689|10=1+653]
-                const shaped = shapeText(workSansFont, 'A$', { variation: { wght: 900 }, features: { rvrn: true } });
+                // rvrn is on by default, at the variation of the options
+                const shaped = shapeText(workSansFont, 'A$', { variation: { wght: 900 } });
                 assert.deepStrictEqual(shaped.glyphs, [1, 10]);
             }
         );

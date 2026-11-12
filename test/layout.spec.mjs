@@ -1,6 +1,13 @@
 import assert  from 'assert';
 import { Font, Path, Glyph } from '../src/opentype.mjs';
-import Layout, { getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, getNotIgnoredGlyphPositions } from '../src/layout.mjs';
+import Layout, {
+    getLayoutGdefTable,
+    isGlyphIgnoredByLookup,
+    findNextNotIgnoredGlyphPosition,
+    getNotIgnoredGlyphPositions,
+    getOpenTypeScriptTags,
+    selectScriptTag
+} from '../src/layout.mjs';
 import { glyphIndexes, createLookupFlagsGdef } from './lookup-flags-font.mjs';
 
 describe('layout.mjs', function() {
@@ -152,6 +159,62 @@ describe('layout.mjs', function() {
             assert.notEqual(romanianLangSys, defaultLangSys);
             assert.deepStrictEqual(romanianLangSys.featureIndexes, []);
             assert.deepStrictEqual(font.tables.gsub.scripts[0].script.langSysRecords.map(record => record.tag), ['ROM ', 'TRK ']);
+        });
+
+        it('takes a language tag of three letters as the tag with its trailing space', function() {
+            assert.equal(layout.getLangSysTable('latn', 'TRK'), turkishLangSys);
+            layout.getLangSysTable('latn', 'ROM', true);
+            assert.deepStrictEqual(font.tables.gsub.scripts[0].script.langSysRecords.map(record => record.tag), ['ROM ', 'TRK ']);
+        });
+    });
+
+    describe('getOpenTypeScriptTags', function() {
+        it('gives the ISO 15924 code in lowercase for most scripts', function() {
+            assert.deepStrictEqual(getOpenTypeScriptTags('Latn'), ['latn']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Cyrl'), ['cyrl']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Cham'), ['cham']);
+        });
+
+        it('gives the old tags that are not the ISO 15924 code, like hb_ot_old_tag_from_script of HarfBuzz', function() {
+            // Hiragana shares kana with Katakana, the tags of three letters or fewer end with spaces
+            assert.deepStrictEqual(getOpenTypeScriptTags('Hira'), ['kana']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Kana'), ['kana']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Laoo'), ['lao ']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Yiii'), ['yi  ']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Nkoo'), ['nko ']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Vaii'), ['vai ']);
+        });
+
+        it('gives the third and the second version of the Indic tags before the first one, mym2 before mymr', function() {
+            // hb_ot_all_tags_from_script of HarfBuzz
+            assert.deepStrictEqual(getOpenTypeScriptTags('Deva'), ['dev3', 'dev2', 'deva']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Beng'), ['bng3', 'bng2', 'beng']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Taml'), ['tml3', 'tml2', 'taml']);
+            assert.deepStrictEqual(getOpenTypeScriptTags('Mymr'), ['mym2', 'mymr']);
+        });
+
+        it('gives DFLT for a text of no script', function() {
+            assert.deepStrictEqual(getOpenTypeScriptTags(undefined), ['DFLT']);
+        });
+    });
+
+    describe('selectScriptTag', function() {
+        const langSys = { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [] };
+        const createScripts = tags => tags.map(tag => ({ tag, script: { defaultLangSys: langSys, langSysRecords: [] } }));
+
+        it('selects the first script tag the table has, like hb_ot_layout_table_select_script of HarfBuzz', function() {
+            font.tables.gsub = { version: 1, scripts: createScripts(['DFLT', 'dev2', 'deva']), features: [], lookups: [] };
+            assert.equal(selectScriptTag(layout, ['dev3', 'dev2', 'deva']), 'dev2');
+            font.tables.gsub.scripts = createScripts(['DFLT', 'deva']);
+            assert.equal(selectScriptTag(layout, ['dev3', 'dev2', 'deva']), 'deva');
+        });
+
+        it('selects the first script tag when the table has none of them, which getScriptTable takes to its fallbacks', function() {
+            font.tables.gsub = { version: 1, scripts: createScripts(['DFLT', 'latn']), features: [], lookups: [] };
+            assert.equal(selectScriptTag(layout, ['dev3', 'dev2', 'deva']), 'dev3');
+            assert.equal(layout.getScriptTable(selectScriptTag(layout, ['cyrl'])), font.tables.gsub.scripts[0].script);
+            delete font.tables.gsub;
+            assert.equal(selectScriptTag(layout, ['cyrl']), 'cyrl');
         });
     });
 

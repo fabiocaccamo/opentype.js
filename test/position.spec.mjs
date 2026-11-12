@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import { Font, Glyph, Path, parse } from '../src/opentype.mjs';
 import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
+import { replaceTextGlyphs } from './testutil.mjs';
 
 // a pair adjustment subtable (format 1) kerning leftGlyph + rightGlyph by xAdvance
 function pairPosSubtable(leftGlyph, rightGlyph, xAdvance) {
@@ -128,10 +129,7 @@ describe('position.mjs', function() {
                 extensionLookup([{ lookupType: 2, extension: pairPosSubtable(1, 2, -100) }])
             ], [0]);
             // the font has no cmap: map the text to the kerned glyphs directly
-            font._stringToDirectionalGlyphClusters = () => [
-                { glyph: font.glyphs.get(1), start: 0, end: 1, rightToLeft: false },
-                { glyph: font.glyphs.get(2), start: 1, end: 2, rightToLeft: false }
-            ];
+            replaceTextGlyphs(font, [1, 2]);
             assert.equal(font.getAdvanceWidth('AB', 1000), 900);
             assert.equal(font.getAdvanceWidth('AB', 1000, { kerning: false }), 1000);
         });
@@ -240,10 +238,7 @@ describe('position.mjs', function() {
             assert.equal(font.position.getKerningValue(font.position.getKerningTables('cyrl'), 1, 2), -10);
             font.kerningPairs = { '1,2': -50 };
             assert.equal(font.position.getKerningValue(font.position.getKerningTables('hebr'), 1, 2), -50);
-            font._stringToDirectionalGlyphClusters = () => [
-                { glyph: font.glyphs.get(1), start: 0, end: 1, rightToLeft: false },
-                { glyph: font.glyphs.get(2), start: 1, end: 2, rightToLeft: false }
-            ];
+            replaceTextGlyphs(font, [1, 2]);
             assert.equal(font.getAdvanceWidth('אא', font.unitsPerEm, { script: 'hebr' }), 1000 - 50);
             const hebrewFont = createFontWithScripts(['DFLT', 'hebr', 'latn']);
             assert.equal(hebrewFont.position.getKerningValue(hebrewFont.position.getKerningTables('hebr'), 1, 2), -20);

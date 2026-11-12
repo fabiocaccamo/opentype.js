@@ -45,6 +45,8 @@ opentype.Font.prototype.charToGlyph = function(c) {};
  * Note that there is no strict one-to-one mapping between characters and
  * glyphs, so the list of returned glyphs can be larger or smaller than the
  * length of the given string.
+ * The glyphs are in visual order, like HarfBuzz: the glyphs of an Arabic text in reverse order, the glyphs of a
+ * multiple substitution included (e.g. a letter and the mark that ccmp decomposed it into, the mark first).
  * @param  {string} s
  * @param  {Object=} options
  * @return {opentype.Glyph[]}
@@ -87,11 +89,11 @@ opentype.Font.prototype.glyphIndexToName = function(gid) {};
  * between glyphs.
  * For GPOS kerning, the values of all the lookups of the kern feature of the default language
  * are added up, for the script of the characters the cmap maps to the two glyphs (with the fallbacks
- * of opentype.Position.prototype.getKerningTables). The script of a glyph is the one of its
- * characters: thai, arab, hebr, cyrl or grek for Thai, Arabic, Hebrew, Cyrillic or Greek, latn for
- * the other scripts, none for characters of no script (Common, Inherited or Unknown), and latn for a
- * glyph shared by characters of several scripts, a character of no script counting as latn. The pair
- * takes the first of thai, arab, hebr, cyrl and grek that one of its glyphs has, otherwise latn, or
+ * of opentype.Position.prototype.getKerningTables). The script of a glyph is the Unicode script of its
+ * characters, none for characters of no script (Common, Inherited or Unknown), and Latin for a glyph
+ * shared by characters of several scripts, a character of no script counting as one. The pair takes
+ * the first of Thai, Arabic, Hebrew, Cyrillic and Greek that one of its glyphs has, otherwise its first
+ * script that is not Latin, otherwise Latin, with the OpenType tag of that script (e.g. thai, cham), or
  * DFLT when neither glyph has a script. The pair is the left glyph then the right glyph:
  * for a GPOS pair of right-to-left text, pass the glyphs in the order of the text. A GPOS lookup whose
  * lookupFlag ignores one of the two glyphs adds nothing (see opentype.Position.prototype.getGlyphRunKerningValue).
@@ -105,7 +107,14 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
 
 /**
  * Helper function that invokes the given callback for each glyph in the given text.
- * The callback gets `(glyph, x, y, fontSize, options)`.* @param  {string} text
+ * The callback gets `(glyph, x, y, fontSize, options)`.
+ * The text is shaped by script runs (the Unicode Script of its characters, the characters of no script in
+ * the run around them, not yet a closing bracket in the run of its opening bracket), each run with the GSUB
+ * features and the kerning of its OpenType script, or as one run with the OpenType script options.script (the
+ * tag taken literally, e.g. 'deva' or 'dev2'), and with the language system options.language (an OpenType tag
+ * such as 'TRK ' or 'TRK'). The GPOS mark and mkmk features are not applied yet: a mark is drawn at the pen
+ * position, without the offset of its anchors.
+ * @param  {string} text
  * @param  {number} x - Horizontal position of the beginning of the text.
  * @param  {number} y - Vertical position of the *baseline* of the text.
  * @param  {number} fontSize - Font size in pixels. We scale the glyph units by `1 / unitsPerEm * fontSize`.
@@ -467,6 +476,7 @@ opentype.Layout.prototype.getScriptTable = function(script, create) {};
  * (see getScriptTable for a script the table has not), unless the language system is created.
  * Like HarfBuzz, the default language system is the LangSysRecord tagged dflt if the script has one,
  * otherwise the DefaultLangSys, also with create (the writers add to the language system the readers use).
+ * A language tag of three letters is the tag with its trailing space ('TRK' is 'TRK ').
  * @instance
  * @param {string} script - Use 'DFLT' for default script
  * @param {string} language - Use 'dlft' for default language

@@ -2,6 +2,8 @@
 // ┊ Character Class Assertions ┊ Checks if a char belongs to a certain class ┊
 // ╰─╾──────────────────────────┄─────────────────────────────────────────────╯
 // jscs:disable maximumLineLength
+import { SCRIPT_CODES, SCRIPT_RANGES, SCRIPT_EXTENSION_RANGES } from './unicode-scripts.mjs';
+
 /**
  * Check if a char is Arabic
  * @param {string} c a single char
@@ -11,11 +13,26 @@ export function isArabicChar(c) {
 }
 
 /**
- * Check if a char is an isolated arabic char
- * @param {string} c a single char
+ * The Unicode Joining_Type of a char of the Arabic block (ArabicShaping.txt, Unicode 16.0.0), like the Arabic shaper of
+ * HarfBuzz, which joins the join causing chars (the tatweel and the zero width joiner U+200D) as dual-joining letters:
+ * D for the dual-joining letters and the join causing chars, R for the right-joining letters, T for the transparent
+ * chars (most marks), U for the non-joining chars (e.g. the hamza, the digits, the zero width non-joiner) and the other
+ * chars outside the Arabic block
+ * @param {string} char a single char
+ * @return {string}
  */
-export function isIsolatedArabicChar(char) {
-    return /[\u0630\u0690\u0621\u0631\u0661\u0671\u0622\u0632\u0672\u0692\u06C2\u0623\u0673\u0693\u06C3\u0624\u0694\u06C4\u0625\u0675\u0695\u06C5\u06E5\u0676\u0696\u06C6\u0627\u0677\u0697\u06C7\u0648\u0688\u0698\u06C8\u0689\u0699\u06C9\u068A\u06CA\u066B\u068B\u06CB\u068C\u068D\u06CD\u06FD\u068E\u06EE\u06FE\u062F\u068F\u06CF\u06EF]/.test(char);
+export function getArabicJoiningType(char) {
+    if (/[\u0620\u0626\u0628\u062A-\u062E\u0633-\u0647\u0649\u064A\u066E\u066F\u0678-\u0687\u069A-\u06BF\u06C1\u06C2\u06CC\u06CE\u06D0\u06D1\u06FA-\u06FC\u06FF\u200D]/.test(char)) {
+        return 'D';
+    }
+    if (/[\u0622-\u0625\u0627\u0629\u062F-\u0632\u0648\u0671-\u0673\u0675-\u0677\u0688-\u0699\u06C0\u06C3-\u06CB\u06CD\u06CF\u06D2\u06D3\u06D5\u06EE\u06EF]/.test(char)) {
+        return 'R';
+    }
+    // eslint-disable-next-line no-misleading-character-class
+    if (/[\u0610-\u061A\u061C\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/.test(char)) {
+        return 'T';
+    }
+    return 'U';
 }
 
 /**
@@ -27,39 +44,202 @@ export function isTashkeelArabicChar(char) {
     return /[\u0600-\u0605\u060C-\u060E\u0610-\u061B\u061E\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/.test(char);
 }
 
+// the start code point of each range of code points of one script (see unicode-scripts.mjs), and its script
+const { scriptRangeStarts, scriptRangeCodes } = decodeScriptRanges(SCRIPT_RANGES);
+// the ranges of code points whose Script_Extensions are not their script alone (see unicode-scripts.mjs)
+const { extensionRangeStarts, extensionRangeEnds, extensionRangeScripts } = decodeScriptExtensionRanges(SCRIPT_EXTENSION_RANGES);
+
 /**
- * Check if a char is Thai
- * @param {string} c a single char
+ * Decode the ranges of code points of one script of unicode-scripts.mjs
+ * @param {string} encodedRanges - SCRIPT_RANGES
+ * @return {{scriptRangeStarts: number[], scriptRangeCodes: string[]}} the start code point of each range, in
+ * ascending order, and the ISO 15924 code of its script
  */
-export function isThaiChar(c) {
-    return /[\u0E00-\u0E7F]/.test(c);
+function decodeScriptRanges(encodedRanges) {
+    const starts = [];
+    const codes = [];
+    let start = 0;
+    for (const encodedRange of encodedRanges.split(',')) {
+        const [distance, scriptIndex] = encodedRange.split(':');
+        start += parseInt(distance, 36);
+        starts.push(start);
+        codes.push(SCRIPT_CODES[parseInt(scriptIndex, 36)]);
+    }
+    return { scriptRangeStarts: starts, scriptRangeCodes: codes };
 }
 
 /**
- * The OpenType script tags of the kerning other than latn, in the order a pair of characters of several of
- * these scripts takes them (see getCharKerningScript)
+ * Decode the ranges of code points of the Script_Extensions of unicode-scripts.mjs
+ * @param {string} encodedRanges - SCRIPT_EXTENSION_RANGES
+ * @return {{extensionRangeStarts: number[], extensionRangeEnds: number[], extensionRangeScripts: string[][]}} the first
+ * and the last code point of each range, in ascending order, and the ISO 15924 codes of its scripts
  */
-export const KERNING_SCRIPT_TAGS = ['thai', 'arab', 'hebr', 'cyrl', 'grek'];
-
-// a capture group for each script of KERNING_SCRIPT_TAGS, in the same order, then one for the chars of no script,
-// so that one test gives the script of a char
-const KERNING_SCRIPT_PATTERN = /(\p{Script=Thai})|(\p{Script=Arabic})|(\p{Script=Hebrew})|(\p{Script=Cyrillic})|(\p{Script=Greek})|([\p{Script=Common}\p{Script=Inherited}\p{General_Category=Unassigned}\p{General_Category=Private_Use}\p{General_Category=Surrogate}])/u;
+function decodeScriptExtensionRanges(encodedRanges) {
+    const starts = [];
+    const ends = [];
+    const scripts = [];
+    let start = 0;
+    for (const encodedRange of encodedRanges.split(',')) {
+        const [distance, length, ...scriptIndexes] = encodedRange.split(':').map(value => parseInt(value, 36));
+        start += distance;
+        starts.push(start);
+        ends.push(start + length);
+        scripts.push(scriptIndexes.map(scriptIndex => SCRIPT_CODES[scriptIndex]));
+    }
+    return { extensionRangeStarts: starts, extensionRangeEnds: ends, extensionRangeScripts: scripts };
+}
 
 /**
- * The script of the kerning of a char, from its Unicode Script property: thai, arab, hebr, cyrl or grek for
- * Thai, Arabic, Hebrew, Cyrillic or Greek, undefined for a char of no script: Common (digits, punctuation,
- * symbols), Inherited (combining marks) or Unknown (the unassigned, private use and surrogate code points),
- * latn for the other scripts
- * @param {string} char a single char
- * @return {string|undefined}
+ * The index of the last range that starts at or before a code point
+ * @param {number[]} rangeStarts - the start code point of each range, in ascending order
+ * @param {number} codePoint
+ * @return {number} -1 when every range starts after the code point
  */
-export function getCharKerningScript(char) {
-    const match = KERNING_SCRIPT_PATTERN.exec(char);
-    if (!match) {
-        return 'latn';
+function findRangeIndex(rangeStarts, codePoint) {
+    let low = -1;
+    let high = rangeStarts.length - 1;
+    while (low < high) {
+        const middle = (low + high + 1) >>> 1;
+        if (rangeStarts[middle] <= codePoint) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
     }
-    // the group of the chars of no script comes after the groups of KERNING_SCRIPT_TAGS
-    return KERNING_SCRIPT_TAGS.find((tag, index) => match[index + 1] !== undefined);
+    return low;
+}
+
+/**
+ * The Unicode Script property of a char (Unicode 16.0.0, see unicode-scripts.mjs), as its ISO 15924 code: e.g.
+ * Latn, Cyrl, Arab, Zyyy for Common (digits, punctuation, symbols), Zinh for Inherited (most combining marks),
+ * Zzzz for Unknown (the unassigned, private use and surrogate code points)
+ * @param {string} char - a single char (a code point)
+ * @return {string}
+ */
+export function getCharScript(char) {
+    return scriptRangeCodes[findRangeIndex(scriptRangeStarts, char.codePointAt(0))];
+}
+
+/**
+ * The Unicode Script_Extensions property of a char (Unicode 16.0.0, see unicode-scripts.mjs), the scripts of the text
+ * the char is used with, as their ISO 15924 codes: e.g. Adlm, Arab, Mand... for the Arabic tatweel, Arab and Syrc for
+ * the Arabic harakat, the script of the char alone for most chars (Zyyy for most of the chars of the Common script)
+ * @param {string} char - a single char (a code point)
+ * @return {string[]}
+ */
+export function getCharScriptExtensions(char) {
+    const codePoint = char.codePointAt(0);
+    const index = findRangeIndex(extensionRangeStarts, codePoint);
+    return index >= 0 && codePoint <= extensionRangeEnds[index] ? extensionRangeScripts[index] : [getCharScript(char)];
+}
+
+/**
+ * Check if a char is a variation selector of a variation sequence: a Mongolian free variation selector, one of the
+ * variation selectors 1 to 16 or of the supplement
+ * @param {string|null} char a single char
+ * @return {boolean}
+ */
+export function isVariationSequenceSelector(char) {
+    if (char === null) {
+        return false;
+    }
+    const charCode = char.codePointAt(0);
+    return (
+        // Mongolian Variation Selectors
+        (charCode >= 0x180B && charCode <= 0x180D) ||
+        // Generic Variation Selectors
+        (charCode >= 0xFE00 && charCode <= 0xFE0F) ||
+        // Ideographic Variation Sequences
+        (charCode >= 0xE0100 && charCode <= 0xE01EF)
+    );
+}
+
+// the scripts of the chars that take the script of the text around them: Common, Inherited and Unknown
+const SCRIPTLESS_SCRIPTS = ['Zyyy', 'Zinh', 'Zzzz'];
+
+/**
+ * The script a char gives the text around it: its Unicode Script (see getCharScript), none for the chars of no
+ * script, Common (digits, punctuation, symbols), Inherited (most combining marks) and Unknown, which take the script
+ * of the text around them (see getScriptRuns), and none for a variation selector, which selects a variant of the char
+ * before it (the Mongolian free variation selectors are of the Mongolian script)
+ * @param {string} char - a single char (a code point)
+ * @return {string|undefined} the ISO 15924 code of the script
+ */
+export function getCharTextScript(char) {
+    const script = getCharScript(char);
+    return SCRIPTLESS_SCRIPTS.includes(script) || isVariationSequenceSelector(char) ? undefined : script;
+}
+
+/**
+ * The script of the first char of a script after each char of a text
+ * @param {Array<string|undefined>} scripts - the script of each char of the text (see getCharTextScript)
+ * @return {Array<string|undefined>} undefined after the last char of a script
+ */
+function getNextScripts(scripts) {
+    const nextScripts = new Array(scripts.length);
+    let nextScript;
+    for (let i = scripts.length - 1; i >= 0; i--) {
+        nextScripts[i] = nextScript;
+        if (scripts[i] !== undefined) {
+            nextScript = scripts[i];
+        }
+    }
+    return nextScripts;
+}
+
+/**
+ * Check if a char of no script starts the run of the text after it rather than continuing the run before it, like the
+ * ScriptRunIterator of Chromium: when its Script_Extensions (see getCharScriptExtensions) have the script of the next
+ * char of a script and not the script of the run before it (e.g. a tatweel or an Arabic haraka after a Latin word,
+ * before an Arabic letter)
+ * @param {string} char - a char of no script (see getCharTextScript)
+ * @param {string|undefined} runScript - the script of the run before the char, undefined at the start of the text
+ * @param {string|undefined} nextScript - the script of the first char of a script after the char
+ * @return {boolean}
+ */
+function startsNextScriptRun(char, runScript, nextScript) {
+    if (runScript === undefined || nextScript === undefined) {
+        return false;
+    }
+    const extensions = getCharScriptExtensions(char);
+    return extensions.includes(nextScript) && !extensions.includes(runScript);
+}
+
+/**
+ * Split a text into its script runs, the runs of chars that HarfBuzz shapes with one script: the chars of a run have
+ * the same script (see getCharTextScript), the chars of no script are in the run of the char before them, unless their
+ * Script_Extensions take them to the run after them (see startsNextScriptRun), or at the start of the text in the run
+ * of the first char of a script after them (the script that hb_buffer_guess_segment_properties gives a text), like the
+ * itemization of the browsers. Not yet the paired brackets of the browsers (Unicode Standard Annex #24): a closing
+ * bracket is in the run of the char before it, not in the run of its opening bracket
+ * @param {string[]} chars - the chars of the text, a code point each
+ * @return {Array<{start: number, end: number, script: string|undefined}>} the [start, end) indexes of the chars of
+ * each run in the text, and the ISO 15924 code of its script, undefined for a text of chars of no script only
+ */
+export function getScriptRuns(chars) {
+    const scripts = chars.map(getCharTextScript);
+    const nextScripts = getNextScripts(scripts);
+    const runs = [];
+    let run = { start: 0, end: 0, script: undefined };
+    for (let i = 0; i < chars.length; i++) {
+        let script = scripts[i];
+        if (script === undefined && startsNextScriptRun(chars[i], run.script, nextScripts[i])) {
+            script = nextScripts[i];
+        }
+        if (script !== undefined && script !== run.script) {
+            if (run.script === undefined) {
+                run.script = script;
+            } else {
+                runs.push(run);
+                run = { start: i, end: i, script };
+            }
+        }
+        run.end = i + 1;
+    }
+    if (run.end > run.start) {
+        runs.push(run);
+    }
+    return runs;
 }
 
 /**

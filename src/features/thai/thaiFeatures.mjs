@@ -1,19 +1,19 @@
 /**
- * Apply the enabled GSUB features of the thai script (liga, rlig and ccmp by default) like HarfBuzz does: the lookups
- * of all the features are applied one after the other in lookup list order, each one to the whole thai word, and
- * not feature by feature.
+ * Apply the enabled GSUB features of the thai script (rvrn, ccmp, locl, rlig, rclt, calt, liga and clig by default) like
+ * the Thai shaper of HarfBuzz, which adds no stage of its own: the lookups of rvrn first, then the lookups of all the
+ * other features one after the other in lookup list order, each one to the whole thai script run of text, and not
+ * feature by feature.
  */
 
-import { applyFeaturesToTokens } from '../applySubstitution.mjs';
+import { applyFeatureStagesToTokens } from '../applySubstitution.mjs';
 
 /**
- * Apply the enabled thai features to the thai words
+ * Apply the enabled thai features to a thai script run of the text
+ * @param {Token[]} tokens the tokens of the run
+ * @param {string} script the script tag of the run in the GSUB table
  */
-function thaiFeatures() {
-    const tags = this.featuresTags.thai || [];
-    for (const range of this.tokenizer.getContextRanges('thaiWord')) {
-        applyFeaturesToTokens(this.query, tags, 'thai', this.tokenizer.getRangeTokens(range));
-    }
+function thaiFeatures(tokens, script) {
+    applyFeatureStagesToTokens(this.query, this.featuresTags.thai, script, this.language, tokens);
 }
 
 export default thaiFeatures;

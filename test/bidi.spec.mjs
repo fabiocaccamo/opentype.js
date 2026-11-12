@@ -1,5 +1,6 @@
 import assert from 'assert';
 import Bidi from '../src/bidi.mjs';
+import FeatureQuery from '../src/features/featureQuery.mjs';
 import { parse } from '../src/opentype.mjs';
 import { readFileSync } from 'fs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
@@ -17,8 +18,7 @@ const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
 /**
  * The clusters of a text in visual order, each one with the start and the end of its characters and its glyphs in
- * glyph index order: the order of the glyphs of a cluster of a right-to-left run with a multiple substitution is a
- * known failure (see 'reverses the glyphs of a multiple substitution of a right-to-left run, like HarfBuzz')
+ * visual order
  * @param {opentype.Font} font
  * @param {string} text
  * @returns {Array<[number, number, number[]]>}
@@ -28,7 +28,7 @@ function describeClusters(font, text) {
     for (const { glyph, start, end } of font.stringToGlyphClusters(text)) {
         const lastCluster = clusters[clusters.length - 1];
         if (lastCluster && lastCluster[0] === start) {
-            lastCluster[2] = lastCluster[2].concat(glyph.index).sort((indexA, indexB) => indexA - indexB);
+            lastCluster[2].push(glyph.index);
         } else {
             clusters.push([start, end, [glyph.index]]);
         }
@@ -74,12 +74,11 @@ describe('bidi.mjs', function() {
         bidiFira.applyFeatures(latinFont, latinFeatures);
     });
     describe('arabic contexts', function() {
-        it('should match arabic words in a given text', function() {
-            const tokenizer = bidiScheherazade.tokenizer;
-            tokenizer.tokenize('Hello السلام عليكم');
-            const ranges = tokenizer.getContextRanges('arabicWord');
-            const words = ranges.map(range => tokenizer.rangeToText(range));
-            assert.deepEqual(words, ['السلام', 'عليكم']);
+        it('should match the arabic script runs of a given text', function() {
+            bidiScheherazade.processText('Hello السلام عليكم');
+            const runs = bidiScheherazade.scriptRuns.map(run => [run.scriptTags, run.tokens.map(token => token.char).join('')]);
+            // the space between two arabic words is in their run
+            assert.deepEqual(runs, [[['latn'], 'Hello '], [['arab'], 'السلام عليكم']]);
         });
         it('should match mixed arabic sentence', function() {
             arabicTokenizer.tokenize('The king said: ائتوني به أستخلصه لنفسي');
@@ -97,23 +96,30 @@ describe('bidi.mjs', function() {
     describe('applyFeatures', function () {
         it('should apply arabic presentation forms', function() {
             bidiScheherazade.getTextGlyphs('Hello السلام عليكم');
-            const ranges = bidiScheherazade.tokenizer.getContextRanges('arabicWord');
-            const PeaceTokens = bidiScheherazade.tokenizer.getRangeTokens(ranges[1]);
-            const PeaceForms = PeaceTokens.map(token => {
-                if (token.state.init) return 'init';
-                if (token.state.medi) return 'medi';
-                if (token.state.fina) return 'fina';
-                return null;
-            });
-            assert.deepEqual(PeaceForms, [null, 'init', 'medi', 'medi', 'fina', null].reverse());
+            const arabicRun = bidiScheherazade.scriptRuns.find(run => run.scriptTags.includes('arab'));
+            const forms = arabicRun.tokens.map(token => ['init', 'medi', 'fina'].find(tag => token.state[tag]) || null);
+            // in the order of the text, isol not registered: hb-shape --shapers=ot --cluster-level=1
+            // --features=-rlig,-calt,-liga,-kern,-mark,-mkmk,-isol Scheherazade-Bold.ttf -u 0627,0644,0633,0644,0627,0645,0020,0639,0644,064A,0643,0645
+            // [uni0645.fina=11|uni0643.medi=10|uni064A.medi=9|uni0644.medi=8|uni0639.init=7|space=6|uni0645=5|uni0627.fina=4|uni0644.medi=3|
+            // uni0633.medi=2|uni0644.init=1|uni0627=0]
+            assert.deepEqual(forms, [null, 'init', 'medi', 'medi', 'fina', null, null, 'init', 'medi', 'medi', 'medi', 'fina']);
         });
         it('should apply arabic required letter ligature', function () {
             let glyphIndexes = bidiScheherazade.getTextGlyphs('لا'); // Arabic word 'لا' : 'no'
             assert.deepEqual(glyphIndexes, [1341, 1330]);
         });
         it('should apply arabic required composition ligature', function () {
-            let glyphIndexes = bidiScheherazade.getTextGlyphs('َّ'); // Arabic word 'َّ' : 'Fatha & Shadda'
-            assert.deepEqual(glyphIndexes, [1311]);
+            // beh, fatha, shadda: the marks of the Inherited script take the Arabic script of the beh
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 Scheherazade-Bold.ttf -u 0628,064E,0651
+            // [1311=1@560,-322+0|373=0+1505]
+            let glyphIndexes = bidiScheherazade.getTextGlyphs('\u{628}\u{64E}\u{651}');
+            assert.deepEqual(glyphIndexes, [1311, 373]);
+        });
+        it('does not apply the arabic features to a text of marks of no script, like HarfBuzz', function () {
+            // fatha, shadda: a text of the Inherited script only takes the DFLT script, which falls back to latn
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 Scheherazade-Bold.ttf -u 064E,0651
+            // [1081=0+0|1075=0@30,370+0]; with --script=arab [1311=0+0]
+            assert.deepStrictEqual(bidiScheherazade.getTextGlyphs('\u{64E}\u{651}'), [1081, 1075]);
         });
         it('should apply latin ligature', function () {
             let glyphIndexes = bidiFira.getTextGlyphs('fi'); // fi => ﬁ
@@ -141,8 +147,8 @@ describe('bidi.mjs', function() {
             let lookupFlagsFont;
             let ccmpLigatureFont;
 
-            // the font of test/lookup-flags-font.mjs with the two rlig lookups of LookupFlags.ttf in ccmp, in DFLT where the fork
-            // looks the ccmp of an arabic text up: lookupflag IgnoreMarks; sub lam alef by lam_alef; then
+            // the font of test/lookup-flags-font.mjs with the two rlig lookups of LookupFlags.ttf in ccmp, in DFLT, the script an
+            // arabic text falls back to without arab: lookupflag IgnoreMarks; sub lam alef by lam_alef; then
             // lookupflag IgnoreMarks; sub lam_alef reh' by reh.alt;
             function createCcmpLigatureFont() {
                 const { lam, alef, reh } = glyphIndexes;
@@ -168,13 +174,13 @@ describe('bidi.mjs', function() {
                 return createLookupFlagsFont({ gsub: createLayoutTable('DFLT', 'ccmp', [0, 1], [ligatureLookup, chainingLookup, rehLookup]) });
             }
 
-            // the font of test/lookup-flags-font.mjs with a ligature of two marks in ccmp, in DFLT where the fork looks the
-            // ccmp of an arabic text up: sub fatha fatha by fatha; then in rlig: lookupflag IgnoreMarks; sub lam alef by lam_alef;
+            // the font of test/lookup-flags-font.mjs with a ligature of two marks in ccmp, in DFLT and arab like the language
+            // systems of the generator: sub fatha fatha by fatha; then in rlig: lookupflag IgnoreMarks; sub lam alef by lam_alef;
             function createCcmpBeforeRligFont() {
                 const { lam, alef, fatha } = glyphIndexes;
                 const IGNORE_MARKS = 0x0008;
                 const coverage = glyphIndex => ({ format: 1, glyphs: [glyphIndex] });
-                const defaultLangSys = featureIndex => ({ reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [featureIndex] });
+                const defaultLangSys = featureIndexes => ({ reserved: 0, reqFeatureIndex: 0xffff, featureIndexes });
                 const fathaLigatureLookup = {
                     lookupType: 4,
                     lookupFlag: 0,
@@ -189,8 +195,8 @@ describe('bidi.mjs', function() {
                     gsub: {
                         version: 1,
                         scripts: [
-                            { tag: 'DFLT', script: { defaultLangSys: defaultLangSys(0), langSysRecords: [] } },
-                            { tag: 'arab', script: { defaultLangSys: defaultLangSys(1), langSysRecords: [] } }
+                            { tag: 'DFLT', script: { defaultLangSys: defaultLangSys([0]), langSysRecords: [] } },
+                            { tag: 'arab', script: { defaultLangSys: defaultLangSys([0, 1]), langSysRecords: [] } }
                         ],
                         features: [
                             { tag: 'ccmp', feature: { featureParams: 0, lookupListIndexes: [0] } },
@@ -302,8 +308,8 @@ describe('bidi.mjs', function() {
     });
 
     describe('arabic presentation forms', function() {
-        // the font of test/lookup-flags-font.mjs; ccmp in DFLT, where the fork looks the ccmp of an arabic text up, the other
-        // features in arab. Each glyph sequence of the clusters in glyph index order, see describeClusters
+        // the font of test/lookup-flags-font.mjs; ccmp in DFLT and arab, like the language systems of the generator, the other
+        // features in arab. Each glyph sequence of the clusters in visual order, see describeClusters
         const { lam, alef, reh, dal, fatha } = glyphIndexes;
         const lamAlef = glyphIndexes.lam_alef;
         const rehAlternate = glyphIndexes['reh.alt'];
@@ -322,7 +328,8 @@ describe('bidi.mjs', function() {
                 createMultipleLookup([dal, lam], [[dal, fatha], [lam, fatha]]),
                 createSingleLookup([reh, dal], [rehAlternate, dalAlternate])
             ];
-            return createLookupFlagsFont({ gsub: createScriptsLayoutTable({ DFLT: [['ccmp', ccmpLookupIndexes]], arab: [['fina', [2]]] }, lookups) });
+            const ccmp = ['ccmp', ccmpLookupIndexes];
+            return createLookupFlagsFont({ gsub: createScriptsLayoutTable({ DFLT: [ccmp], arab: [ccmp, ['fina', [2]]] }, lookups) });
         }
 
         // LookupFlagsArabicFormsChaining.ttf: fina sub reh by reh.alt fatha; sub dal by dal.alt; (a lookup of type 2), init
@@ -360,8 +367,21 @@ describe('bidi.mjs', function() {
                 contextLookup,
                 createSingleLookup([fatha, dal], [glyphIndexes['acute.alt'], dalAlternate])
             ];
-            return createLookupFlagsFont({ gsub: createScriptsLayoutTable({ DFLT: [['ccmp', [1]]], arab: [['fina', [2]]] }, lookups) });
+            return createLookupFlagsFont({ gsub: createScriptsLayoutTable({ DFLT: [['ccmp', [1]]], arab: [['ccmp', [1]], ['fina', [2]]] }, lookups) });
         }
+
+        it('applies ccmp to a text of one arabic letter, like HarfBuzz', function() {
+            // lam: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsArabicForms.ttf -u 0644
+            // [14=0+0|18=0+500]: lam fatha
+            assert.deepStrictEqual(describeClusters(createArabicFormsFont(), '\u{644}'), [[0, 1, [fatha, lam]]]);
+        });
+
+        it('does not apply ccmp to an arabic text with ccmp turned off, like HarfBuzz', function() {
+            // lam, reh: hb-shape --no-glyph-names --cluster-level=1 --features=-kern,-ccmp LookupFlagsArabicForms.ttf -u 0644,0631
+            // [20=1+500|18=0+500]: reh.alt, then lam
+            const clusters = createArabicFormsFont().stringToGlyphClusters('\u{644}\u{631}', { features: { ccmp: false } });
+            assert.deepStrictEqual(clusters.map(({ glyph, start }) => [glyph.index, start]), [[rehAlternate, 1], [lam, 0]]);
+        });
 
         it('applies the form of a letter after a letter that ccmp decomposed, like HarfBuzz', function() {
             // lam, reh: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsArabicForms.ttf -u 0644,0631
@@ -437,38 +457,239 @@ describe('bidi.mjs', function() {
             // [11=1+0|18=0+500]: acute.alt, then lam
             const acuteAlternate = glyphIndexes['acute.alt'];
             const lookups = [createMultipleLookup([dal], [[dal, fatha]]), createMultipleLookup([fatha, dal], [[acuteAlternate], []])];
-            const font = createLookupFlagsFont({ gsub: createScriptsLayoutTable({ DFLT: [['ccmp', [0]]], arab: [['fina', [1]]] }, lookups) });
+            const font = createLookupFlagsFont({ gsub: createScriptsLayoutTable({ DFLT: [['ccmp', [0]]], arab: [['ccmp', [0]], ['fina', [1]]] }, lookups) });
             assert.deepStrictEqual(describeClusters(font, '\u{644}\u{62F}'), [[1, 2, [acuteAlternate]], [0, 1, [lam]]]);
         });
 
-        itFailsUntilFixed('goes on after the input of a contextual rule of a form lookup, like HarfBuzz',
-            'arabicPresentationForms (src/features/arab/arabicPresentationForms.mjs): the form lookups apply letter by letter, so the ' +
-            'contextual rule applies again at the letter after its first input glyph, the second one of its input, and at the last medial ' +
-            'lam, which HarfBuzz skips as the input of the rule before it: lam.init at the lams 1 to 4, not at 1 and 3',
+        // LookupFlagsMediContext.ttf: medi sub lam' lookup SUB_LAM lam'; (sub lam by lam.init;)
+        function createMediContextFont() {
+            const contextLookup = {
+                lookupType: 5,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 3, coverages: createCoverages([lam, lam]), lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] }]
+            };
+            const lookups = [createSingleLookup([lam], [glyphIndexes['lam.init']]), contextLookup];
+            return createLookupFlagsFont({ gsub: createScriptsLayoutTable({ arab: [['medi', [1]]] }, lookups) });
+        }
+
+        it('goes on after the input of a contextual rule of a form lookup, like HarfBuzz', function() {
+            // six lams: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsMediContext.ttf -u 0644,0644,0644,0644,0644,0644
+            // [18=5+500|18=4+500|25=3+500|18=2+500|25=1+500|18=0+500]
+            const lamInitial = glyphIndexes['lam.init'];
+            assert.deepStrictEqual(describeClusters(createMediContextFont(), '\u{644}'.repeat(6)),
+                [[5, 6, [lam]], [4, 5, [lam]], [3, 4, [lamInitial]], [2, 3, [lam]], [1, 2, [lamInitial]], [0, 1, [lam]]]);
+        });
+
+        itFailsUntilFixed('matches the later input glyphs of a contextual rule of a form at the letters of that form only, like HarfBuzz',
+            'applyLookupToTokens (src/features/applySubstitution.mjs) checks the form at the first input glyph of a rule only: ' +
+            'FeatureQuery matches the later input glyphs whatever their form, HarfBuzz matches them with the form mask',
             function() {
-                // LookupFlagsMediContext.ttf: medi sub lam' lookup SUB_LAM lam'; (sub lam by lam.init;)
-                // six lams: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsMediContext.ttf -u 0644,0644,0644,0644,0644,0644
-                // [18=5+500|18=4+500|25=3+500|18=2+500|25=1+500|18=0+500]
-                const lamInitial = glyphIndexes['lam.init'];
-                const contextLookup = {
-                    lookupType: 5,
-                    lookupFlag: 0,
-                    subtables: [{ substFormat: 3, coverages: createCoverages([lam, lam]), lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] }]
-                };
-                const lookups = [createSingleLookup([lam], [lamInitial]), contextLookup];
-                const font = createLookupFlagsFont({ gsub: createScriptsLayoutTable({ arab: [['medi', [1]]] }, lookups) });
-                assert.deepStrictEqual(describeClusters(font, '\u{644}'.repeat(6)),
-                    [[5, 6, [lam]], [4, 5, [lam]], [3, 4, [lamInitial]], [2, 3, [lam]], [1, 2, [lamInitial]], [0, 1, [lam]]]);
+                // the second input lam is final: hb-shape --no-glyph-names --cluster-level=1 --features=-kern
+                // LookupFlagsMediContext.ttf -u 0644,0644,0644 [18=2+500|18=1+500|18=0+500]
+                assert.deepStrictEqual(createMediContextFont().stringToGlyphIndexes('\u{644}'.repeat(3)), [lam, lam, lam]);
             });
 
-        itFailsUntilFixed('reverses the glyphs of a multiple substitution of a right-to-left run, like HarfBuzz',
-            'reverseArabicSentences (src/bidi.mjs): it reverses the tokens of an arabic sentence but not the glyphs of the multiple ' +
-            'substitution of a token, so getTextGlyphs and getTextGlyphClusters keep the substitution order, HarfBuzz reverses them ' +
-            'with the run: lam fatha, not fatha lam',
+        itFailsUntilFixed('forms a ligature of a form with components of that form only, like HarfBuzz',
+            'applyLookupToTokens (src/features/applySubstitution.mjs) checks the form at the first glyph of a ligature only: ' +
+            'FeatureQuery matches its components whatever their form, HarfBuzz matches them with the form mask',
             function() {
-                // -u 0644,0631: [20=1+500|14=0+0|18=0+500]
-                assert.deepStrictEqual(createArabicFormsFont().stringToGlyphIndexes('\u{644}\u{631}'), [rehAlternate, fatha, lam]);
+                // LookupFlagsInitLigature.ttf: init sub lam alef by lam_alef;, the alef is final
+                // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsInitLigature.ttf -u 0644,0627
+                // [12=1+500|18=0+500]
+                const ligatureLookup = {
+                    lookupType: 4,
+                    lookupFlag: 0,
+                    subtables: [{ substFormat: 1, coverage: createCoverage([lam]), ligatureSets: [[{ ligGlyph: lamAlef, components: [alef] }]] }]
+                };
+                const font = createLookupFlagsFont({ gsub: createScriptsLayoutTable({ arab: [['init', [0]]] }, [ligatureLookup]) });
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{627}'), [alef, lam]);
             });
+
+        it('applies each lookup of a form at the glyph that the lookup before it substituted, like HarfBuzz', function() {
+            // LookupFlagsFinaChain.ttf: fina sub dal by dal.alt; then sub dal.alt by reh.alt;
+            // lam, dal: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsFinaChain.ttf -u 0644,062F
+            // [20=1+500|18=0+500]
+            const lookups = [createSingleLookup([dal], [dalAlternate]), createSingleLookup([dalAlternate], [rehAlternate])];
+            const font = createLookupFlagsFont({ gsub: createScriptsLayoutTable({ arab: [['fina', [0, 1]]] }, lookups) });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{62F}'), [rehAlternate, lam]);
+            // --features=-kern,-fina -u 0644,062F [15=1+500|18=0+500]
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{62F}', { features: { fina: false } }), [dal, lam]);
+        });
+
+        describe('the order of the form stages', function() {
+            // a font of the generator whose rule of a form (lookup 0, sub <input>' <lookahead> by <substitute>;, a
+            // ChainContextSubst of format 3 and its nested lookup 1) has the substitute of another form as its lookahead
+            // (lookup 2): the rule matches only after the stage of the other form, like the stages of collect_features_arabic
+            // of HarfBuzz (isol, fina, medi, then init), whatever the lookup list order
+            function createFormOrderFont({ ruleTag, inputGlyph, lookaheadGlyph, substitute, formTag, formLookup }) {
+                const chainingLookup = {
+                    lookupType: 6,
+                    lookupFlag: 0,
+                    subtables: [{
+                        substFormat: 3,
+                        backtrackCoverage: [],
+                        inputCoverage: [createCoverage([inputGlyph])],
+                        lookaheadCoverage: [createCoverage([lookaheadGlyph])],
+                        lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 1 }]
+                    }]
+                };
+                const lookups = [chainingLookup, createSingleLookup([inputGlyph], [substitute]), formLookup];
+                return createLookupFlagsFont({ gsub: createScriptsLayoutTable({ arab: [[ruleTag, [0]], [formTag, [2]]] }, lookups) });
+            }
+
+            const lamInitial = glyphIndexes['lam.init'];
+
+            it('applies the final form before the medial form, like HarfBuzz', function() {
+                // LookupFlagsFinaThenMedi.ttf: medi sub lam' dal.alt by lam.init;, fina sub dal by dal.alt;
+                const font = createFormOrderFont({
+                    ruleTag: 'medi',
+                    inputGlyph: lam,
+                    lookaheadGlyph: dalAlternate,
+                    substitute: lamInitial,
+                    formTag: 'fina',
+                    formLookup: createSingleLookup([dal], [dalAlternate])
+                });
+                // lam, lam, dal: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsFinaThenMedi.ttf
+                // -u 0644,0644,062F [17=2+500|25=1+500|18=0+500]
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{644}\u{62F}'), [dalAlternate, lamInitial, lam]);
+                // --features=-kern,-fina -u 0644,0644,062F [15=2+500|18=1+500|18=0+500]
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{644}\u{62F}', { features: { fina: false } }), [dal, lam, lam]);
+            });
+
+            it('applies the medial form before the initial form, like HarfBuzz', function() {
+                // LookupFlagsMediThenInit.ttf: init sub lam' reh.alt by lam.init;, medi sub lam by reh.alt;
+                const font = createFormOrderFont({
+                    ruleTag: 'init',
+                    inputGlyph: lam,
+                    lookaheadGlyph: rehAlternate,
+                    substitute: lamInitial,
+                    formTag: 'medi',
+                    formLookup: createSingleLookup([lam], [rehAlternate])
+                });
+                // lam, lam, dal: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsMediThenInit.ttf
+                // -u 0644,0644,062F [15=2+500|20=1+500|25=0+500]
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{644}\u{62F}'), [dal, rehAlternate, lamInitial]);
+                // --features=-kern,-medi -u 0644,0644,062F [15=2+500|18=1+500|18=0+500]
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{644}\u{62F}', { features: { medi: false } }), [dal, lam, lam]);
+            });
+
+            it('applies the isolated form before the final form, like HarfBuzz', function() {
+                // LookupFlagsIsolThenFina.ttf: fina sub dal' reh.alt by dal.alt;, isol sub dal by reh.alt;
+                const font = createFormOrderFont({
+                    ruleTag: 'fina',
+                    inputGlyph: dal,
+                    lookaheadGlyph: rehAlternate,
+                    substitute: dalAlternate,
+                    formTag: 'isol',
+                    formLookup: createSingleLookup([dal], [rehAlternate])
+                });
+                // lam, dal, dal: the first dal is final, the second one isolated, after a right-joining letter
+                // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsIsolThenFina.ttf -u 0644,062F,062F
+                // [20=2+500|17=1+500|18=0+500]
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{62F}\u{62F}'), [rehAlternate, dalAlternate, lam]);
+                // --features=-kern,-isol -u 0644,062F,062F [15=2+500|15=1+500|18=0+500]
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{62F}\u{62F}', { features: { isol: false } }), [dal, dal, lam]);
+            });
+        });
+
+        describe('a required feature tagged as a form', function() {
+            // the font of test/lookup-flags-font.mjs whose arab has fina and the required feature (ReqFeatureIndex) of a
+            // second feature tagged fina, with the lookups of the lookup list given
+            function createRequiredFinaFont(lookups, finaLookupIndexes, requiredLookupIndexes) {
+                const gsub = createScriptsLayoutTable({ arab: [['fina', finaLookupIndexes]] }, lookups);
+                gsub.features.push({ tag: 'fina', feature: { featureParams: 0, lookupListIndexes: requiredLookupIndexes } });
+                gsub.scripts[0].script.defaultLangSys.reqFeatureIndex = 1;
+                return createLookupFlagsFont({ gsub });
+            }
+
+            const lamInitial = glyphIndexes['lam.init'];
+
+            it('applies its lookups and the ones of the form in lookup list order, its own ones at every glyph, like HarfBuzz', function() {
+                // LookupFlagsRequiredFina.ttf: the required feature sub lam by lam.init; (lookup 0), fina sub lam by dal.alt;
+                // (lookup 1): hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsRequiredFina.ttf
+                // -u 0644,0644 [25=1+500|25=0+500], the same with --features=-kern,-fina
+                const lookups = [createSingleLookup([lam], [lamInitial]), createSingleLookup([lam], [dalAlternate])];
+                const font = createRequiredFinaFont(lookups, [1], [0]);
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{644}'), [lamInitial, lamInitial]);
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{644}', { features: { fina: false } }), [lamInitial, lamInitial]);
+            });
+
+            it('applies a lookup that it shares with the form once, at every glyph, like HarfBuzz', function() {
+                // LookupFlagsRequiredFinaShared.ttf: fina and the required feature sub lam by lam.init; sub lam.init by dal.alt;
+                // (one lookup): hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsRequiredFinaShared.ttf
+                // -u 0644,0644 [25=1+500|25=0+500], the same with --features=-kern,-fina
+                const lookups = [createSingleLookup([lam, lamInitial], [lamInitial, dalAlternate])];
+                const font = createRequiredFinaFont(lookups, [0], [0]);
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{644}'), [lamInitial, lamInitial]);
+                assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{644}', { features: { fina: false } }), [lamInitial, lamInitial]);
+            });
+        });
+
+        it('matches the lookahead of a form rule across the space after an arabic word, like HarfBuzz', function() {
+            // LookupFlagsFinaAcrossSpace.ttf: fina sub dal' lookup DAL_ALT .notdef lam; (sub dal by dal.alt;), the space has no
+            // glyph in the font; feaLib builds a ChainContextSubst of format 1
+            const chainingLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 1,
+                    coverage: createCoverage([dal]),
+                    chainRuleSets: [[{ backtrack: [], input: [], lookahead: [0, lam], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] }]]
+                }]
+            };
+            const lookups = [createSingleLookup([dal], [dalAlternate]), chainingLookup];
+            const font = createLookupFlagsFont({ gsub: createScriptsLayoutTable({ arab: [['fina', [1]]] }, lookups) });
+            // HarfBuzz gives the space the glyph 0, like the cmap of a parsed font, not the null glyph index of a character
+            // missing from the glyphs of a font built in memory
+            font.glyphs.get(0).addUnicode(0x20);
+            // lam, dal, space, lam: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsFinaAcrossSpace.ttf
+            // -u 0644,062F,0020,0644 [18=3+500|0=2+500|17=1+500|18=0+500]
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{62F} \u{644}'), [lam, 0, dalAlternate, lam]);
+            // lam, dal, space, dal: -u 0644,062F,0020,062F [15=3+500|0=2+500|15=1+500|18=0+500]
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{644}\u{62F} \u{62F}'), [dal, 0, dal, lam]);
+        });
+
+        it('applies each form lookup once over the whole arabic run, in one context, whatever the length of the run', function() {
+            // the contexts that the lookups of the forms see: one for each form lookup, init and fina of
+            // createArabicJoiningFont, not one for each letter
+            const font = createArabicJoiningFont();
+            const lookupSubstitution = FeatureQuery.prototype.lookupSubstitution;
+            const getFormContexts = text => {
+                const contexts = new Set();
+                let calls = 0;
+                FeatureQuery.prototype.lookupSubstitution = function(lookupTable, contextParams, tag) {
+                    contexts.add(contextParams);
+                    calls++;
+                    return lookupSubstitution.call(this, lookupTable, contextParams, tag);
+                };
+                try {
+                    font.stringToGlyphIndexes(text);
+                } finally {
+                    FeatureQuery.prototype.lookupSubstitution = lookupSubstitution;
+                }
+                return { contexts: contexts.size, calls };
+            };
+            // lam, dal and a space: the initial lam and the final dal of each word, the lookup tried at the letters of its
+            // form only
+            assert.deepStrictEqual(getFormContexts('\u{644}\u{62F} '.repeat(10)), { contexts: 2, calls: 20 });
+            assert.deepStrictEqual(getFormContexts('\u{644}\u{62F} '.repeat(1000)), { contexts: 2, calls: 2000 });
+        });
+
+        it('reverses the glyphs of a multiple substitution of a right-to-left run, like HarfBuzz', function() {
+            // -u 0644,0631: [20=1+500|14=0+0|18=0+500]
+            assert.deepStrictEqual(createArabicFormsFont().stringToGlyphIndexes('\u{644}\u{631}'), [rehAlternate, fatha, lam]);
+        });
+
+        it('lays out the mark of a letter that ccmp decomposed before the letter, at the pen position of the letter, like HarfBuzz', function() {
+            // the alef with hamza below, decomposed by the ccmp of arab of Scheherazade-Bold.ttf into the alef and the hamza:
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --features=-kern Scheherazade-Bold.ttf -u 0625
+            // [1088=0@13,-92+0|273=0+357], the mark offset by its GPOS mark attachment, not yet applied by the fork
+            const glyphPositions = [];
+            arabicFont.forEachGlyph('\u{625}', 0, 0, arabicFont.unitsPerEm, { kerning: false }, (glyph, x) => {
+                glyphPositions.push([glyph.index, x]);
+            });
+            assert.deepStrictEqual(glyphPositions, [[1088, 0], [273, 0]]);
+        });
 
         // LookupFlagsArabicJoining.ttf: init sub lam by lam.init;, fina sub dal by dal.alt;, no glyph for U+0621 and U+0629
         function createArabicJoiningFont() {
@@ -476,23 +697,29 @@ describe('bidi.mjs', function() {
             return createLookupFlagsFont({ gsub: createScriptsLayoutTable({ arab: [['init', [0]], ['fina', [1]]] }, lookups) });
         }
 
-        itFailsUntilFixed('applies no initial form to a dual-joining letter before a non-joining hamza, like HarfBuzz',
-            'willConnectNext (src/features/arab/arabicPresentationForms.mjs): it checks that the letter joins on its left, not that ' +
-            'the next character joins on its right, so lam takes the initial form before the hamza (U+0621, joining type U)',
-            function() {
-                // lam, hamza: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsArabicJoining.ttf -u 0644,0621
-                // [0=1+500|18=0+500]: lam stays isolated
-                assert.deepStrictEqual(describeClusters(createArabicJoiningFont(), '\u{644}\u{621}'), [[1, 2, [0]], [0, 1, [lam]]]);
-            });
+        it('joins a letter to a zero width joiner, and not to a zero width non-joiner, like HarfBuzz', function() {
+            const font = createArabicJoiningFont();
+            const glyphOfChar = (text, start) => font.stringToGlyphClusters(text).find(cluster => cluster.start === start).glyph.index;
+            // the zero width joiner has no glyph in the font, so HarfBuzz removes it: lam, zero width joiner:
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsArabicJoining.ttf -u 0644,200D [25=0+500]
+            assert.strictEqual(glyphOfChar('\u{644}\u{200D}', 0), glyphIndexes['lam.init']);
+            // zero width joiner, dal: -u 200D,062F [17=0+500]
+            assert.strictEqual(glyphOfChar('\u{200D}\u{62F}', 1), dalAlternate);
+            // lam, zero width non-joiner, dal: -u 0644,200C,062F [15=1+500|18=0+500]
+            assert.deepStrictEqual([glyphOfChar('\u{644}\u{200C}\u{62F}', 0), glyphOfChar('\u{644}\u{200C}\u{62F}', 2)], [lam, dal]);
+        });
 
-        itFailsUntilFixed('applies no final form to a letter after a right-joining teh marbuta, like HarfBuzz',
-            'isIsolatedArabicChar (src/char.mjs): the teh marbuta (U+0629, joining type R) is missing, so willConnectPrev joins ' +
-            'the letter after it, which takes the final form',
-            function() {
-                // teh marbuta, dal: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsArabicJoining.ttf -u 0629,062F
-                // [15=1+500|0=0+500]: dal stays isolated
-                assert.deepStrictEqual(describeClusters(createArabicJoiningFont(), '\u{629}\u{62F}'), [[1, 2, [dal]], [0, 1, [0]]]);
-            });
+        it('applies no initial form to a dual-joining letter before a non-joining hamza, like HarfBuzz', function() {
+            // lam, hamza: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsArabicJoining.ttf -u 0644,0621
+            // [0=1+500|18=0+500]: lam stays isolated
+            assert.deepStrictEqual(describeClusters(createArabicJoiningFont(), '\u{644}\u{621}'), [[1, 2, [0]], [0, 1, [lam]]]);
+        });
+
+        it('applies no final form to a letter after a right-joining teh marbuta, like HarfBuzz', function() {
+            // teh marbuta, dal: hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsArabicJoining.ttf -u 0629,062F
+            // [15=1+500|0=0+500]: dal stays isolated
+            assert.deepStrictEqual(describeClusters(createArabicJoiningFont(), '\u{629}\u{62F}'), [[1, 2, [dal]], [0, 1, [0]]]);
+        });
     });
 
     describe('arabic required ligatures', function() {
@@ -604,6 +831,400 @@ describe('bidi.mjs', function() {
             // [30=0+500|27=1+500]
             assert.deepStrictEqual(shapeClusters(font, '\u{E01}\u{E02}'), [[glyphIndexes.kokai_maiek, 0, 1], [khokhai, 1, 2]]);
         });
+
+        it('turns a thai feature off with the features option, like HarfBuzz', function() {
+            const ligatureLookup = {
+                lookupType: 4,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 1, coverage: createCoverage([kokai]), ligatureSets: [[{ ligGlyph: glyphIndexes.kokai_maiek, components: [maiekAlternate] }]] }]
+            };
+            const font = createThaiFont([['ccmp', [0]], ['rlig', [1]], ['liga', [2]]], [multipleKokaiLookup, subMaiekLookup, ligatureLookup]);
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern,-liga LookupFlagsThaiFeatures.ttf -u 0E01,0E02
+            // [26=0+500|29=0+0|27=1+500]
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{E01}\u{E02}', { features: { liga: false } }), [kokai, maiekAlternate, khokhai]);
+        });
+
+        it('applies ccmp to a text of one thai letter, like HarfBuzz', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsThaiCcmp.ttf -u 0E01: [26=0+500|28=0+0]
+            const font = createThaiFont([['ccmp', [0]]], [multipleKokaiLookup]);
+            assert.deepStrictEqual(shapeClusters(font, '\u{E01}'), [[kokai, 0, 1], [maiek, 0, 1]]);
+            // --features=-kern,-ccmp -u 0E01: [26=0+500]
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{E01}', { features: { ccmp: false } }), [kokai]);
+        });
+    });
+
+    describe('script runs', function() {
+        // TestScriptLanguage.ttf, generated by test/generate-script-language-font.py (see its docstring for its lookups):
+        // ccmp of arab sub beh by beh.ccmp; (not in the language system URD), locl of arab URD sub fourarabic by
+        // fourarabic.urdu;. The references are hb-shape --cluster-level=1 TestScriptLanguage.ttf with the given options;
+        // hb-shape lays a right-to-left buffer out in reverse order, digits included, the fork lays out the digits after
+        // an arabic word from left to right, like the Unicode bidi algorithm
+        let font;
+        let bidi;
+        const glyphNames = (text, options) => font.stringToGlyphs(text, options).map(glyph => glyph.name);
+        const runTexts = () => bidi.scriptRuns.map(run => run.tokens.map(token => token.char).join(''));
+
+        beforeEach(function() {
+            font = loadSync('./test/fonts/TestScriptLanguage.ttf');
+            bidi = new Bidi();
+            bidi.registerModifier('glyphIndex', null, token => font.charToGlyphIndex(token.char));
+        });
+
+        it('gives each glyph the script run of its character, with the OpenType script tags of the run', function() {
+            bidi.applyFeatures(font, font.defaultRenderOptions.features);
+            // the digits and the space before the first character of a script in its run, the space and the acute after
+            // a character of a script in its run
+            const clusters = bidi.getTextGlyphClusters('12 \u{431} a\u{301}\u{E01}');
+            assert.deepStrictEqual(clusters.map(cluster => cluster.scriptRun.scriptTags), [
+                ['cyrl'], ['cyrl'], ['cyrl'], ['cyrl'], ['cyrl'], ['latn'], ['latn'], ['thai']
+            ]);
+            assert.deepStrictEqual(runTexts(), ['12 \u{431} ', 'a\u{301}', '\u{E01}']);
+            // a text of no script
+            assert.deepStrictEqual(bidi.getTextGlyphClusters('12').map(cluster => cluster.scriptRun.scriptTags), [['DFLT'], ['DFLT']]);
+        });
+
+        it('shapes the whole text as one script run with the script tag of the script option, like HarfBuzz', function() {
+            bidi.applyFeatures(font, font.defaultRenderOptions.features, { script: 'grek' });
+            const clusters = bidi.getTextGlyphClusters('a\u{431}');
+            assert.deepStrictEqual(clusters.map(cluster => cluster.scriptRun.scriptTags), [['grek'], ['grek']]);
+            assert.deepStrictEqual(runTexts(), ['a\u{431}']);
+        });
+
+        it('shapes the text of the script option with the shaper of its script tag, like HarfBuzz', function() {
+            // the arabic features, where calt applies in a stage of its own before liga in the language system URD, which
+            // has no rclt: --script=arab --language=ur -u 0033,0034 [four=1+500|three.calt=0+500]
+            assert.deepStrictEqual(glyphNames('34', { script: 'arab', language: 'URD' }), ['three.calt', 'four']);
+            // the latin features: --language=ur -u 0033,0034 [three_four=0+500]
+            assert.deepStrictEqual(glyphNames('34', { language: 'URD' }), ['three_four']);
+            // no arabic forms with latn, the direction of the text still right-to-left: --script=latn --direction=rtl
+            // -u 0633,062F [dal=1+500|seen=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}', { script: 'latn' }), ['dal', 'seen']);
+        });
+
+        it('puts a tatweel between a Latin word and an Arabic letter in the run of the Arabic letter, like Chromium', function() {
+            bidi.applyFeatures(font, font.defaultRenderOptions.features);
+            bidi.getTextGlyphs('a \u{640}\u{633}');
+            assert.deepStrictEqual(runTexts(), ['a ', '\u{640}\u{633}']);
+            // the Arabic run: --script=arab -u 0640,0633 [seen.fina=1+500|tatweel.init=0+500]
+            assert.deepStrictEqual(glyphNames('a \u{640}\u{633}'), ['a', 'space', 'seen.fina', 'tatweel.init']);
+        });
+
+        it('puts an Arabic haraka between a Latin letter and an Arabic letter in the run of the Arabic letter, like Chromium', function() {
+            bidi.applyFeatures(font, font.defaultRenderOptions.features);
+            bidi.getTextGlyphs('a\u{64E}\u{633}\u{62F}');
+            assert.deepStrictEqual(runTexts(), ['a', '\u{64E}\u{633}\u{62F}']);
+            // after a tatweel too, which joins the seen: the Arabic run --script=arab -u 0640,064E,0633
+            // [seen.fina=2+500|.notdef=1+500|tatweel.init=0+500]
+            assert.deepStrictEqual(glyphNames('a\u{640}\u{64E}\u{633}'), ['a', 'seen.fina', '.notdef', 'tatweel.init']);
+        });
+
+        it('applies no arabic form to a character of the script run before the arabic run, like HarfBuzz', function() {
+            // the tatweel after the Syriac alaph is in the Syriac run, shaped with the features of its own script: --script=syrc
+            // --unicodes-after=0633 -u 0710,0640 [tatweel=1+500|.notdef=0+500], not the tatweel.init of the arabic word
+            const tatweelCluster = font.stringToGlyphClusters('\u{710}\u{640}\u{633}').find(cluster => cluster.start === 1);
+            assert.strictEqual(tatweelCluster.glyph.name, 'tatweel');
+        });
+
+        itFailsUntilFixed('joins an arabic letter to the character of no script before it in the script run before, like HarfBuzz',
+            'applyArabicFeatures (src/bidi.mjs): arabicPresentationForms takes the tokens of the script run, without ' +
+            'the joining pre-context of the run before it, so the seen after the tatweel of the Syriac run takes no final form',
+            function() {
+                // the tatweel after the Syriac alaph is in the Syriac run, whose script its Script_Extensions have. With the
+                // pre-context that a browser gives HarfBuzz, the seen joins the tatweel: --script=arab
+                // --unicodes-before=0710,0640 -u 0633 [seen.fina=0+500]
+                const seenCluster = font.stringToGlyphClusters('\u{710}\u{640}\u{633}').find(cluster => cluster.start === 2);
+                assert.strictEqual(seenCluster.glyph.name, 'seen.fina');
+            });
+
+        it('applies ccmp to a text of one arabic letter, with the language system of the language option, like HarfBuzz', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 TestScriptLanguage.ttf -u 0628: [27=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}'), ['beh.ccmp']);
+            // --features=-ccmp -u 0628: [13=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}', { features: { ccmp: false } }), ['beh']);
+            // the language system URD has no ccmp: --language=ur -u 0628: [13=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}', { language: 'URD' }), ['beh']);
+        });
+
+        it('applies rvrn to an arabic text in a stage of its own before ccmp, like the Arabic shaper of HarfBuzz', function() {
+            // the ccmp of teh is before its rvrn in the lookup list: -u 062A [teh.rvrn=0+500]
+            assert.deepStrictEqual(glyphNames('\u{62A}'), ['teh.rvrn']);
+            // --features=-rvrn -u 062A [teh.ccmp=0+500]
+            assert.deepStrictEqual(glyphNames('\u{62A}', { features: { rvrn: false } }), ['teh.ccmp']);
+        });
+
+        it('turns the arabic forms, rlig and the other arabic features on and off with the features option, like HarfBuzz', function() {
+            // -u 0633,062F [dal.fina=1+500|seen.init=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}'), ['dal.fina', 'seen.init']);
+            // --features=-fina -u 0633,062F [dal=1+500|seen.init=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}', { features: { fina: false } }), ['dal', 'seen.init']);
+            // -u 0631 [reh.rlig=0+500], --features=-rlig [reh=0+500]
+            assert.deepStrictEqual(glyphNames('\u{631}'), ['reh.rlig']);
+            assert.deepStrictEqual(glyphNames('\u{631}', { features: { rlig: false } }), ['reh']);
+            // -u 062F [dal=0+500], --features=+ss01 [dal.ss01=0+500]
+            assert.deepStrictEqual(glyphNames('\u{62F}'), ['dal']);
+            assert.deepStrictEqual(glyphNames('\u{62F}', { features: { ss01: true } }), ['dal.ss01']);
+        });
+
+        it('applies the arabic forms and rlig of the language system of the language option, like HarfBuzz', function() {
+            // URD has fina dal.fina.urdu and rlig reh.rlig.urdu, and no init: --language=ur -u 0633,062F
+            // [dal.fina.urdu=1+500|seen=0+500], --language=ur -u 0631 [reh.rlig.urdu=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}', { language: 'URD' }), ['dal.fina.urdu', 'seen']);
+            assert.deepStrictEqual(glyphNames('\u{631}', { language: 'URD' }), ['reh.rlig.urdu']);
+        });
+
+        it('applies isol to an isolated joining letter and no form to a non-joining letter, like the Arabic shaper of HarfBuzz', function() {
+            // isol of arab sub hamza by hamza.isol; sub tehmarbuta by tehmarbuta.isol;, fina of arab sub tehmarbuta.isol by
+            // tehmarbuta.isol.fina;: -u 0629 [tehmarbuta.isol=0+500], --features=-isol -u 0629 [tehmarbuta=0+500]
+            assert.deepStrictEqual(glyphNames('\u{629}'), ['tehmarbuta.isol']);
+            assert.deepStrictEqual(glyphNames('\u{629}', { features: { isol: false } }), ['tehmarbuta']);
+            // the hamza is non-joining: -u 0621 [hamza=0+500], -u 0621,0629 [tehmarbuta.isol=1+500|hamza=0+500]
+            assert.deepStrictEqual(glyphNames('\u{621}'), ['hamza']);
+            assert.deepStrictEqual(glyphNames('\u{621}\u{629}'), ['tehmarbuta.isol', 'hamza']);
+            // a hamza between two joining letters breaks the joining: -u 0633,0621,062F [dal=2+500|hamza=1+500|seen=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{621}\u{62F}'), ['dal', 'hamza', 'seen']);
+            // a final teh marbuta takes no isol: -u 0633,0629 [tehmarbuta=1+500|seen.init=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{629}'), ['tehmarbuta', 'seen.init']);
+        });
+
+        itFailsUntilFixed('applies an arabic form that the features option enables at every glyph, like a user feature of HarfBuzz',
+            'applyArabicFeatures (src/bidi.mjs): updateFeatures merges the features option into the default features, so an enabled ' +
+            'form applies to the letters of its form only, not at every glyph like a global feature that the user of HarfBuzz enables',
+            function() {
+                // --features=+isol -u 0633,0629 [tehmarbuta.isol.fina=1+500|seen.init=0+500]: isol, then fina at the final letter
+                assert.deepStrictEqual(glyphNames('\u{633}\u{629}', { features: { isol: true } }), ['tehmarbuta.isol.fina', 'seen.init']);
+            });
+
+        it('applies the required feature of an arabic language system in the first stage, or in its stage when its tag is enabled, like HarfBuzz', function() {
+            // arab SND: init SEEN_INIT (sub seen by seen.init;), fina DAL_SEEN_FINA, the required feature ss07 SEEN_REQ (sub seen
+            // by seen.req;, after SEEN_INIT in the lookup list): --language=sd -u 0633,062F [dal.fina=1+500|seen.req=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}', { language: 'SND' }), ['dal.fina', 'seen.req']);
+            // ss07 enabled, in the stage of the other features after init: --language=sd --features=+ss07 -u 0633,062F
+            // [dal.fina=1+500|seen.init=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}', { language: 'SND', features: { ss07: true } }), ['dal.fina', 'seen.init']);
+            // all the features off: --language=sd --features=-rvrn,-ccmp,-locl,-isol,-fina,-medi,-init,-rlig,-rclt,-calt,-liga,
+            // -clig,-mset -u 0633,062F [dal=1+500|seen.req=0+500]
+            const allFeaturesOff = Object.fromEntries(font.defaultRenderOptions.features[0].tags.map(tag => [tag, false]));
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}', { language: 'SND', features: allFeaturesOff }), ['dal', 'seen.req']);
+        });
+
+        it('applies a required form of an arabic language system at every glyph in the stage of its form, like HarfBuzz', function() {
+            // arab KUR: init SEEN_INIT, the required feature fina DAL_SEEN_FINA (sub dal by dal.fina; sub seen by seen.fina;),
+            // ccmp sub seen.fina by seen.fina.ccmp;: the required feature at the seen too, after ccmp and before init
+            // --language=ku -u 0633,062F [dal.fina=1+500|seen.fina=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}', { language: 'KUR' }), ['dal.fina', 'seen.fina']);
+            // fina off, the required feature in the first stage, before ccmp: --language=ku --features=-fina -u 0633,062F
+            // [dal.fina=1+500|seen.fina.ccmp=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{62F}', { language: 'KUR', features: { fina: false } }), ['dal.fina', 'seen.fina.ccmp']);
+        });
+
+        it('skips the script runs of a shaper whose features are not registered', function() {
+            // only latn features: the Arabic run keeps the glyphs of the cmap, like hb-shape with all the features off
+            // (--features=-rvrn,-ccmp,...,-mset -u 0633,062F [dal=1+500|seen=0+500]); the Latin run: --script=latn
+            // -u 0061,0062,0020 [a_b=0+500|space=2+500]
+            bidi.applyFeatures(font, [{ script: 'latn', tags: ['liga'] }]);
+            const names = bidi.getTextGlyphs('ab \u{633}\u{62F}').map(index => font.glyphs.get(index).name);
+            assert.deepStrictEqual(names, ['a_b', 'space', 'dal', 'seen']);
+        });
+
+        it('applies the thai features of the language system of the language option, like HarfBuzz', function() {
+            // -u 0E01 [kokai=0+500], --language=th -u 0E01 [kokai.tha=0+500]
+            assert.deepStrictEqual(glyphNames('\u{E01}'), ['kokai']);
+            assert.deepStrictEqual(glyphNames('\u{E01}', { language: 'THA' }), ['kokai.tha']);
+        });
+
+        it('applies calt, liga, clig and rclt to the characters of no script of a thai run, like the Thai shaper of HarfBuzz', function() {
+            // -u 0E01,0035,0036 [kokai=0+500|five.calt=1+500|six=2+500]
+            assert.deepStrictEqual(glyphNames('\u{E01}56'), ['kokai', 'five.calt', 'six']);
+            // -u 0E01,002D,003E [kokai=0+500|arrow=1+500]
+            assert.deepStrictEqual(glyphNames('\u{E01}->'), ['kokai', 'arrow']);
+            // -u 0E01,0037,0038 [kokai=0+500|seven_eight=1+500]
+            assert.deepStrictEqual(glyphNames('\u{E01}78'), ['kokai', 'seven_eight']);
+            // -u 0E01,0039 [kokai=0+500|nine.rclt=1+500]
+            assert.deepStrictEqual(glyphNames('\u{E01}9'), ['kokai', 'nine.rclt']);
+            // the lookups of all the features together in lookup list order, the liga one before the calt one:
+            // -u 0E01,0033,0034 [kokai=0+500|three_four=1+500]
+            assert.deepStrictEqual(glyphNames('\u{E01}34'), ['kokai', 'three_four']);
+        });
+
+        it('applies calt, liga, clig and rclt to the characters of no script of an arabic run, like the Arabic shaper of HarfBuzz', function() {
+            // -u 0628,0035,0036 [six=2+500|five.calt=1+500|beh.ccmp=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}56'), ['beh.ccmp', 'five.calt', 'six']);
+            // -u 0628,002D,003E [arrow=1+500|beh.ccmp=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}->'), ['beh.ccmp', 'arrow']);
+            // -u 0628,0037,0038 [seven_eight=1+500|beh.ccmp=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}78'), ['beh.ccmp', 'seven_eight']);
+            // -u 0628,0039 [nine.rclt=1+500|beh.ccmp=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}9'), ['beh.ccmp', 'nine.rclt']);
+        });
+
+        it('applies calt to an arabic run in a stage of its own before liga unless its language system has rclt, like HarfBuzz', function() {
+            // collect_features_arabic of HarfBuzz 11.3.2: calt, then a pause unless the font has rclt, then liga and clig;
+            // the liga lookup is before the calt one in the lookup list. arab has rclt: -u 0628,0033,0034
+            // [three_four=1+500|beh.ccmp=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}34'), ['beh.ccmp', 'three_four']);
+            // URD has no rclt: --language=ur -u 0628,0033,0034 [four=2+500|three.calt=1+500|beh=0+500]
+            assert.deepStrictEqual(glyphNames('\u{628}34', { language: 'URD' }), ['beh', 'three.calt', 'four']);
+        });
+
+        it('applies the GSUB features of the dev2 script of a Devanagari run, before deva, like HarfBuzz', function() {
+            // calt of dev2 sub ka by ka.dev2;, of deva sub ka by ka.deva;: -u 0915 [ka.dev2=0+500]
+            assert.deepStrictEqual(glyphNames('\u{915}'), ['ka.dev2']);
+        });
+
+        it('takes the OpenType script tag of the script option literally, like the script tag of a language of HarfBuzz', function() {
+            // the OpenType script tag of the private use subtag hbsc: --language=x-hbscdeva -u 0915 [ka.deva=0+500],
+            // --language=x-hbscdev2 -u 0915 [ka.dev2=0+500] (the ISO 15924 code of --script=deva takes dev2: [ka.dev2=0+500])
+            assert.deepStrictEqual(glyphNames('\u{915}', { script: 'deva' }), ['ka.deva']);
+            assert.deepStrictEqual(glyphNames('\u{915}', { script: 'dev2' }), ['ka.dev2']);
+        });
+
+        it('shapes an empty text with the script option as one script run without glyphs', function() {
+            bidi.applyFeatures(font, font.defaultRenderOptions.features, { script: 'arab' });
+            assert.deepStrictEqual(bidi.getTextGlyphs(''), []);
+            assert.deepStrictEqual(runTexts(), ['']);
+            assert.deepStrictEqual(glyphNames('', { script: 'arab' }), []);
+        });
+
+        it('applies locl to an arabic run with ccmp, before the forms, like the Arabic shaper of HarfBuzz', function() {
+            // locl of arab sub lam by lam.locl;, init of arab sub lam by lam.init;: -u 0644,062F [dal.fina=1+500|lam.locl=0+500],
+            // --features=-locl -u 0644,062F [dal.fina=1+500|lam.init=0+500]
+            assert.deepStrictEqual(glyphNames('\u{644}\u{62F}'), ['dal.fina', 'lam.locl']);
+            assert.deepStrictEqual(glyphNames('\u{644}\u{62F}', { features: { locl: false } }), ['dal.fina', 'lam.init']);
+        });
+
+        it('applies ccmp and locl to an arabic run in one stage, like the Arabic shaper of HarfBuzz', function() {
+            // locl of arab sub jeem.ccmp by jeem.locl; before ccmp of arab sub jeem by jeem.ccmp; in the lookup list, so the
+            // locl lookup does not match the glyph of ccmp: -u 062C [jeem.ccmp=0+500], --features=-ccmp -u 062C [jeem=0+500]
+            assert.deepStrictEqual(glyphNames('\u{62C}'), ['jeem.ccmp']);
+            assert.deepStrictEqual(glyphNames('\u{62C}', { features: { ccmp: false } }), ['jeem']);
+        });
+
+        it('joins two arabic letters across a transparent Quranic mark outside the ranges of isArabicChar, like HarfBuzz', function() {
+            // the small high dotless head of khah U+06E1 between seen and dal: -u 0633,06E1,062F
+            // [dal.fina=2+500|dotlessheadofkhah=1+0|seen.init=0+500]
+            assert.deepStrictEqual(glyphNames('\u{633}\u{6E1}\u{62F}'), ['dal.fina', 'dotlessheadofkhah', 'seen.init']);
+        });
+
+        it('applies the form of a right-joining letter outside the ranges of isArabicChar, like HarfBuzz', function() {
+            // fina of arab sub ae by ae.fina;: -u 0633,06D5 [ae.fina=1+500|seen.init=0+500]. The forms of the characters in
+            // the order of the text: the fork does not lay U+06D5 out from right to left yet (see the known failure of
+            // Scheherazade)
+            const clusters = font.stringToGlyphClusters('\u{633}\u{6D5}').sort((clusterA, clusterB) => clusterA.start - clusterB.start);
+            assert.deepStrictEqual(clusters.map(cluster => cluster.glyph.name), ['seen.init', 'ae.fina']);
+        });
+
+        it('applies rlig to an arabic run in a stage of its own before calt and the other features, like HarfBuzz', function() {
+            // liga sub waw.rlig by waw.liga; and calt sub heh.rlig by heh.calt; before rlig sub waw by waw.rlig; sub heh by
+            // heh.rlig; in the lookup list. arab has rclt (calt with the other features): -u 0648 [waw.liga=0+500], -u 0647
+            // [heh.calt=0+500]
+            assert.deepStrictEqual(glyphNames('\u{648}'), ['waw.liga']);
+            assert.deepStrictEqual(glyphNames('\u{647}'), ['heh.calt']);
+            // URD has no rclt (calt in a stage of its own after rlig): --language=ur -u 0648 [waw.liga=0+500], --language=ur
+            // -u 0647 [heh.calt=0+500]
+            assert.deepStrictEqual(glyphNames('\u{648}', { language: 'URD' }), ['waw.liga']);
+            assert.deepStrictEqual(glyphNames('\u{647}', { language: 'URD' }), ['heh.calt']);
+        });
+
+        it('lays out the glyphs of an arabic letter that ccmp decomposed in visual order, like HarfBuzz', function() {
+            // ccmp of arab sub noon by noon.dotless dotabove;: -u 0646 [dotabove=0+0|noon.dotless=0+500], -u 0646,0020,0646
+            // [dotabove=2+0|noon.dotless=2+500|space=1+500|dotabove=0+0|noon.dotless=0+500]: the mark at the pen position
+            // of its base
+            const glyphPositions = text => {
+                const positions = [];
+                font.forEachGlyph(text, 0, 0, font.unitsPerEm, {}, (glyph, x) => {
+                    positions.push([glyph.name, x]);
+                });
+                return positions;
+            };
+            assert.deepStrictEqual(glyphPositions('\u{646}'), [['dotabove', 0], ['noon.dotless', 0]]);
+            assert.deepStrictEqual(glyphPositions('\u{646} \u{646}'), [
+                ['dotabove', 0], ['noon.dotless', 0], ['space', 500], ['dotabove', 1000], ['noon.dotless', 1000]
+            ]);
+        });
+
+        it('applies rvrn to a thai run in a stage of its own before the other features, like the Thai shaper of HarfBuzz', function() {
+            // X_RVRN after X_LIGA in the lookup list: --script=thai -u 0078 [x.rvrn=0+500], --script=thai --features=-rvrn
+            // -u 0078 [x.liga=0+500]
+            assert.deepStrictEqual(glyphNames('x', { script: 'thai' }), ['x.rvrn']);
+            assert.deepStrictEqual(glyphNames('x', { script: 'thai', features: { rvrn: false } }), ['x.liga']);
+        });
+
+        it('applies the locl of the language option to a character of the Arabic script outside the ranges of isArabicChar', function() {
+            // the Extended Arabic-Indic digit four: hb-shape --no-glyph-names --cluster-level=1 --language=ur TestScriptLanguage.ttf
+            // -u 06F4: [28=0+500], without the language [14=0+500]
+            assert.deepStrictEqual(glyphNames('\u{6F4}', { language: 'URD' }), ['fourarabic.urdu']);
+            assert.deepStrictEqual(glyphNames('\u{6F4}'), ['fourarabic']);
+        });
+    });
+
+    describe('the characters of no script of an arabic run', function() {
+        let jomhuriaFont;
+
+        beforeEach(function() {
+            jomhuriaFont = loadSync('./test/fonts/Jomhuria-Regular.ttf');
+        });
+
+        it('applies the calt of arab to the digits after the end of ayah, like the Arabic shaper of HarfBuzz', function() {
+            // the end of ayah (Common) and the Arabic-Indic digits: hb-shape --shapers=ot --no-glyph-names --cluster-level=1
+            // Jomhuria-Regular.ttf -u 06DD,0661,0662 [1764=2@-2055,0+-1|1763=1@-2705,0+0|615=0+4071] (uni0662.small,
+            // uni0661.small, uni06DD), in the reverse order of a right-to-left buffer; --features=-calt gives uni0662 uni0661
+            assert.deepStrictEqual(jomhuriaFont.stringToGlyphIndexes('\u{6DD}\u{661}\u{662}'), [615, 1763, 1764]);
+        });
+    });
+
+    describe('the default arabic features of real fonts', function() {
+        let rvrnFont;
+
+        beforeEach(function() {
+            rvrnFont = loadSync('./test/fonts/TestRVRN-CFF2.otf');
+        });
+
+        it('joins the arabic letters across a transparent Quranic mark outside the ranges of isArabicChar, like HarfBuzz', function() {
+            // the Uthmani meem kasra noon small high dotless head of khah heh damma: hb-shape --shapers=ot --no-glyph-names
+            // Scheherazade-Bold.ttf -u 0645,0650,0646,06E1,0647,064F
+            // [1076=4@181,-89+0|744=4+645|1135=2@186,163+0|893=2+427|1079=0@159,408+0|1046=0+639]
+            assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{645}\u{650}\u{646}\u{6E1}\u{647}\u{64F}'), [1076, 744, 1135, 893, 1079, 1046]);
+        });
+
+        itFailsUntilFixed('applies the nested ligature of a calt rule to an alef madda with a fatha: Scheherazade, like HarfBuzz',
+            'applyNestedLookupRecords (src/features/featureQuery.mjs): a nested lookup of type 4 is skipped (NESTED_SUBSTITUTION_TYPES), ' +
+            'so of the calt rule that adds a madda after the fatha (lookup 48, a multiple substitution) and removes the first one ' +
+            '(lookup 49, a ligature) only the first lookup applies, and the alef has two maddas',
+            function() {
+                // ccmp decomposes U+0622 into alef and madda: hb-shape --shapers=ot --no-glyph-names Scheherazade-Bold.ttf
+                // -u 0622,064E [1086=0@6,337+0|1075=0@32,80+0|273=0+357]
+                assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{622}\u{64E}'), [1086, 1075, 273]);
+            });
+
+        itFailsUntilFixed('lays out an arabic word with the letter ae from right to left: Scheherazade, like HarfBuzz',
+            'arabicSentenceStartCheck (src/features/arab/contextCheck/arabicSentence.mjs): isArabicChar leaves U+06D3-06F9 out, ' +
+            'so the beh before U+06D5 is an arabic sentence of its own and the word is not laid out from right to left',
+            function() {
+                // beh ae reh zain: hb-shape --shapers=ot --no-glyph-names Scheherazade-Bold.ttf -u 0628,06D5,0631,0632
+                // [329=3+638|328=2@-130,0+508|747=1+645|932=0+439]
+                assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{628}\u{6D5}\u{631}\u{632}'), [329, 328, 747, 932]);
+            });
+
+        itFailsUntilFixed('joins the letters of Arabic Supplement and Arabic Extended-A from right to left: Scheherazade, like HarfBuzz',
+            'getArabicJoiningType (src/char.mjs): the joining types cover the Arabic block U+0600-06FF only, so U+0750-077F and ' +
+            'U+08A0-08FF are non-joining and take no form, and arabicSentenceStartCheck (src/features/arab/contextCheck/arabicSentence.mjs): ' +
+            'isArabicChar leaves them out, so they are not laid out from right to left',
+            function() {
+                // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 Scheherazade-Bold.ttf -u 0750,0750,0750
+                // [621=2+1498|787=1+427|944=0+439]; -u 0628,0751,0628 [609=2+1498|788=1+427|932=0+439];
+                // -u 08A0,08A0,08A0 [628=2+1498|794=1+427|951=0+439]
+                const texts = ['\u{750}\u{750}\u{750}', '\u{628}\u{751}\u{628}', '\u{8A0}\u{8A0}\u{8A0}'];
+                assert.deepStrictEqual(texts.map(text => arabicFont.stringToGlyphIndexes(text)),
+                    [[621, 787, 944], [609, 788, 932], [628, 794, 951]]);
+            });
+
+        it('applies the arabic forms of the GSUB feature variations of the variation option: TestRVRN-CFF2, like HarfBuzz', function() {
+            // the second lookup of fina (lookups 4 and 8) and of medi (3 and 7) of the feature variation of opsz 10 sees the
+            // glyph of the first one
+            // teh heh alef maksura: hb-shape --shapers=ot --no-glyph-names --variations=opsz=10 TestRVRN-CFF2.otf
+            // -u 062A,0647,0649 [18=2+1000|17=1+1000|4=0+1000] (alefMaksura-ar.rvrn.fina, heh-ar.rvrn.medi, teh-ar.init)
+            assert.deepStrictEqual(rvrnFont.stringToGlyphIndexes('\u{62A}\u{647}\u{649}', { variation: { opsz: 10 } }), [18, 17, 4]);
+        });
     });
 
     describe('Unicode Variation Sequences (UVSes)', function() {
@@ -649,6 +1270,15 @@ describe('bidi.mjs', function() {
                 assert.deepEqual(glyphIndexes, [352]);
             });
 
+            itFailsUntilFixed('decomposes sara am with ccmp turned off, like the Thai shaper of HarfBuzz',
+                'thaiFeatures (src/features/thai/thaiFeatures.mjs): sara am is decomposed by the ccmp of the font only, not like the ' +
+                'preprocess of the Thai shaper of HarfBuzz (preprocess_text_thai), so uni0E33 stays one glyph: [317, 367]',
+                () => {
+                    // hb-shape --no-glyph-names --cluster-level=1 --features=-ccmp NotoSansThai-Medium-Testing-v1.ttf -u 0E01,0E33
+                    // [317=0+607|389=0@-3,0+0|366=0+415]
+                    assert.deepStrictEqual(thaiFont.stringToGlyphIndexes('\u{E01}\u{E33}', { features: { ccmp: false } }), [317, 389, 366]);
+                });
+
             itFailsUntilFixed('moves the nikhahit of sara am before the tone mark, like HarfBuzz',
                 'tokenizeText (src/bidi.mjs): the nikhahit of sara am is not moved before the tone mark before GSUB, like the ' +
                 'preprocess of the Thai shaper of HarfBuzz does, so ccmp decomposes uni0E33 into uni0E4D uni0E32 after the tone ' +
@@ -660,13 +1290,13 @@ describe('bidi.mjs', function() {
                 });
         });
 
-        describe('thai contexts', function () {
-            it('should match thai words in a given text', () => {
-                const tokenizer = bidiThai.tokenizer;
+        describe('thai script runs', function () {
+            it('should match the thai script runs of a given text', () => {
                 bidiThai.processText('The king said: เป็นคนใจดีสำหรับทุกคน because ความรักคือทุกสิ่ง');
-                const ranges = tokenizer.getContextRanges('thaiWord');
-                const words = ranges.map(range => tokenizer.rangeToText(range));
-                assert.deepEqual(words, ['เป็นคนใจดีสำหรับทุกคน', 'ความรักคือทุกสิ่ง']);
+                const thaiRuns = bidiThai.scriptRuns.filter(run => run.scriptTags.includes('thai'));
+                const texts = thaiRuns.map(run => run.tokens.map(token => token.char).join(''));
+                // the space after a Thai word is in its run
+                assert.deepEqual(texts, ['เป็นคนใจดีสำหรับทุกคน ', 'ความรักคือทุกสิ่ง']);
             });
         });
     });
