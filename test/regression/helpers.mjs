@@ -4,7 +4,7 @@
  * compared with reference values that never come from opentype.js itself.
  *
  * Conventions of the specs of this folder:
- * - References: HarfBuzz for glyphs, clusters and advances (hb-shape 11.3.2), fontTools
+ * - References: HarfBuzz for glyphs, clusters, advances and offsets (hb-shape 11.3.2), fontTools
  *   for the outlines and the metrics of variable fonts (varLib.instancer) and for the tables.
  *   The exception: the fork normalizes the coordinates with the OpenType algorithm in 16.16,
  *   varLib.instancer in floats rounded once to F2Dot14, so where the two locations differ by
@@ -15,6 +15,7 @@
  *   test/fonts/regression/, one command and its output per value:
  *     // hb-shape --no-glyph-names --cluster-level=1 <fixture> -u 0041,0056
  *     // [1=0+552|5=1+672]
+ *   For a font with a Silf table, hb-shape takes --shapers=ot: its first shaper is graphite2.
  * - Clusters: one cluster per character that has a glyph of its own, as stringToGlyphClusters
  *   documents (hb-shape --cluster-level=1: a combining mark keeps its cluster), expressed as
  *   UTF-16 offsets (hb-shape prints code point indexes, the same values without surrogate pairs).
@@ -74,50 +75,43 @@ function getGlyphOrigins(font, text, options) {
 }
 
 /**
- * Shape a text like `hb-shape --no-glyph-names --cluster-level=1` prints it: the glyph ids,
- * the cluster of each glyph and its x advance in font units, kerning included. The glyphs
- * and their clusters come from stringToGlyphClusters, the advances from the text layout of
- * the font (see getGlyphOrigins). The text layout moves the pen only by an advance that is
- * a number other than 0, so a glyph whose advance is not a finite number throws here
- * instead of reading as a glyph without advance.
+ * Shape a text like `hb-shape --no-glyph-names --cluster-level=1` prints it, with font.shape: the
+ * glyph ids, the cluster of each glyph, its x advance and its x and y offsets in font units,
+ * kerning included. The y offset goes up, like the y offsets of hb-shape (the y of forEachGlyph
+ * goes down, see getGlyphOrigins). font.shape gives no advance to a glyph whose advance is not a
+ * number, so a glyph whose advance is not a finite number throws here instead of reading as a
+ * glyph without advance.
  * @param {opentype.Font} font
  * @param {string} text
  * @param {Object} [options] - GlyphRenderOptions: features, kerning, script, language...
- * @returns {{glyphs: number[], clusters: number[], ends: number[], advances: number[]}}
+ * @returns {{glyphs: number[], clusters: number[], ends: number[], advances: number[], offsets: Array<number[]>}}
  * clusters and ends are the UTF-16 offsets of the first character of each glyph and of
- * the character after its last one
+ * the character after its last one, offsets the [x, y] offset of each glyph
  */
 function shapeText(font, text, options) {
-    const glyphClusters = font.stringToGlyphClusters(text, options);
-    const glyphs = glyphClusters.map(cluster => cluster.glyph.index);
-    const { origins, end } = getGlyphOrigins(font, text, options);
-    const laidOutGlyphs = origins.map(origin => origin[0]);
-    if (glyphs.join() !== laidOutGlyphs.join()) {
-        throw new Error(`stringToGlyphClusters gives the glyphs [${glyphs}], forEachGlyph [${laidOutGlyphs}]`);
-    }
+    const glyphPositions = font.shape(text, options);
     const variation = options ? options.variation : undefined;
-    for (const cluster of glyphClusters) {
-        const advanceWidth = cluster.glyph.getAdvanceWidth(font, variation);
+    for (const { glyph } of glyphPositions) {
+        const advanceWidth = glyph.getAdvanceWidth(font, variation);
         if (!Number.isFinite(advanceWidth)) {
-            throw new Error(`glyph ${cluster.glyph.index} has the advance ${advanceWidth}`);
+            throw new Error(`glyph ${glyph.index} has the advance ${advanceWidth}`);
         }
     }
     return {
-        glyphs,
-        clusters: glyphClusters.map(cluster => cluster.start),
-        ends: glyphClusters.map(cluster => cluster.end),
-        advances: origins.map((origin, index) => {
-            const nextOriginX = index + 1 < origins.length ? origins[index + 1][1] : end;
-            return nextOriginX - origin[1];
-        })
+        glyphs: glyphPositions.map(glyphPosition => glyphPosition.glyph.index),
+        clusters: glyphPositions.map(glyphPosition => glyphPosition.start),
+        ends: glyphPositions.map(glyphPosition => glyphPosition.end),
+        advances: glyphPositions.map(glyphPosition => glyphPosition.xAdvance),
+        offsets: glyphPositions.map(glyphPosition => [glyphPosition.xOffset, glyphPosition.yOffset])
     };
 }
 
 /**
  * Assert that a shaped text (see shapeText) is a line of hb-shape: its glyphs, clusters
- * and advances, and its ends when the expected shape has them.
- * @param {{glyphs: number[], clusters: number[], ends: number[], advances: number[]}} actual
- * @param {{glyphs: number[], clusters: number[], advances: number[], ends?: number[]}} expected
+ * and advances, and its ends and its offsets when the expected shape has them (hb-shape
+ * prints the offsets of a glyph, @x,y, when one of them is not 0: [0, 0] for the others).
+ * @param {{glyphs: number[], clusters: number[], ends: number[], advances: number[], offsets: Array<number[]>}} actual
+ * @param {{glyphs: number[], clusters: number[], advances: number[], ends?: number[], offsets?: Array<number[]>}} expected
  * @param {string} [message]
  */
 function assertShape(actual, expected, message = 'shape') {
@@ -126,6 +120,9 @@ function assertShape(actual, expected, message = 'shape') {
     assert.deepStrictEqual(actual.advances, expected.advances, `${message}: advances`);
     if (expected.ends) {
         assert.deepStrictEqual(actual.ends, expected.ends, `${message}: ends`);
+    }
+    if (expected.offsets) {
+        assert.deepStrictEqual(actual.offsets, expected.offsets, `${message}: offsets`);
     }
 }
 

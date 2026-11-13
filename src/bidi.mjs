@@ -389,3 +389,4 @@ Bidi.prototype.getTextGlyphClusters = function (text) {
 };
 
 export default Bidi;
+export { ARABIC_FORM_TAGS, getScriptRunShaper };

@@ -142,6 +142,19 @@ describe('bidi.mjs', function() {
                 [[1, true], [0, true], [2, false], [4, true], [3, true]]);
         });
 
+        itFailsUntilFixed('lays a right-to-left word with a zero width non-joiner out from right to left, like HarfBuzz',
+            'arabicSentenceEndCheck (src/features/arab/contextCheck/arabicSentence.mjs): the zero width non-joiner U+200C, ' +
+            'which is not an Arabic character (isArabicChar), ends the right-to-left sentence, so the two pieces of the word ' +
+            'are each reversed in place and keep their logical order, the zero width non-joiner a left-to-right run between them',
+            function() {
+                // the Persian word mi-khwaham, with a zero width non-joiner after mi (the space glyph 3, a hidden default
+                // ignorable): hb-shape --shapers=ot (the default shaper of this font is graphite2) --no-glyph-names
+                // --cluster-level=1 Scheherazade-Bold.ttf -u 0645,06CC,200C,062E,0648,0627,0647,0645
+                // [724=7+838|1062=6+803|273=5+357|532=4@-130,0+523|956=3+1120|3=2+0|593=1+1140|1046=0+639]
+                const clusters = arabicFont.stringToGlyphClusters('\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}');
+                assert.deepStrictEqual(clusters.map(cluster => cluster.start), [7, 6, 5, 4, 3, 2, 1, 0]);
+            });
+
         describe('a ligature formed across a mark', function() {
             let changaFont;
             let lookupFlagsFont;

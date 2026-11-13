@@ -149,7 +149,8 @@ function assertKeepsAdvanceWidths(loadedFonts, expectedAdvanceWidths) {
 
 // Draw a text like font.getPath() does, at a font size of one em: the pen position of each
 // glyph when its outline is read, and the advance of the text, in font units
-// (forEachGlyph reads the advance of a glyph after the callback that draws it)
+// (Font.shape reads every advance before the first callback: on a font whose outlines were
+// never read the pen positions come from hmtx, a second drawing lays the text out once they are)
 function drawText(font, text) {
     const penPositions = [];
     const textAdvance = font.forEachGlyph(text, 0, 0, font.unitsPerEm, {}, function(glyph, penX, penY, fontSize, options) {
@@ -451,13 +452,13 @@ describe('regression: CFF advance widths after the outlines are read (#417, #440
 
         itKeepsHmtxAdvanceWidths(widthMismatchFixture, hmtxAdvanceWidths);
 
-        it('keeps the pen positions of hmtx when a text is drawn', function() {
-            const drawnText = drawText(font, text);
+        it('keeps the pen positions of hmtx when a text is drawn, and drawn again once its outlines are read', function() {
             // the pen positions of the hb-shape advances above
-            assert.deepStrictEqual(drawnText, {
+            const expectedDrawnText = {
                 penPositions: [0, 600, 1320, 1620, 2433, 2683],
                 textAdvance: 3283
-            });
+            };
+            assert.deepStrictEqual([drawText(font, text), drawText(font, text)], [expectedDrawnText, expectedDrawnText]);
         });
 
         // fontToSfntTable (src/tables/sfnt.mjs) reads the outlines (glyph.getMetrics) before it

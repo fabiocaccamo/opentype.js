@@ -191,6 +191,20 @@ const USE_MARK_FILTERING_SET = 0x0010;
 const MARK_ATTACHMENT_TYPE = 0xFF00;
 const IGNORING_FLAGS = IGNORE_BASE_GLYPHS | IGNORE_LIGATURES | IGNORE_MARKS | USE_MARK_FILTERING_SET | MARK_ATTACHMENT_TYPE;
 
+// the ReqFeatureIndex of a language system without a required feature
+const NO_REQUIRED_FEATURE_INDEX = 0xFFFF;
+
+/**
+ * The index of the required feature (ReqFeatureIndex) of a language system, in the FeatureList of its table.
+ * @param {object|undefined} langSysTable - see Layout.getLangSysTable
+ * @returns {number|undefined} undefined without a language system or a required feature
+ */
+function getRequiredFeatureIndex(langSysTable) {
+    if (langSysTable && langSysTable.reqFeatureIndex !== NO_REQUIRED_FEATURE_INDEX) {
+        return langSysTable.reqFeatureIndex;
+    }
+}
+
 // the glyph classes of the GDEF GlyphClassDef
 const BASE_GLYPH_CLASS = 1;
 const LIGATURE_GLYPH_CLASS = 2;
@@ -467,9 +481,10 @@ Layout.prototype = {
             const allFeatures = this.font.tables[this.tableName].features;
             // The FeatureIndex array of indices is in arbitrary order,
             // even if allFeatures is sorted alphabetically by feature tag.
+            // Like HarfBuzz, a feature index past the FeatureList is ignored.
             for (let i = 0; i < featIndexes.length; i++) {
                 featureRecord = allFeatures[featIndexes[i]];
-                if (featureRecord.tag === feature) {
+                if (featureRecord && featureRecord.tag === feature) {
                     return featureRecord.feature;
                 }
             }
@@ -588,6 +603,8 @@ export {
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
     getNotIgnoredGlyphPositions,
+    IGNORE_MARKS,
+    getRequiredFeatureIndex,
     getOpenTypeScriptTags,
     selectScriptTag
 };

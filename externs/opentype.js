@@ -97,7 +97,8 @@ opentype.Font.prototype.glyphIndexToName = function(gid) {};
  * DFLT when neither glyph has a script. The pair is the left glyph then the right glyph:
  * for a GPOS pair of right-to-left text, pass the glyphs in the order of the text. A GPOS lookup whose
  * lookupFlag ignores one of the two glyphs adds nothing (see opentype.Position.prototype.getGlyphRunKerningValue).
- * The kern table is used when the GPOS table has no kern feature for that script.
+ * The kern table is used when the GPOS table has no kern feature for that script, like HarfBuzz, which kerns a
+ * glyph with the next glyph that is not a GDEF mark there: a pair whose right glyph is a GDEF mark adds nothing.
  * @param  {opentype.Glyph|number} leftGlyph
  * @param  {opentype.Glyph|number} rightGlyph
  * @param  {Object=} variation - variation coordinates for GPOS kerning, the current font variation if omitted
@@ -106,20 +107,62 @@ opentype.Font.prototype.glyphIndexToName = function(gid) {};
 opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variation) {};
 
 /**
- * Helper function that invokes the given callback for each glyph in the given text.
- * The callback gets `(glyph, x, y, fontSize, options)`.
+ * Shape a text like hb-shape: its glyphs after the GSUB features, in visual order, each one with the UTF-16 range
+ * [start, end) of its cluster (see stringToGlyphClusters) and its position in font units after the GPOS features,
+ * at the variation of options.variation or of the font: xAdvance, yAdvance (0 in horizontal text), xOffset and
+ * yOffset (the y axis going up, like the offsets of hb-shape).
  * The text is shaped by script runs (the Unicode Script of its characters, the characters of no script in
  * the run around them, not yet a closing bracket in the run of its opening bracket), each run with the GSUB
- * features and the kerning of its OpenType script, or as one run with the OpenType script options.script (the
+ * and GPOS features of its OpenType script, or as one run with the OpenType script options.script (the
  * tag taken literally, e.g. 'deva' or 'dev2'), and with the language system options.language (an OpenType tag
- * such as 'TRK ' or 'TRK'). The GPOS mark and mkmk features are not applied yet: a mark is drawn at the pen
- * position, without the offset of its anchors.
+ * such as 'TRK ' or 'TRK'). Like HarfBuzz, which looks each feature up in GSUB and in GPOS, the GPOS features of a
+ * run are the default GSUB features of its shaper but the Arabic forms, and abvm, blwm, curs, dist, kern (with
+ * options.kerning), mark and mkmk, with options.features, and the required feature of the GPOS language system (its
+ * ReqFeatureIndex) whatever options.features; their lookups apply in lookup list order, to each run in the order of
+ * the text, extension lookups included. The pair adjustments (lookup type 2) are applied with their two value
+ * records; the other lookup types are skipped with a warning: a mark is drawn at the pen position, without the
+ * offset of its anchors. Without a GPOS kern feature for the script and language, the kern table applies like in
+ * HarfBuzz, in visual order, the value of a pair split between its two glyphs, each glyph kerned with the next glyph
+ * that is not a GDEF mark; unlike HarfBuzz, which splits the value of a pair in each kern subtable on its own, the
+ * values of a pair in several subtables are added up before the split: the positions and the pen are the same, the
+ * advances can differ by a few units (up to half the number of subtables with an odd value for the pair). The marks
+ * are the ones of the GlyphClassDef of GDEF: without it no glyph is a mark, for the GPOS lookups and the kern table,
+ * unlike HarfBuzz, which then takes the nonspacing marks of Unicode as marks. A GDEF mark keeps its advance, like
+ * the Indic and Khmer shapers of HarfBuzz. HarfBuzz picks the shaper of a run from its script and from the GSUB
+ * script it chose for it: a Khmer run always takes the Khmer shaper, an Indic, USE or Myanmar run takes the default
+ * shaper when that GSUB script is DFLT or latn (or mymr, for Myanmar). Not yet like HarfBuzz: in the other runs, its
+ * default, Arabic, Hebrew and Thai shapers set the advance of a GDEF mark to 0 after GPOS, its USE and Myanmar
+ * shapers before GPOS; in a font without a GPOS table (e.g. a font with the kern table only, with or without GDEF),
+ * its default, Arabic and Hebrew shapers place each mark over or under its base (its fallback mark positioning),
+ * where the mark is drawn at the pen position; the default ignorables (e.g. U+200D, U+00AD), which HarfBuzz skips in
+ * the GPOS and kern table pairs and hides with an advance of 0, are drawn with their glyph and their advance, and no
+ * pair crosses them; a letter and a combining mark are not composed into the precomposed glyph of the font (e.g. A
+ * and U+0300 into Agrave), so the kern table and the GPOS lookups with IgnoreMarks kern the letter across the mark;
+ * the GPOS lookups of the Arabic forms, which HarfBuzz applies at the glyphs of each form only, apply only when
+ * options.features enables them, at every glyph; the GPOS feature variations (the FeatureVariations of the GPOS
+ * table) are not applied yet, the lookups of a GPOS feature are the ones of its FeatureList record at every
+ * variation; nor the GPOS lookups of the direction features (ltra, ltrm, rtla, rtlm) and of rand, which HarfBuzz
+ * enables by default, nor the GSUB lookups of abvm, blwm, curs, dist, kern (with options.kerning), mark and mkmk,
+ * which HarfBuzz looks up in GSUB too.
+ * @param  {string} text
+ * @param  {Object=} options
+ * @return {Array<{glyph: opentype.Glyph, start: number, end: number, xAdvance: number, yAdvance: number, xOffset: number, yOffset: number}>}
+ */
+opentype.Font.prototype.shape = function(text, options) {};
+
+/**
+ * Helper function that invokes the given callback for each glyph in the given text.
+ * The callback gets `(glyph, x, y, fontSize, options)`.
+ * The glyphs and their positions are the ones of opentype.Font.prototype.shape: x is the pen position plus the
+ * x offset of the glyph, y the baseline minus its y offset (the y axis of the callback goes down), both scaled
+ * to the font size; the pen moves by the x advance of the glyph and by options.letterSpacing or options.tracking.
  * @param  {string} text
  * @param  {number} x - Horizontal position of the beginning of the text.
  * @param  {number} y - Vertical position of the *baseline* of the text.
  * @param  {number} fontSize - Font size in pixels. We scale the glyph units by `1 / unitsPerEm * fontSize`.
  * @param  {Object} options
  * @param  {Function} callback
+ * @return {number} the x of the pen after the last glyph
  */
 opentype.Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) {};
 
@@ -546,7 +589,9 @@ opentype.Position.prototype.getKerningTables = function(script, language) {};
  * Get the xAdvance kerning value of a glyph pair, in the order of the text, in a list of kerning lookup tables:
  * in each lookup the first subtable that applies to the pair gives the value of the lookup, and the values of
  * the lookups add up. A lookup whose lookupFlag ignores one of the two glyphs adds nothing (see
- * getGlyphRunKerningValue). Without lookup tables (undefined, see getKerningTables), the value of the kern table.
+ * getGlyphRunKerningValue). Without lookup tables (undefined, see getKerningTables), the value of the kern table,
+ * nothing for a right glyph that is a GDEF mark: like HarfBuzz, the kern table kerns a glyph with the next glyph
+ * that is not a GDEF mark.
  * @param {Array<Object>|undefined} kerningLookups - the result of getKerningTables
  * @param {number} leftIndex
  * @param {number} rightIndex
@@ -557,10 +602,16 @@ opentype.Position.prototype.getKerningValue = function(kerningLookups, leftIndex
 
 /**
  * Get the xAdvance kerning value of a glyph of a run of glyphs, in a list of kerning lookup tables: each lookup
- * that does not ignore the glyph (its lookupFlag and the GDEF classes) kerns it with the next glyph of the run
- * that the lookup does not ignore, e.g. across the marks of a lookup with IgnoreMarks, and the values of the
- * lookups add up. Without lookup tables (undefined, see getKerningTables), the value of the kern table for the
- * glyph and the glyph right after it (HarfBuzz skips the GDEF marks there too, not yet supported).
+ * applies to the run from its first glyph, at each glyph it does not ignore (its lookupFlag and the GDEF classes)
+ * kerning it with the next glyph of the run that the lookup does not ignore, e.g. across the marks of a lookup
+ * with IgnoreMarks, and the values of the lookups add up: the x advances of the first value record of the pairs
+ * of the glyph and of the second value record of the pair it ends (after a pair with a second value record the
+ * lookup goes on after its second glyph, like HarfBuzz). Without lookup tables (undefined, see getKerningTables),
+ * the value of the kern table pair of the glyph and the next glyph that is not a GDEF mark, like HarfBuzz; a pair of
+ * the kern table starts only at the first glyph of the run and at a glyph that is not a GDEF mark, so a GDEF mark
+ * after the first glyph gets 0, like HarfBuzz. A position outside the run gets 0.
+ * Each call applies the lookups to the run up to the glyph, so its cost grows with the position of the glyph:
+ * opentype.Font.prototype.shape positions all the glyphs of a text at once.
  * @param {Array<Object>|undefined} kerningLookups - the result of getKerningTables
  * @param {Array<number>} glyphIndexes - the glyph indexes of the run, in the order of the text
  * @param {number} position - the position of the glyph in the run

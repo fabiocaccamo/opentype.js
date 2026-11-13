@@ -1,4 +1,5 @@
 import assert from 'assert';
+import { Font, Glyph, Path } from '../../src/opentype.mjs';
 import kern from '../../src/tables/kern.mjs';
 import { itFailsUntilFixed } from '../regression/helpers.mjs';
 
@@ -216,5 +217,43 @@ describe('tables/kern.mjs', function() {
             const table = createMacTable([{ coverage: 0x0000, pairs: [TO] }, { coverage: 0x0000, pairs: [AV], length: 6 }]);
             assert.deepStrictEqual(kern.parse(table, 0), {});
         });
+    });
+
+    describe('the kern table in Font.shape', function() {
+        // a font of the glyphs A (1), V (2), T (3) and o (4) of the kern tables above, with the pairs of a kern table;
+        // the references come from hb-shape on the fonts of the header, of the subtables of each test
+        function createKerningFont(table) {
+            const glyphs = ['.notdef', 'A', 'V', 'T', 'o'].map((name, index) => new Glyph({
+                index,
+                name,
+                unicodes: index ? [name.codePointAt(0)] : [],
+                advanceWidth: 500,
+                path: new Path()
+            }));
+            const font = new Font({ familyName: 'Kern', styleName: 'Regular', unitsPerEm: 1000, ascender: 800, descender: -200, glyphs });
+            font.kerningPairs = kern.parse(table, 0);
+            return font;
+        }
+
+        it('splits the value of a pair between its two glyphs', function() {
+            // the subtables A V -50 and T o -30, both of coverage 1:
+            // hb-shape --no-glyph-names --no-clusters <font> -u 41,56,54,6F: [1+475|2@-25,0+475|3+485|4@-15,0+485]
+            const font = createKerningFont(createWindowsTable([{ coverage: 0x0001, pairs: [AV] }, { coverage: 0x0001, pairs: [TO] }]));
+            const positions = font.shape('AVTo').map(({ xAdvance, xOffset }) => [xAdvance, xOffset]);
+            assert.deepStrictEqual(positions, [[475, 0], [475, -25], [485, 0], [485, -15]]);
+        });
+
+        itFailsUntilFixed('splits the value of a pair in each subtable on its own, like HarfBuzz',
+            'parseWindowsKernTable (src/tables/kern.mjs): the values of a pair in the subtables are added up, and Font.shape ' +
+            'splits the sum -30 into -15 and -15, HarfBuzz applies each subtable on its own (hb_kern_machine_t) and splits each -15 ' +
+            'into -8 and -7: the same position of V, other advances',
+            function() {
+                // the subtables A V -15 and A V -15, both of coverage 1:
+                // hb-shape --no-glyph-names --no-clusters <font> -u 41,56: [1+484|2@-14,0+486]
+                const pairAV15 = { left: 1, right: 2, value: -15 };
+                const font = createKerningFont(createWindowsTable([{ coverage: 0x0001, pairs: [pairAV15] }, { coverage: 0x0001, pairs: [pairAV15] }]));
+                const positions = font.shape('AV').map(({ xAdvance, xOffset }) => [xAdvance, xOffset]);
+                assert.deepStrictEqual(positions, [[484, 0], [486, -14]]);
+            });
     });
 });

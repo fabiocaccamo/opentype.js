@@ -4,7 +4,14 @@ import glyphset from '../src/glyphset.mjs';
 import { readFileSync } from 'fs';
 import { createMockObject, replaceTextGlyphs } from './testutil.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
-import { glyphIndexes, createLookupFlagsGdef, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
+import {
+    glyphIndexes,
+    createLookupFlagsGdef,
+    createLookupFlagsFont,
+    createLayoutTable,
+    createScriptsLayoutTable,
+    createSingleLookup
+} from './lookup-flags-font.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
 describe('font.mjs', function() {
@@ -415,6 +422,13 @@ describe('font.mjs', function() {
                 assert.equal(scriptLanguageFont.getKerningValue(kha, kha), -50);
             });
 
+            it('picks the GPOS script of a Devanagari run among the GPOS scripts, not the GSUB ones, like HarfBuzz', function() {
+                // TestScriptLanguage.ttf without the dev2 script of GSUB (fontTools): GSUB has deva, GPOS dev2,
+                // -u 0916,0916 [44=0+450|44=1+500], the kha kha -50 of dev2, not the -10 of DFLT
+                scriptLanguageFont.tables.gsub.scripts = scriptLanguageFont.tables.gsub.scripts.filter(scriptRecord => scriptRecord.tag !== 'dev2');
+                assert.deepStrictEqual(advancesOf('\u{916}\u{916}'), [450, 500]);
+            });
+
             it('kerns a pair of a Latin glyph and a glyph of another script with the other script, from getKerningValue', function() {
                 // the pair takes Cham, the script of a chama that is not Latin: --script=cham -u 0061,AA00 [6=0+450|17=1+500],
                 // with --script=latn [6=0+490|17=1+500]
@@ -535,6 +549,15 @@ describe('font.mjs', function() {
                 // [657=1+1380|632=0@-110,0+832], with --features=-kern [657=1+1380|632=0+942]
                 assert.equal(getAdvanceWidth('ۮݗ'), 1380 + 832);
                 assert.equal(getAdvanceWidth('ۮݗ', { kerning: false }), 1380 + 942);
+            });
+
+            it('places the Arabic digits of a left-to-right run of the arab script with the x placement of their pair', function() {
+                // the extended Arabic-Indic digits are left-to-right: hb-shape --no-glyph-names --cluster-level=1
+                // --direction=ltr --script=arab Jomhuria-Regular.ttf -u 06F6,06F6 [640=0@-120,0+1130|640=1+1250],
+                // with --features=-kern [640=0+1250|640=1+1250]
+                const shape = options => arabicFont.shape('۶۶', options).map(({ glyph, xAdvance, xOffset, yOffset }) => [glyph.index, xAdvance, xOffset, yOffset]);
+                assert.deepStrictEqual(shape(), [[640, 1130, -120, 0], [640, 1250, 0, 0]]);
+                assert.deepStrictEqual(shape({ kerning: false }), [[640, 1250, 0, 0], [640, 1250, 0, 0]]);
             });
         });
 
@@ -1099,16 +1122,565 @@ describe('font.mjs', function() {
                 });
             });
 
-            itFailsUntilFixed('adds the x advance of a right-to-left GPOS pair to the first glyph of the text',
-                'forEachGlyph (src/font.mjs): the x advance of a right-to-left GPOS pair is added between its two glyphs, HarfBuzz adds it to the advance of the first glyph of the text (the same only when the x placement is the x advance)',
+            it('adds the x advance of a right-to-left GPOS pair to the first glyph of the text', function() {
+                // feaLib: arab, pos reh alef <0 0 -100 0> (ValueFormat1 4)
+                // -u 062F,0631,0627: [1=2+500|2=1+400|3=0+500], alef at 0, reh at 500, dal at 900
+                const arabicFont = createCharactersFont(['ا', 'ر', 'د']);
+                arabicFont.tables.gpos = createKerningGpos({ arab: [0] }, [[2, 1, -100]]);
+                arabicFont.position.init();
+                assert.deepStrictEqual(getOrigins(arabicFont, 'درا'), [0, 500, 900]);
+            });
+        });
+    });
+
+    // TestPairPositioning.ttf, built by test/generate-pair-positioning-font.py, and the kern table of LookupFlagsKernTable.ttf
+    // (test/generate-lookup-flags-font.py): hb-shape --no-glyph-names --cluster-level=1 <font> -u <code points>
+    describe('shape', function() {
+        let pairFont;
+
+        // a shaped text in the format of hb-shape: glyph=cluster@x,y+advance, the offsets when one is not 0
+        function formatShape(glyphPositions) {
+            return '[' + glyphPositions.map(({ glyph, start, xAdvance, xOffset, yOffset }) =>
+                `${glyph.index}=${start}${xOffset || yOffset ? `@${xOffset},${yOffset}` : ''}+${xAdvance}`
+            ).join('|') + ']';
+        }
+
+        before(function() {
+            pairFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+        });
+
+        it('gives each glyph its cluster, its advances and its offsets in font units', function() {
+            // -u 0041,0056: [2=0@10,20+570|4=1@-5,15+575], pos A <10 20 -30 40> V <-5 15 -25 35>; the y advances are
+            // for vertical text
+            const [glyphA, glyphV] = [pairFont.charToGlyph('A'), pairFont.charToGlyph('V')];
+            assert.deepStrictEqual(pairFont.shape('AV'), [
+                { glyph: glyphA, start: 0, end: 1, xAdvance: 570, yAdvance: 0, xOffset: 10, yOffset: 20 },
+                { glyph: glyphV, start: 1, end: 2, xAdvance: 575, yAdvance: 0, xOffset: -5, yOffset: 15 }
+            ]);
+            assert.deepStrictEqual(pairFont.shape(''), []);
+        });
+
+        it('gives the clusters of hb-shape, the ones of stringToGlyphClusters', function() {
+            // -u 0054,0301,006F,1F600: [3=0+460|10=1+0|9=2@15,-10+500|0=3+500], the end 5 of the surrogate pair in UTF-16
+            const text = 'T\u{301}o\u{1F600}';
+            const glyphPositions = pairFont.shape(text);
+            assert.deepStrictEqual(glyphPositions.map(({ glyph, start, end }) => [glyph.index, start, end]), [[3, 0, 1], [10, 1, 2], [9, 2, 3], [0, 3, 5]]);
+            assert.deepStrictEqual(glyphPositions.map(({ glyph, start, end }) => ({ glyph, start, end })), pairFont.stringToGlyphClusters(text));
+        });
+
+        it('shapes a font parsed with lowMemory, whose glyphs load on request, like the font parsed at once', function() {
+            const lowMemoryFont = loadSync('./test/fonts/TestPairPositioning.ttf', { lowMemory: true });
+            // -u 0041,0056: [2=0@10,20+570|4=1@-5,15+575], -u 0054,0301,006F: [3=0+460|10=1+0|9=2@15,-10+500],
+            // -u 0061,0062,0063,0064: [5=0+450|6=1+480|7=2+460|8=3+500], -u 062F,0631,0627: [11=2@0,30+240|13=1@-100,0+300|12=0+500],
+            // --variations=wght=300 -u 0054,0061: [3=0@15,10+470|5=1@-2,5+497]
+            assert.strictEqual(formatShape(lowMemoryFont.shape('AV')), '[2=0@10,20+570|4=1@-5,15+575]');
+            assert.strictEqual(formatShape(lowMemoryFont.shape('T\u{301}o')), '[3=0+460|10=1+0|9=2@15,-10+500]');
+            assert.strictEqual(formatShape(lowMemoryFont.shape('abcd')), '[5=0+450|6=1+480|7=2+460|8=3+500]');
+            assert.strictEqual(formatShape(lowMemoryFont.shape('درا')), '[11=2@0,30+240|13=1@-100,0+300|12=0+500]');
+            assert.strictEqual(formatShape(lowMemoryFont.shape('Ta', { variation: { wght: 300 } })), '[3=0@15,10+470|5=1@-2,5+497]');
+        });
+
+        it('gives no advance to a glyph without advance width, so that the pen does not move', function() {
+            const glyphs = [
+                new Glyph({ index: 0, name: '.notdef', path: new Path() }),
+                new Glyph({ index: 1, name: 'A', unicode: 0x41, path: new Path() })
+            ];
+            const font = new Font({ familyName: 'NoAdvance', styleName: 'Regular', unitsPerEm: 1000, ascender: 800, descender: -200, glyphs });
+            assert.deepStrictEqual(font.shape('AA').map(({ xAdvance }) => xAdvance), [0, 0]);
+            assert.strictEqual(font.getAdvanceWidth('AA', 1000), 0);
+            const glyphXs = [];
+            font.forEachGlyph('AA', 0, 0, 1000, {}, (glyph, glyphX) => glyphXs.push(glyphX));
+            assert.deepStrictEqual(glyphXs, [0, 0]);
+        });
+
+        it('applies the pairs of the kern feature across the marks a lookup ignores, and goes on after a second value record', function() {
+            // -u 0054,0301,006F: [3=0+460|10=1+0|9=2@15,-10+500], the class pair T o of a lookup with IgnoreMarks
+            assert.strictEqual(formatShape(pairFont.shape('T\u{301}o')), '[3=0+460|10=1+0|9=2@15,-10+500]');
+            // -u 0061,0062,0063,0064: [5=0+450|6=1+480|7=2+460|8=3+500], a b with a second value record: b c is skipped
+            assert.strictEqual(formatShape(pairFont.shape('abcd')), '[5=0+450|6=1+480|7=2+460|8=3+500]');
+            // -u 006F,0063: [9=0@5,0+485|7=1+495], an extension lookup
+            assert.strictEqual(formatShape(pairFont.shape('oc')), '[9=0@5,0+485|7=1+495]');
+        });
+
+        it('applies the variation deltas of every field of a pair at the variation of the options or of the font', function() {
+            // --variations=wght=300 -u 0054,0061: [3=0@15,10+470|5=1@-2,5+497], the delta -2.5 of the second x placement
+            // rounded to -2
+            assert.strictEqual(formatShape(pairFont.shape('Ta', { variation: { wght: 300 } })), '[3=0@15,10+470|5=1@-2,5+497]');
+            // --variations=wght=900 -u 0054,0061: [3=0@30,40+440|5=1@-10,20+488]
+            const variableFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+            variableFont.variation.set({ wght: 900 });
+            assert.strictEqual(formatShape(variableFont.shape('Ta')), '[3=0@30,40+440|5=1@-10,20+488]');
+            // -u 0054,0061: [3=0@10,0+480|5=1+500]
+            assert.strictEqual(formatShape(variableFont.shape('Ta', { variation: { wght: 100 } })), '[3=0@10,0+480|5=1+500]');
+        });
+
+        it('applies a right-to-left pair in the order of the text, its glyphs in visual order', function() {
+            // -u 062F,0631,0627: [11=2@0,30+240|13=1@-100,0+300|12=0+500], pos reh <-100 0 -100 0> alef <0 30 -60 0>;
+            assert.strictEqual(formatShape(pairFont.shape('درا')), '[11=2@0,30+240|13=1@-100,0+300|12=0+500]');
+        });
+
+        it('applies the GPOS features of HarfBuzz by default and the features option, kern with the kerning option', function() {
+            // dist and kern both have d a -70, which applies once: -u 0064,0061: [8=0+430|5=1+500], the same with
+            // --features=-kern and with --features=-dist, and with --features=-dist,-kern [8=0+500|5=1+500]
+            assert.strictEqual(formatShape(pairFont.shape('da')), '[8=0+430|5=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('da', { kerning: false })), '[8=0+430|5=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('da', { features: { dist: false } })), '[8=0+430|5=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('da', { kerning: false, features: { dist: false } })), '[8=0+500|5=1+500]');
+            // the d o -80 of ss01: -u 0064,006F: [8=0+500|9=1+500], with --features=+ss01 [8=0+420|9=1+500]
+            assert.strictEqual(formatShape(pairFont.shape('do')), '[8=0+500|9=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('do', { features: { ss01: true } })), '[8=0+420|9=1+500]');
+            // --features=-kern -u 0041,0056: [2=0+600|4=1+600]
+            assert.strictEqual(formatShape(pairFont.shape('AV', { features: { kern: false } })), '[2=0+600|4=1+600]');
+            // the b a -60 of abvm: -u 0062,0061 [6=0+440|5=1+500], with --features=-abvm [6=0+500|5=1+500]
+            assert.strictEqual(formatShape(pairFont.shape('ba')), '[6=0+440|5=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('ba', { features: { abvm: false } })), '[6=0+500|5=1+500]');
+            // the c a -90 of blwm: -u 0063,0061 [7=0+410|5=1+500], with --features=-blwm [7=0+500|5=1+500]
+            assert.strictEqual(formatShape(pairFont.shape('ca')), '[7=0+410|5=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('ca', { features: { blwm: false } })), '[7=0+500|5=1+500]');
+        });
+
+        it('applies the GPOS lookups of mset to the Arabic runs only, a default GSUB feature of the Arabic shaper', function() {
+            // pos beh alef -30; pos a c -30; in mset: -u 0628,0627 [11=1+300|18=0+470], with --features=-mset
+            // [11=1+300|18=0+500]
+            assert.strictEqual(formatShape(pairFont.shape('با')), '[11=1+300|18=0+470]');
+            assert.strictEqual(formatShape(pairFont.shape('با', { features: { mset: false } })), '[11=1+300|18=0+500]');
+            // -u 0061,0063 [5=0+500|7=1+500], not in the features of a Latin run; with --features=+mset [5=0+470|7=1+500]
+            assert.strictEqual(formatShape(pairFont.shape('ac')), '[5=0+500|7=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('ac', { features: { mset: true } })), '[5=0+470|7=1+500]');
+        });
+
+        it('takes the GPOS features of each script run from its own shaper in a mixed text', function() {
+            // HarfBuzz shapes each run on its own (one hb-shape call on the mixed text is one script): -u 0061,0063
+            // [5=0+500|7=1+500] and -u 0628,0627 [11=1+300|18=0+470], the clusters shifted by the start of the run
+            assert.strictEqual(formatShape(pairFont.shape('acبا')), '[5=0+500|7=1+500|11=3+300|18=2+470]');
+            assert.strictEqual(formatShape(pairFont.shape('باac')), '[11=1+300|18=0+470|5=2+500|7=3+500]');
+        });
+
+        it('takes the GPOS features of the shaper of the script option for the whole text, like HarfBuzz', function() {
+            // --script=arab -u 0061,0063,0628,0627 [11=3+300|18=2+470|7=1+500|5=0+470]: the mset pair a c -30 applies
+            // to the Latin pair too; the same glyph positions, HarfBuzz lays the whole buffer out right to left, the
+            // fork each direction run in its own direction
+            assert.strictEqual(formatShape(pairFont.shape('acبا', { script: 'arab' })), '[5=0+470|7=1+500|11=3+300|18=2+470]');
+        });
+
+        it('takes a features list, the old per-script form of the features option, as the default GPOS features', function() {
+            // the GSUB features of updateFeatures are the defaults then, the GPOS ones too: -u 0064,0061 [8=0+430|5=1+500],
+            // -u 0065,0066,0067,0068,0065 [14=0+450|15=1+400|16=2+430|17=3+500|14=4+500]
+            assert.strictEqual(formatShape(pairFont.shape('da', { features: [] })), '[8=0+430|5=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('efghe', { features: [{ script: 'latn', tags: [] }] })), '[14=0+450|15=1+400|16=2+430|17=3+500|14=4+500]');
+        });
+
+        describe('the direction features and rand', function() {
+            // TestPairPositioning.ttf with the tag of ss01 (pos d o -80) or of init (pos beh beh -100) changed (fontTools),
+            // saved as <tag>.ttf: hb-shape --no-glyph-names --cluster-level=1 <tag>.ttf -u <code points>
+            const retaggedFonts = {};
+
+            function loadRetaggedFont(featureTag, newFeatureTag) {
+                const font = loadSync('./test/fonts/TestPairPositioning.ttf');
+                font.tables.gpos.features.find(featureRecord => featureRecord.tag === featureTag).tag = newFeatureTag;
+                return font;
+            }
+
+            before(function() {
+                for (const tag of ['ltra', 'ltrm', 'rand']) {
+                    retaggedFonts[tag] = loadRetaggedFont('ss01', tag);
+                }
+                for (const tag of ['rtla', 'rtlm']) {
+                    retaggedFonts[tag] = loadRetaggedFont('init', tag);
+                }
+            });
+
+            itFailsUntilFixed('applies the GPOS lookups of the direction features and of rand by default, like HarfBuzz',
+                'getPositioningFeatureTags (src/font.mjs): the GPOS features of a run are the default GSUB features of its ' +
+                'shaper and DEFAULT_POSITIONING_FEATURES, without ltra and ltrm (left-to-right runs), rtla and rtlm ' +
+                '(right-to-left runs) and rand, which HarfBuzz enables by default (hb-ot-shape.cc)',
                 function() {
-                    // feaLib: arab, pos reh alef <0 0 -100 0> (ValueFormat1 4)
-                    // -u 062F,0631,0627: [1=2+500|2=1+400|3=0+500], alef at 0, reh at 500, dal at 900
-                    const arabicFont = createCharactersFont(['ا', 'ر', 'د']);
-                    arabicFont.tables.gpos = createKerningGpos({ arab: [0] }, [[2, 1, -100]]);
-                    arabicFont.position.init();
-                    assert.deepStrictEqual(getOrigins(arabicFont, 'درا'), [0, 500, 900]);
+                    // -u 0064,006F: [8=0+420|9=1+500] with ltra, ltrm and rand; -u 0628,0628,0628: [18=2+500|18=1+400|18=0+400]
+                    // with rtla and rtlm
+                    assert.deepStrictEqual(
+                        [
+                            formatShape(retaggedFonts.ltra.shape('do')),
+                            formatShape(retaggedFonts.ltrm.shape('do')),
+                            formatShape(retaggedFonts.rand.shape('do')),
+                            formatShape(retaggedFonts.rtla.shape('ببب')),
+                            formatShape(retaggedFonts.rtlm.shape('ببب'))
+                        ],
+                        [
+                            '[8=0+420|9=1+500]', '[8=0+420|9=1+500]', '[8=0+420|9=1+500]',
+                            '[18=2+500|18=1+400|18=0+400]', '[18=2+500|18=1+400|18=0+400]'
+                        ]
+                    );
                 });
+        });
+
+        itFailsUntilFixed('applies the GPOS feature variations at the variation of the options, like HarfBuzz',
+            'getPositioningLookupTables and getRequiredFeatureTable (src/position.mjs): the feature tables of the GPOS ' +
+            'FeatureVariations (tables.gpos.variations) are never substituted, Layout.getFeatureTable gives the one of the ' +
+            'FeatureList at every variation; FeatureQuery.getFeatureVariationSubstitutions selects them for GSUB only',
+            function() {
+                // the dist of TestPairPositioning.ttf has V A -200 from wght 600 to 900:
+                // --variations=wght=100 -u 0056,0041: [4=0+600|2=1+600], --variations=wght=700: [4=0+400|2=1+600]
+                assert.deepStrictEqual(
+                    [
+                        formatShape(pairFont.shape('VA', { variation: { wght: 100 } })),
+                        formatShape(pairFont.shape('VA', { variation: { wght: 700 } })),
+                        pairFont.getAdvanceWidth('VA', 1000, { variation: { wght: 700 } })
+                    ],
+                    ['[4=0+600|2=1+600]', '[4=0+400|2=1+600]', 400 + 600]
+                );
+            });
+
+        it('applies the GPOS lookups of the default GSUB features of the run, like HarfBuzz', function() {
+            // HarfBuzz looks each feature of its map up in GSUB and in GPOS: -u 0065,0066,0067,0068,0065
+            // [14=0+450|15=1+400|16=2+430|17=3+500|14=4+500], the e f -50 of rvrn, f g -100 of calt, g h -70 of liga
+            assert.strictEqual(formatShape(pairFont.shape('efghe')), '[14=0+450|15=1+400|16=2+430|17=3+500|14=4+500]');
+            // the h e -40 of the locl of latn ROM: --language=ro [14=0+450|15=1+400|16=2+430|17=3+460|14=4+500]
+            assert.strictEqual(formatShape(pairFont.shape('efghe', { language: 'ROM' })), '[14=0+450|15=1+400|16=2+430|17=3+460|14=4+500]');
+            // the features option turns off the GSUB and the GPOS lookups of a feature: --features=-rvrn -u 0065,0066
+            // [14=0+500|15=1+500], --features=-calt -u 0066,0067 [15=0+500|16=1+500], --features=-liga -u 0067,0068
+            // [16=0+500|17=1+500], --language=ro --features=-locl -u 0068,0065 [17=0+500|14=1+500]
+            assert.strictEqual(formatShape(pairFont.shape('ef', { features: { rvrn: false } })), '[14=0+500|15=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('fg', { features: { calt: false } })), '[15=0+500|16=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('gh', { features: { liga: false } })), '[16=0+500|17=1+500]');
+            assert.strictEqual(formatShape(pairFont.shape('he', { language: 'ROM', features: { locl: false } })), '[17=0+500|14=1+500]');
+        });
+
+        describe('the GSUB lookups of the default GPOS features', function() {
+            // TestPairPositioning.ttf with a GSUB of DFLT and latn (feaLib): feature dist { sub a by b; } dist;
+            // feature kern { sub c by d; } kern;
+            let gsubDefaultsFont;
+
+            before(function() {
+                gsubDefaultsFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+                const [glyphA, glyphB, glyphC, glyphD] = ['a', 'b', 'c', 'd'].map(character => gsubDefaultsFont.charToGlyphIndex(character));
+                gsubDefaultsFont.tables.gsub = createScriptsLayoutTable(
+                    { DFLT: [['dist', [0]], ['kern', [1]]], latn: [['dist', [0]], ['kern', [1]]] },
+                    [createSingleLookup([glyphA], [glyphB]), createSingleLookup([glyphC], [glyphD])]
+                );
+            });
+
+            itFailsUntilFixed('applies the GSUB lookups of dist and kern by default, like HarfBuzz',
+                'Font.updateFeatures (src/font.mjs): the GSUB features of a run are the ones of defaultRenderOptions.features, ' +
+                'without abvm, blwm, curs, dist, kern, mark and mkmk, which HarfBuzz enables by default and looks up in GSUB ' +
+                'too (hb_ot_shape_collect_features); getPositioningFeatureTags adds them to the GPOS features only',
+                function() {
+                    // -u 0061,0063 [6=0+500|8=1+500], with --features=-kern [6=0+500|7=1+500]
+                    assert.strictEqual(formatShape(gsubDefaultsFont.shape('ac')), '[6=0+500|8=1+500]');
+                });
+        });
+
+        it('applies the GPOS lookups of an Arabic form only when the features option enables it, at every glyph', function() {
+            // pos beh beh -100 in init: -u 0628,0628,0628 [18=2+500|18=1+500|18=0+500], HarfBuzz applies it at the
+            // initial beh only, whose second glyph is not initial; with --features=+init, at every glyph
+            // [18=2+500|18=1+400|18=0+400]
+            assert.strictEqual(formatShape(pairFont.shape('ببب')), '[18=2+500|18=1+500|18=0+500]');
+            assert.strictEqual(formatShape(pairFont.shape('ببب', { features: { init: true } })), '[18=2+500|18=1+400|18=0+400]');
+        });
+
+        it('ignores a feature index past the FeatureList of a language system, like HarfBuzz', function() {
+            // TestPairPositioning.ttf with the FeatureIndex 99 after the others in each DefaultLangSys (fontTools):
+            // -u 0041,0056: [2=0@10,20+570|4=1@-5,15+575]
+            const featureIndexFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+            for (const scriptRecord of featureIndexFont.tables.gpos.scripts) {
+                scriptRecord.script.defaultLangSys.featureIndexes.push(99);
+            }
+            assert.strictEqual(formatShape(featureIndexFont.shape('AV')), '[2=0@10,20+570|4=1@-5,15+575]');
+            assert.strictEqual(featureIndexFont.getAdvanceWidth('AV', 1000), 570 + 575);
+        });
+
+        it('ignores a lookup index past the LookupList in a feature, like HarfBuzz', function() {
+            // TestPairPositioning.ttf with the LookupListIndex 999 after the others in kern and in dist (fontTools):
+            // -u 0041,0056: [2=0@10,20+570|4=1@-5,15+575], -u 0064,0061: [8=0+430|5=1+500]
+            const lookupIndexFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+            for (const featureRecord of lookupIndexFont.tables.gpos.features) {
+                if (featureRecord.tag === 'kern' || featureRecord.tag === 'dist') {
+                    featureRecord.feature.lookupListIndexes.push(999);
+                }
+            }
+            assert.strictEqual(formatShape(lookupIndexFont.shape('AV')), '[2=0@10,20+570|4=1@-5,15+575]');
+            assert.strictEqual(formatShape(lookupIndexFont.shape('da')), '[8=0+430|5=1+500]');
+            assert.strictEqual(lookupIndexFont.getAdvanceWidth('AV', 1000), 570 + 575);
+        });
+
+        it('applies the first feature of a tag in the FeatureIndex of the language system, like HarfBuzz', function() {
+            // TestPairPositioning.ttf with a second kern feature, with the lookups of ss01 (pos d o -80), in each
+            // DefaultLangSys (fontTools): before the other features, -u 0064,006F: [8=0+420|9=1+500] and -u 0041,0056:
+            // [2=0+600|4=1+600]; after them, -u 0064,006F: [8=0+500|9=1+500] and -u 0041,0056: [2=0@10,20+570|4=1@-5,15+575]
+            function loadDuplicateKernFont(isFirst) {
+                const font = loadSync('./test/fonts/TestPairPositioning.ttf');
+                const features = font.tables.gpos.features;
+                const ss01Feature = features.find(featureRecord => featureRecord.tag === 'ss01').feature;
+                features.push({ tag: 'kern', feature: { featureParams: 0, lookupListIndexes: ss01Feature.lookupListIndexes.slice() } });
+                for (const scriptRecord of font.tables.gpos.scripts) {
+                    const featureIndexes = scriptRecord.script.defaultLangSys.featureIndexes;
+                    if (isFirst) {
+                        featureIndexes.unshift(features.length - 1);
+                    } else {
+                        featureIndexes.push(features.length - 1);
+                    }
+                }
+                return font;
+            }
+            const firstKernFont = loadDuplicateKernFont(true);
+            assert.strictEqual(formatShape(firstKernFont.shape('do')), '[8=0+420|9=1+500]');
+            assert.strictEqual(formatShape(firstKernFont.shape('AV')), '[2=0+600|4=1+600]');
+            const lastKernFont = loadDuplicateKernFont(false);
+            assert.strictEqual(formatShape(lastKernFont.shape('do')), '[8=0+500|9=1+500]');
+            assert.strictEqual(formatShape(lastKernFont.shape('AV')), '[2=0@10,20+570|4=1@-5,15+575]');
+        });
+
+        itFailsUntilFixed('applies a GPOS pair across a default ignorable, hidden with an advance of 0, like HarfBuzz',
+            'Font.shape (src/font.mjs) and findNextNotIgnoredGlyphPosition (src/layout.mjs): the zero width joiner U+200D, ' +
+            'which the font has not, is drawn as .notdef with its advance, and the pair A V skips only the glyphs the GDEF ' +
+            'classes and the lookupFlag ignore; HarfBuzz skips the default ignorables in the GPOS pairs (ignore_zwj) and ' +
+            'hides them with the space glyph and an advance of 0 (hb_ot_hide_default_ignorables)',
+            function() {
+                // -u 0041,200D,0056: [2=0@10,20+570|1=1+0|4=2@-5,15+575], the same with U+00AD, U+200C, U+034F and U+2060
+                assert.strictEqual(formatShape(pairFont.shape('A\u{200D}V')), '[2=0@10,20+570|1=1+0|4=2@-5,15+575]');
+            });
+
+        describe('a GDEF mark with an advance width', function() {
+            // TestPairPositioning.ttf with an advance of 100 for acutecomb, a GDEF mark, in hmtx (fontTools)
+            let markAdvanceFont;
+            // the same font with a GSUB of the scripts DFLT and latn only (feaLib: sub .notdef by .notdef; in ccmp)
+            let latinGsubMarkAdvanceFont;
+
+            before(function() {
+                markAdvanceFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+                markAdvanceFont.charToGlyph('\u{301}').advanceWidth = 100;
+                latinGsubMarkAdvanceFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+                latinGsubMarkAdvanceFont.charToGlyph('\u{301}').advanceWidth = 100;
+                latinGsubMarkAdvanceFont.tables.gsub = createScriptsLayoutTable(
+                    { DFLT: [['ccmp', [0]]], latn: [['ccmp', [0]]] },
+                    [createSingleLookup([0], [0])]
+                );
+            });
+
+            itFailsUntilFixed('sets the advance of a GDEF mark to 0 after GPOS in a Latin text, like HarfBuzz',
+                'Font.shape (src/font.mjs): a GDEF mark keeps its advance width, the default shaper of HarfBuzz sets the x ' +
+                'advance of the GDEF marks to 0 after GPOS (zero_mark_widths_by_gdef)',
+                function() {
+                    // -u 0054,0301,006F [3=0+460|10=1+0|9=2@15,-10+500], the same with --features=-mark
+                    assert.strictEqual(formatShape(markAdvanceFont.shape('T\u{301}o')), '[3=0+460|10=1+0|9=2@15,-10+500]');
+                });
+
+            it('keeps the advance of a GDEF mark in the Indic and Khmer scripts, like HarfBuzz', function() {
+                // the Indic and Khmer shapers of HarfBuzz do not zero the advances of the marks (HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE):
+                // --script=deva --features=-mark -u 0061,0301,0062 [5=0+500|10=1+100|6=2+500], the same with --script=khmr.
+                // HarfBuzz takes its Indic shaper for deva because the font has no GSUB: with a GSUB script DFLT or latn it
+                // takes its default shaper (see the expected failure below)
+                for (const script of ['deva', 'khmr']) {
+                    assert.strictEqual(formatShape(markAdvanceFont.shape('a\u{301}b', { script, features: { mark: false } })), '[5=0+500|10=1+100|6=2+500]', script);
+                }
+            });
+
+            itFailsUntilFixed('sets the advance of a GDEF mark to 0 in an Indic script whose GSUB script is DFLT or latn, like HarfBuzz',
+                'Font.shape (src/font.mjs): a GDEF mark keeps its advance in an Indic run, HarfBuzz takes its default shaper ' +
+                '(hb_ot_shaper_categorize) when the GSUB script it chose is DFLT or latn, which sets the x advance of the GDEF ' +
+                'marks to 0 after GPOS (zero_mark_widths_by_gdef)',
+                function() {
+                    // --script=deva --features=-mark -u 0061,0301,0062 [5=0+500|10=1+0|6=2+500]
+                    assert.strictEqual(
+                        formatShape(latinGsubMarkAdvanceFont.shape('a\u{301}b', { script: 'deva', features: { mark: false } })),
+                        '[5=0+500|10=1+0|6=2+500]'
+                    );
+                });
+        });
+
+        describe('the kern table', function() {
+            // the kern table of LookupFlagsKernTable.ttf (test/generate-lookup-flags-font.py): no GPOS table, the pairs
+            // a acute -15, a b -60, acute b -40 and A V -100
+            let kernTableFont;
+
+            // the glyph, the x advance and the offsets of each glyph of a shaped text
+            function shapeKernTableText(text, options) {
+                return kernTableFont.shape(text, options).map(({ glyph, xAdvance, xOffset, yOffset }) => [glyph.index, xAdvance, xOffset, yOffset]);
+            }
+
+            beforeEach(function() {
+                kernTableFont = createLookupFlagsFont();
+                kernTableFont.kerningPairs = {
+                    [`${glyphIndexes.a},${glyphIndexes.acute}`]: -15,
+                    [`${glyphIndexes.a},${glyphIndexes.b}`]: -60,
+                    [`${glyphIndexes.acute},${glyphIndexes.b}`]: -40,
+                    [`${glyphIndexes.A},${glyphIndexes.V}`]: -100
+                };
+            });
+
+            it('splits the value of a pair between its two glyphs, across the marks, like HarfBuzz', function() {
+                // -u 0061,0062: [1=0+470|2=1@-30,0+470]
+                assert.deepStrictEqual(shapeKernTableText('ab'), [[glyphIndexes.a, 470, 0, 0], [glyphIndexes.b, 470, -30, 0]]);
+                // -u 0061,0301,0062: [1=0+470|5=1@-470,562+0|2=2@-30,0+470], the a b -60 across the acute, which starts no
+                // pair after a: not the acute b -40. Only a and b: the acute is placed by the fallback mark positioning of
+                // HarfBuzz (see the expected failure below)
+                const [glyphA, , glyphB] = shapeKernTableText('a\u{301}b');
+                assert.deepStrictEqual([glyphA, glyphB], [[glyphIndexes.a, 470, 0, 0], [glyphIndexes.b, 470, -30, 0]]);
+                // -u 0061,0301: [1=0+500|5=1@-500,562+0], no glyph after a that is not a mark: not the a acute -15
+                assert.deepStrictEqual(shapeKernTableText('a\u{301}')[0], [glyphIndexes.a, 500, 0, 0]);
+                // -u 0301,0062: [5=0@20,0+0|2=1@-20,0+480], a mark at the start of the text kerned with the next glyph;
+                // only b: HarfBuzz also sets the advance of the acute to 0 (see the expected failure below)
+                assert.deepStrictEqual(shapeKernTableText('\u{301}b')[1], [glyphIndexes.b, 480, -20, 0]);
+                // with a b -61: [1=0+469|2=1@-30,0+470], half of the value rounded down to the first glyph
+                kernTableFont.kerningPairs[`${glyphIndexes.a},${glyphIndexes.b}`] = -61;
+                assert.deepStrictEqual(shapeKernTableText('ab'), [[glyphIndexes.a, 469, 0, 0], [glyphIndexes.b, 470, -30, 0]]);
+                // with a b +61: [1=0+530|2=1@31,0+531], half of the value rounded down to the first glyph
+                kernTableFont.kerningPairs[`${glyphIndexes.a},${glyphIndexes.b}`] = 61;
+                assert.deepStrictEqual(shapeKernTableText('ab'), [[glyphIndexes.a, 530, 0, 0], [glyphIndexes.b, 531, 31, 0]]);
+            });
+
+            it('applies the GPOS lookups of the features, then the kern table, when GPOS has no kern feature, like HarfBuzz', function() {
+                // TestPairPositioning.ttf with kern out of the FeatureIndex of every language system and the kern table
+                // d a -20, A V -100 (fontTools): -u 0064,0061 [8=0+420|5=1@-10,0+490], the d a -70 of dist and the d a -20
+                // of the kern table; with --features=-dist [8=0+490|5=1@-10,0+490], with --features=-kern [8=0+430|5=1+500]
+                const gposFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+                const kernFeatureIndex = gposFont.tables.gpos.features.findIndex(featureRecord => featureRecord.tag === 'kern');
+                for (const scriptRecord of gposFont.tables.gpos.scripts) {
+                    const langSystems = [scriptRecord.script.defaultLangSys, ...scriptRecord.script.langSysRecords.map(langSysRecord => langSysRecord.langSys)];
+                    for (const langSystem of langSystems) {
+                        langSystem.featureIndexes = langSystem.featureIndexes.filter(featureIndex => featureIndex !== kernFeatureIndex);
+                    }
+                }
+                const [glyphA, glyphV, glyphD, glyphLowerA] = ['A', 'V', 'd', 'a'].map(character => gposFont.charToGlyphIndex(character));
+                gposFont.kerningPairs = { [`${glyphD},${glyphLowerA}`]: -20, [`${glyphA},${glyphV}`]: -100 };
+                assert.deepStrictEqual(
+                    [{}, { features: { dist: false } }, { kerning: false }].map(options => formatShape(gposFont.shape('da', options))),
+                    ['[8=0+420|5=1@-10,0+490]', '[8=0+490|5=1@-10,0+490]', '[8=0+430|5=1+500]']
+                );
+            });
+
+            it('applies no pair of the kern table without kerning', function() {
+                // --features=-kern -u 0061,0062: [1=0+500|2=1+500]
+                assert.deepStrictEqual(shapeKernTableText('ab', { kerning: false }), [[glyphIndexes.a, 500, 0, 0], [glyphIndexes.b, 500, 0, 0]]);
+                assert.deepStrictEqual(shapeKernTableText('ab', { features: { kern: false } }), [[glyphIndexes.a, 500, 0, 0], [glyphIndexes.b, 500, 0, 0]]);
+            });
+
+            itFailsUntilFixed('sets the advance of a GDEF mark kerned at the start of the text to 0, its offset moved back, like HarfBuzz',
+                'Font.shape (src/font.mjs): the acute keeps the -20 of the acute b pair in its advance, HarfBuzz sets the x advance ' +
+                'of the GDEF marks to 0 after positioning (zero_mark_widths_by_gdef) and, without GPOS, subtracts the advance of ' +
+                'a mark from its x offset first (adjust_mark_offsets)',
+                function() {
+                    // -u 0301,0062: [5=0@20,0+0|2=1@-20,0+480]
+                    assert.deepStrictEqual(shapeKernTableText('\u{301}b'), [[glyphIndexes.acute, 0, 20, 0], [glyphIndexes.b, 480, -20, 0]]);
+                });
+
+            itFailsUntilFixed('places a mark of a font without GPOS like the fallback mark positioning of HarfBuzz',
+                'Font.shape (src/font.mjs): a mark is drawn at the pen position, HarfBuzz places a mark of a font without a GPOS ' +
+                'table over its base with the fallback mark positioning (hb-ot-shape-fallback, _hb_ot_shape_fallback_mark_position)',
+                function() {
+                    // -u 0061,0301,0062: [1=0+470|5=1@-470,562+0|2=2@-30,0+470]
+                    assert.deepStrictEqual(shapeKernTableText('a\u{301}b'), [
+                        [glyphIndexes.a, 470, 0, 0], [glyphIndexes.acute, 0, -470, 562], [glyphIndexes.b, 470, -30, 0]
+                    ]);
+                });
+
+            itFailsUntilFixed('kerns the pairs of the kern table across the nonspacing marks of a font without the glyph classes of GDEF',
+                'getKernTablePair (src/position.mjs) and isGlyphIgnoredByLookup (src/layout.mjs): without the GlyphClassDef of GDEF no ' +
+                'glyph is a mark, HarfBuzz synthesizes the classes from the Unicode general category (hb_synthesize_glyph_classes): ' +
+                'a acute b gets the a acute -15 and the acute b -40, not the a b -60 across the acute',
+                function() {
+                    // hb-shape --no-glyph-names --cluster-level=1 LookupFlagsKernTableNoGDEF.ttf -u 0061,0301,0062:
+                    // [1=0+470|5=1@-470,562+0|2=2@-30,0+470], a and b only (see the expected failure above for the acute)
+                    kernTableFont.tables.gdef = undefined;
+                    const [glyphA, , glyphB] = shapeKernTableText('a\u{301}b');
+                    assert.deepStrictEqual([glyphA, glyphB], [[glyphIndexes.a, 470, 0, 0], [glyphIndexes.b, 470, -30, 0]]);
+                });
+
+            itFailsUntilFixed('does not kern with the kern table the bases of a letter and a combining mark that HarfBuzz composes',
+                '_createBidi (src/font.mjs): A and gravecomb are not composed into Agrave (the root cause of the known failure ' +
+                'of the kern lookups with IgnoreMarks of LookupFlags.ttf), so getKernTablePair (src/position.mjs) kerns A V -100 ' +
+                'across the gravecomb, a GDEF mark: 900',
+                function() {
+                    // -u 0041,0300,0056: [23=0+500|22=2+500], Agrave V, which has no pair
+                    assert.strictEqual(kernTableFont.getAdvanceWidth('A\u{300}V', 1000), 1000);
+                });
+
+            itFailsUntilFixed('kerns a pair of the kern table across a default ignorable, which HarfBuzz deletes without a space glyph',
+                'getKernTablePair (src/position.mjs) and Font.shape (src/font.mjs): the zero width joiner U+200D, which the font ' +
+                'has not, is drawn as .notdef with its advance and ends the pair a b; HarfBuzz skips the default ignorables in ' +
+                'the pairs of the kern table (hb_kern_machine_t) and deletes them in a font without a space glyph ' +
+                '(hb_ot_hide_default_ignorables)',
+                function() {
+                    // -u 0061,200D,0062: [1=0+470|2=2@-30,0+470]
+                    assert.deepStrictEqual(shapeKernTableText('a\u{200D}b'), [[glyphIndexes.a, 470, 0, 0], [glyphIndexes.b, 470, -30, 0]]);
+                });
+
+            it('splits the value of a pair of a right-to-left run in visual order, like HarfBuzz', function() {
+                // TestPairPositioning.ttf without GPOS, with the kern table alef reh -101, reh alef -50 and reh dal -21
+                // (fontTools), -u 062F,0631,0627: [11=2+249|13=1@-50,0+339|12=0@-10,0+490], the pairs of the visual order
+                // alef reh and reh dal, not reh alef
+                const arabicFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+                arabicFont.tables.gpos = undefined;
+                const [alef, reh, dal] = ['ا', 'ر', 'د'].map(character => arabicFont.charToGlyphIndex(character));
+                arabicFont.kerningPairs = { [`${alef},${reh}`]: -101, [`${reh},${alef}`]: -50, [`${reh},${dal}`]: -21 };
+                assert.strictEqual(formatShape(arabicFont.shape('درا')), '[11=2+249|13=1@-50,0+339|12=0@-10,0+490]');
+            });
+        });
+
+        it('applies the required feature of the GPOS language system whatever the features option, like HarfBuzz', function() {
+            // TestPairPositioning.ttf with ss01 as the ReqFeatureIndex of the DefaultLangSys of each script, out of its
+            // FeatureIndex (fontTools): -u 0064,006F: [8=0+420|9=1+500], the same with --features=-ss01
+            const requiredFeatureFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+            const ss01FeatureIndex = requiredFeatureFont.tables.gpos.features.findIndex(featureRecord => featureRecord.tag === 'ss01');
+            for (const scriptRecord of requiredFeatureFont.tables.gpos.scripts) {
+                const defaultLangSys = scriptRecord.script.defaultLangSys;
+                defaultLangSys.reqFeatureIndex = ss01FeatureIndex;
+                defaultLangSys.featureIndexes = defaultLangSys.featureIndexes.filter(featureIndex => featureIndex !== ss01FeatureIndex);
+            }
+            assert.strictEqual(formatShape(requiredFeatureFont.shape('do')), '[8=0+420|9=1+500]');
+            assert.strictEqual(formatShape(requiredFeatureFont.shape('do', { features: { ss01: false } })), '[8=0+420|9=1+500]');
+        });
+
+        it('skips the lookups of the types not implemented yet, with a warning once per font and lookup type', function() {
+            // -u 0061,0301: [5=0+500|10=1@-150,0+0], the mark-to-base lookup of mark (type 4) places the acute; skipped,
+            // it gives --features=-mark -u 0061,0301: [5=0+500|10=1+0]
+            const warnings = [];
+            const consoleWarn = console.warn;
+            console.warn = message => warnings.push(message);
+            try {
+                const markFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+                assert.strictEqual(formatShape(markFont.shape('a\u{301}')), '[5=0+500|10=1+0]');
+                markFont.shape('o\u{301}');
+                // a font parsed again is another font, which warns again
+                loadSync('./test/fonts/TestPairPositioning.ttf').shape('a\u{301}');
+                // the default GPOS features of latn of Changa-Regular.ttf (fontTools): curs of type 3, mark of the types 4
+                // and 5, mkmk of type 6, kern of type 2
+                const changaFont = loadSync('./test/fonts/Changa-Regular.ttf');
+                changaFont.shape('a');
+                changaFont.shape('b');
+            } finally {
+                console.warn = consoleWarn;
+            }
+            const warning = lookupType => `[opentype.js] GPOS lookupType: ${lookupType} is not yet supported, lookup skipped`;
+            assert.deepStrictEqual(warnings, [warning(4), warning(4), warning(3), warning(4), warning(5), warning(6)]);
+        });
+    });
+
+    describe('forEachGlyph', function() {
+        let pairFont;
+
+        before(function() {
+            pairFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+        });
+
+        it('gives the callback the pen position plus the offsets of shape, scaled, and moves the pen by its advances', function() {
+            // -u 0041,0056: [2=0@10,20+570|4=1@-5,15+575], at twice the em from (10, 50), the y axis going down
+            const calls = [];
+            const end = pairFont.forEachGlyph('AV', 10, 50, 2000, {}, (glyph, glyphX, glyphY, fontSize) => {
+                calls.push([glyph.index, glyphX, glyphY, fontSize]);
+            });
+            assert.deepStrictEqual(calls, [[2, 10 + 20, 50 - 40, 2000], [4, 10 + 1140 - 10, 50 - 30, 2000]]);
+            assert.strictEqual(end, 10 + 1140 + 1150);
+            assert.strictEqual(pairFont.getAdvanceWidth('AV', 2000), 1140 + 1150);
+            assert.strictEqual(pairFont.getAdvanceWidth('AV', 2000, { letterSpacing: 0.1 }), 1140 + 1150 + 2 * 200);
+        });
+
+        it('draws the glyphs of getPath at their offsets', function() {
+            // -u 0054,006F: [3=0+460|9=1@15,-10+500], o drawn at 460 + 15 and 10 units below the baseline
+            const fontSize = pairFont.unitsPerEm;
+            const expectedPath = new Path();
+            expectedPath.extend(pairFont.charToGlyph('T').getPath(0, 0, fontSize, {}, pairFont));
+            expectedPath.extend(pairFont.charToGlyph('o').getPath(475, 10, fontSize, {}, pairFont));
+            assert.deepStrictEqual(pairFont.getPath('To', 0, 0, fontSize).commands, expectedPath.commands);
         });
     });
 

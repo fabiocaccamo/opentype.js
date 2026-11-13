@@ -78,6 +78,36 @@ font.save('test/fonts/regression/NotoSansJP-Regular-astral-subset.ttf')
 
 `hb-subset` pins the font at wght 400 and keeps the names of the default instance of the source (Thin): the python step writes the names of the Regular. The Reserved Font Name of the license ('Source') is not in the name of the font, which is not renamed.
 
+## NotoSansMasaramGondi-Regular-dist-subset.ttf
+
+- Source: Noto Sans Masaram Gondi, `Version 1.004; ttfautohint (v1.8.4.7-5d5b)`
+- URL: https://raw.githubusercontent.com/google/fonts/b8db033c59419d257ba710f6eba0e0089879feea/ofl/notosansmasaramgondi/NotoSansMasaramGondi-Regular.ttf
+- sha256 of the download: `a606b4b22cc4e562473c6defc9c57b6455dd7163c87ce6e657a3cd0c5060c214`
+- Used by: `masaramGondiDistances.spec.mjs` (the GPOS dist feature of a script without a kern feature, positioned by `Font.shape`)
+
+```sh
+curl -sSL -o download/NotoSansMasaramGondi-Regular.ttf 'https://raw.githubusercontent.com/google/fonts/b8db033c59419d257ba710f6eba0e0089879feea/ofl/notosansmasaramgondi/NotoSansMasaramGondi-Regular.ttf'
+hb-subset download/NotoSansMasaramGondi-Regular.ttf \
+    --unicodes=U+11D10,U+11D11 \
+    --layout-features='*' --name-IDs='*' --glyph-names \
+    --output-file=test/fonts/regression/NotoSansMasaramGondi-Regular-dist-subset.ttf
+```
+
+## NotoSansModi-Regular-kern-subset.ttf
+
+- Source: Noto Sans Modi, `Version 2.004; ttfautohint (v1.8.4.7-5d5b)`
+- URL: https://raw.githubusercontent.com/google/fonts/b8db033c59419d257ba710f6eba0e0089879feea/ofl/notosansmodi/NotoSansModi-Regular.ttf
+- sha256 of the download: `df1b8c6736fde0e7d8838370b336e4b22f84b465c81c817a8eceaab5d41ff33f`
+- Used by: `pairPositioningValueRecords.spec.mjs` (GPOS pair adjustments with a second value record, x placement and x advance, of `Font.shape`)
+
+```sh
+curl -sSL -o download/NotoSansModi-Regular.ttf 'https://raw.githubusercontent.com/google/fonts/b8db033c59419d257ba710f6eba0e0089879feea/ofl/notosansmodi/NotoSansModi-Regular.ttf'
+hb-subset download/NotoSansModi-Regular.ttf \
+    --unicodes=U+11615,U+11621,U+11631,U+11632 \
+    --layout-features='*' --name-IDs='*' --glyph-names \
+    --output-file=test/fonts/regression/NotoSansModi-Regular-kern-subset.ttf
+```
+
 ## NotoSansThaiLooped-VF-gsub-chaining-subset.ttf
 
 - Source: Noto Sans Thai Looped, variable (wdth, wght), `Version 2.000`

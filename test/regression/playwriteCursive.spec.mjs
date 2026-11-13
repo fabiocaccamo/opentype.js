@@ -233,13 +233,13 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             assert.deepStrictEqual(shapesByWeight, referencesByWeight);
         });
 
-        // glyphs and clusters only: the advances of these texts also need dist or the kerning of latn
-        it('adds the connectors of minimum, Phone and who', function() {
+        // the whole shape: the advances of these texts also need dist or the kerning of latn
+        it('adds the connectors of minimum, Phone and who, with the advances of dist and of the kerning', function() {
             const shapesByText = {};
             const referencesByText = {};
             for (const reference of [minimumShape, phoneShape, whoShape]) {
-                shapesByText[reference.text] = getGlyphsAndClusters(shapeText(fonts[400], reference.text));
-                referencesByText[reference.text] = getGlyphsAndClusters(reference);
+                shapesByText[reference.text] = getGlyphsClustersAndAdvances(shapeText(fonts[400], reference.text));
+                referencesByText[reference.text] = getGlyphsClustersAndAdvances(reference);
             }
             assert.deepStrictEqual(shapesByText, referencesByText);
         });
@@ -368,15 +368,10 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             { name: 'who at wght 100', shape: whoShapesByWeight[100], weight: 100 }
         ];
         for (const reference of references) {
-            itFailsUntilFixed(
-                `widens the advance of a letter before the next joined letter, ${reference.name}`,
-                'forEachGlyph (src/font.mjs): adds only the pairs of the kern feature (getKerningTables, src/position.mjs), the pairs of ' +
-                'dist are never applied',
-                function() {
-                    const letters = layOutLetters(fonts[reference.weight], reference.shape.text);
-                    assert.deepStrictEqual(letters, getLetterOrigins(reference.shape));
-                }
-            );
+            it(`widens the advance of a letter before the next joined letter, ${reference.name}`, function() {
+                const letters = layOutLetters(fonts[reference.weight], reference.shape.text);
+                assert.deepStrictEqual(letters, getLetterOrigins(reference.shape));
+            });
         }
     });
 

@@ -383,7 +383,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
         itFailsUntilFixed(
             'kerns the glyphs around a zero width non-joiner, which is not drawn',
             'Font.prototype._createBidi (src/font.mjs): a default ignorable character without a glyph in the cmap is mapped to .notdef and drawn, ' +
-            '385 units wide, and forEachGlyph (src/font.mjs) looks up the pairs T .notdef and .notdef o.end instead of T o.end',
+            '385 units wide, and Font.shape (src/font.mjs) looks up the pairs T .notdef and .notdef o.end instead of T o.end',
             function() {
                 // T, U+200C (zero width non-joiner), o
                 const shape = shapeText(font, 'T\u{200C}o');
@@ -401,7 +401,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
     });
 
     describe('GPOS pair kerning after the substitutions', function() {
-        // The advances of shapeText are the pen positions of forEachGlyph, the text layout behind getPath and
+        // The advances of shapeText are the ones of font.shape, the text layout behind forEachGlyph, getPath and
         // getAdvanceWidth. The pair values quoted in the comments are those of the two PairPos subtables in
         // python -m fontTools.ttx -q -t GPOS -o - TestGSUB-ChainingLigatures-subset.otf
 
