@@ -3,6 +3,7 @@ import Tokenizer from '../src/tokenizer.mjs';
 import FeatureQuery, { SubstitutionAction } from '../src/features/featureQuery.mjs';
 import applySubstitution, {
     getTokenGlyphIndexes,
+    getTokenLigatureProperties,
     getGlyphSequence,
     applyLookupToTokens,
     getFeaturesLookups,
@@ -67,7 +68,14 @@ describe('applySubstitution.mjs', function() {
             const tokens = tokenize('abc');
             tokens[0].setState('calt', [glyphA, acute]);
             tokens[1].setState('deleted', true);
-            assert.deepStrictEqual(getGlyphSequence(tokens), { glyphIndexes: [glyphA, acute, glyphC], glyphTokens: [tokens[0], tokens[0], tokens[2]] });
+            assert.deepStrictEqual(getGlyphSequence(tokens), {
+                glyphIndexes: [glyphA, acute, glyphC], glyphTokens: [tokens[0], tokens[0], tokens[2]], gdef: undefined
+            });
+        });
+
+        it('keeps the GDEF table of the layout, for the glyph classes of the ligature substitutions', function() {
+            const gdef = createLookupFlagsFont().tables.gdef;
+            assert.strictEqual(getGlyphSequence(tokenize('ab'), gdef).gdef, gdef);
         });
     });
 
@@ -161,6 +169,193 @@ describe('applySubstitution.mjs', function() {
             assert.equal(applySubstitution(glyphC, glyphSequence, 0), 1);
             assert.equal(applySubstitution(undefined, glyphSequence, 0), 1);
             assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphC, glyphB]);
+        });
+    });
+
+    // the lig_props of HarfBuzz that ligate_input sets (hb-ot-layout-gsubgpos.hh), which the mark attachments of GPOS
+    // read: their effect on the positions is tested with hb-shape references in position.spec.mjs
+    describe('the ligature properties of the ligature substitutions', function() {
+        const gdef = createLookupFlagsFont().tables.gdef;
+
+        // the ligature properties of each glyph of the tokens that are not deleted, each ligatureId replaced by its number
+        // from 1 in the order of the glyphs, null for a glyph without ligature properties
+        function describeLigatureProperties(tokens) {
+            const ligatureIds = [];
+            return tokens.filter(token => !token.state.deleted).flatMap(token => {
+                const tokenLigatureProperties = getTokenLigatureProperties(token);
+                return getTokenGlyphIndexes(token).map((glyphIndex, index) => {
+                    const ligatureProperties = tokenLigatureProperties[index];
+                    if (!ligatureProperties) {
+                        return null;
+                    }
+                    if (ligatureProperties.ligatureId && !ligatureIds.includes(ligatureProperties.ligatureId)) {
+                        ligatureIds.push(ligatureProperties.ligatureId);
+                    }
+                    return Object.assign({}, ligatureProperties, { ligatureId: ligatureIds.indexOf(ligatureProperties.ligatureId) + 1 });
+                });
+            });
+        }
+
+        it('gives a ligature its number of components and each mark it skipped the component it follows', function() {
+            // lookupflag IgnoreMarks; sub a b c by a_b_c; on a acute b acute c
+            const tokens = tokenize('a\u{301}b\u{301}c');
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [2, 4] }), getGlyphSequence(tokens, gdef), 0);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                { ligatureId: 1, ligatureComponentCount: 3 }, { ligatureId: 1, ligatureComponent: 1 }, { ligatureId: 1, ligatureComponent: 2 }
+            ]);
+        });
+
+        it('counts the components of a component that is a ligature, and gives the marks after it their component of the new ligature', function() {
+            // ss31: lookupflag IgnoreMarks; sub a b by a_b; then sub c a_b by a_b_c; on c a acute b: the acute follows the first
+            // component of a_b, the second one of a_b_c
+            const tokens = tokenize('ca\u{301}b');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [2] }), glyphSequence, 1);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                null, { ligatureId: 1, ligatureComponentCount: 2 }, { ligatureId: 1, ligatureComponent: 1 }
+            ]);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [1] }), glyphSequence, 0);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                { ligatureId: 1, ligatureComponentCount: 3 }, { ligatureId: 1, ligatureComponent: 2 }
+            ]);
+        });
+
+        it('gives no ligature properties to a ligature of a base glyph and marks, nor of marks only', function() {
+            // sub a acute by a.alt; and sub acute acute by acute.alt; (GDEF classes), not ligatures for HarfBuzz
+            const baseTokens = tokenize('a\u{301}');
+            applySubstitution(action(41, { ligGlyph: glyphIndexes['a.alt'], componentOffsets: [1] }), getGlyphSequence(baseTokens, gdef), 0);
+            assert.deepStrictEqual(describeLigatureProperties(baseTokens), [null]);
+            const markTokens = tokenize('\u{301}\u{301}');
+            applySubstitution(action(41, { ligGlyph: glyphIndexes['acute.alt'], componentOffsets: [1] }), getGlyphSequence(markTokens, gdef), 0);
+            assert.deepStrictEqual(describeLigatureProperties(markTokens), [null]);
+            // without the glyph classes of GDEF a acute is a ligature
+            const tokens = tokenize('a\u{301}');
+            applySubstitution(action(41, { ligGlyph: glyphIndexes['a.alt'], componentOffsets: [1] }), getGlyphSequence(tokens), 0);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [{ ligatureId: 1, ligatureComponentCount: 2 }]);
+        });
+
+        it('counts one component for a ligature that GDEF classes as a base glyph, like HarfBuzz', function() {
+            // _hb_glyph_info_get_lig_num_comps: the components of a ligature for a glyph of the ligature class only, 1
+            // otherwise; ligate_input gives a mark after the last component the component components_so_far -
+            // last_num_components + min(this_comp, last_num_components) of the new ligature. With a_b_c in the base class
+            // of GDEF, on c a acute b acute c: sub a b c by a_b_c; then sub c a_b_c by a_b_c; the acutes, of the components
+            // 1 and 2 of the first a_b_c, both on the component 2 of the second one
+            const baseLigatureGdef = Object.assign({}, gdef, {
+                classDef: {
+                    format: 2,
+                    ranges: gdef.classDef.ranges.map(range => range.start === glyphIndexes.a_b_c ? Object.assign({}, range, { classId: 1 }) : range)
+                }
+            });
+            const tokens = tokenize('ca\u{301}b\u{301}c');
+            const glyphSequence = getGlyphSequence(tokens, baseLigatureGdef);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [2, 4] }), glyphSequence, 1);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [1] }), glyphSequence, 0);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                { ligatureId: 1, ligatureComponentCount: 2 }, { ligatureId: 1, ligatureComponent: 2 }, { ligatureId: 1, ligatureComponent: 2 }
+            ]);
+        });
+
+        it('leaves the marks after a ligature of marks with the component they follow, like HarfBuzz', function() {
+            // ligate_input gives the marks after the last component their component of the new ligature only when it is not
+            // a ligature of marks: on acute a acute b, sub a b by acute.alt; (a ligature that GDEF classes as a mark), then
+            // sub acute acute.alt by acute.alt; (marks only), the acute keeps its component of the first ligature
+            const tokens = tokenize('\u{301}a\u{301}b');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes['acute.alt'], componentOffsets: [2] }), glyphSequence, 1);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes['acute.alt'], componentOffsets: [1] }), glyphSequence, 0);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphIndexes['acute.alt'], acute]);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [null, { ligatureId: 1, ligatureComponent: 1 }]);
+        });
+
+        it('keeps the ligature properties of a glyph of a ligature that a single or a multiple substitution replaces', function() {
+            // Sequence::apply does not number the glyphs of a glyph with a lig_id (https://github.com/harfbuzz/harfbuzz/issues/3069):
+            // lookupflag IgnoreMarks; sub a b by a_b; on a acute b, then sub acute by acute.alt dotbelow; and sub a_b by a.alt;
+            const tokens = tokenize('a\u{301}b');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [2] }), glyphSequence, 0);
+            applySubstitution(action(21, [glyphIndexes['acute.alt'], glyphIndexes.dotbelow]), glyphSequence, 1);
+            applySubstitution(action(12, glyphIndexes['a.alt']), glyphSequence, 0);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphIndexes['a.alt'], glyphIndexes['acute.alt'], glyphIndexes.dotbelow]);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                { ligatureId: 1, ligatureComponentCount: 2 }, { ligatureId: 1, ligatureComponent: 1 }, { ligatureId: 1, ligatureComponent: 1 }
+            ]);
+        });
+
+        it('numbers the glyphs of a multiple substitution of a glyph of no ligature as the components of no ligature, like HarfBuzz', function() {
+            // Sequence::apply gives the glyph i of a substitution of two or more glyphs the lig_comp i and no lig_id
+            // (_hb_glyph_info_set_lig_props_for_component) when the glyph it replaces has no lig_id; a substitution of one
+            // glyph keeps the lig_props: on c acute, sub c by a acute dotbelow; then sub dotbelow by a; (one glyph) and sub
+            // acute by acute.alt dotbelow; (the acute of no ligature, its glyphs numbered again)
+            const tokens = tokenize('c\u{301}');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(21, [glyphA, acute, glyphIndexes.dotbelow]), glyphSequence, 0);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                null, { ligatureId: 0, ligatureComponent: 1 }, { ligatureId: 0, ligatureComponent: 2 }, null
+            ]);
+            applySubstitution(action(21, [glyphA]), glyphSequence, 2);
+            applySubstitution(action(21, [glyphIndexes['acute.alt'], glyphIndexes.dotbelow]), glyphSequence, 3);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphA, acute, glyphA, glyphIndexes['acute.alt'], glyphIndexes.dotbelow]);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                null, { ligatureId: 0, ligatureComponent: 1 }, { ligatureId: 0, ligatureComponent: 2 }, null,
+                { ligatureId: 0, ligatureComponent: 1 }
+            ]);
+        });
+
+        it('gives a mark of a multiple substitution that a ligature skipped the component its index in the substitution gives it, like HarfBuzz', function() {
+            // ligate_input takes the lig_comp of a skipped glyph, last_num_components only when it is 0: lookupflag
+            // IgnoreMarks; sub a b by a_b; on a b acute c, then sub acute by dotbelow acute; then sub a_b c by a_b_c; the dot
+            // below (lig_comp 0) on the component 2 of a_b_c, the acute (lig_comp 1) on the component 1, like the acute of
+            // sub z by dotbelowcomb acutecomb; in TestMarkAttachment.ttf (see position.spec.mjs)
+            const tokens = tokenize('ab\u{301}c');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), glyphSequence, 0);
+            applySubstitution(action(21, [glyphIndexes.dotbelow, acute]), glyphSequence, 1);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [3] }), glyphSequence, 0);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphIndexes.a_b_c, glyphIndexes.dotbelow, acute]);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                { ligatureId: 1, ligatureComponentCount: 3 }, { ligatureId: 1, ligatureComponent: 2 }, { ligatureId: 1, ligatureComponent: 1 }
+            ]);
+        });
+
+        it('gives a mark after a component that is a ligature, of none of its components, the last component of that ligature', function() {
+            // ligate_input takes last_num_components for a skipped glyph without lig_comp: lookupflag IgnoreMarks; sub a b by
+            // a_b; then sub a_b c by a_b_c; on a b acute c, the acute on the component 2 of a_b_c (the b of a_b), like the
+            // acute after f_i of sub f_i a by a_f_i; in TestMarkAttachment.ttf (see position.spec.mjs)
+            const tokens = tokenize('ab\u{301}c');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), glyphSequence, 0);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [2] }), glyphSequence, 0);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                { ligatureId: 1, ligatureComponentCount: 3 }, { ligatureId: 1, ligatureComponent: 2 }
+            ]);
+        });
+
+        it('counts the components of a component that is a ligature without the glyph classes of GDEF, like HarfBuzz', function() {
+            // without the GlyphClassDef of GDEF, HarfBuzz gives the glyph of a ligature substitution the ligature class, so
+            // _hb_glyph_info_get_lig_num_comps counts its components: the same substitutions as above, the acute on the
+            // component 2 of a_b_c, which has 3 components
+            const tokens = tokenize('ab\u{301}c');
+            const glyphSequence = getGlyphSequence(tokens);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), glyphSequence, 0);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [2] }), glyphSequence, 0);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                { ligatureId: 1, ligatureComponentCount: 3 }, { ligatureId: 1, ligatureComponent: 2 }
+            ]);
+        });
+
+        it('stops giving the glyphs after the last component their component of the new ligature at a glyph of no component, like HarfBuzz', function() {
+            // ligate_input stops at a glyph of the ligature of the last component whose lig_comp is 0, like the glyphs of a
+            // multiple substitution of that ligature: sub a b by a_b; on c a b, then sub a_b by a_b dotbelow; (both glyphs
+            // keep the ligature properties of a_b), then sub c a_b by a_b_c; the dot below keeps its properties
+            const tokens = tokenize('cab');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), glyphSequence, 1);
+            applySubstitution(action(21, [glyphIndexes.a_b, glyphIndexes.dotbelow]), glyphSequence, 1);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [1] }), glyphSequence, 0);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphIndexes.a_b_c, glyphIndexes.dotbelow]);
+            assert.deepStrictEqual(describeLigatureProperties(tokens), [
+                { ligatureId: 1, ligatureComponentCount: 3 }, { ligatureId: 2, ligatureComponentCount: 2 }
+            ]);
         });
     });
 

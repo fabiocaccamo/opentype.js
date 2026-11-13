@@ -1,7 +1,11 @@
 // The Position object provides utility methods to manipulate
 // the GPOS position table, and the application of its lookups to the glyphs of a text (see Font.shape).
 
-import Layout, { getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, IGNORE_MARKS, getRequiredFeatureIndex } from './layout.mjs';
+import Layout, {
+    getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, isMarkGlyph, getLigatureId,
+    getLigatureComponent, isMarkIgnoredWithoutGlyphClasses, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES, IGNORE_MARKS, RIGHT_TO_LEFT, getRequiredFeatureIndex,
+    getOpenTypeScriptTags
+} from './layout.mjs';
 import { warnOncePerFont } from './util.mjs';
 
 // the features of common_features and horizontal_features (hb-ot-shape.cc) that are not default GSUB features of a
@@ -11,17 +15,47 @@ const DEFAULT_POSITIONING_FEATURES = ['abvm', 'blwm', 'curs', 'dist', 'kern', 'm
 
 const SINGLE_ADJUSTMENT_LOOKUP_TYPE = 1;
 const PAIR_ADJUSTMENT_LOOKUP_TYPE = 2;
+const CURSIVE_ATTACHMENT_LOOKUP_TYPE = 3;
+const MARK_TO_BASE_ATTACHMENT_LOOKUP_TYPE = 4;
+const MARK_TO_LIGATURE_ATTACHMENT_LOOKUP_TYPE = 5;
+const MARK_TO_MARK_ATTACHMENT_LOOKUP_TYPE = 6;
 const EXTENSION_LOOKUP_TYPE = 9;
 
-// the application of a subtable at a glyph of a run by lookup type (see applySingleAdjustment and
-// applyPairAdjustment), the lookup types not listed are not implemented yet
+// the application of a subtable at a glyph of a run by lookup type (see applySingleAdjustment, applyPairAdjustment,
+// applyCursiveAttachment, applyMarkToBaseAttachment, applyMarkToLigatureAttachment and applyMarkToMarkAttachment), the
+// lookup types not listed are not implemented yet
 const subtableApplications = {
     [SINGLE_ADJUSTMENT_LOOKUP_TYPE]: applySingleAdjustment,
-    [PAIR_ADJUSTMENT_LOOKUP_TYPE]: applyPairAdjustment
+    [PAIR_ADJUSTMENT_LOOKUP_TYPE]: applyPairAdjustment,
+    [CURSIVE_ATTACHMENT_LOOKUP_TYPE]: applyCursiveAttachment,
+    [MARK_TO_BASE_ATTACHMENT_LOOKUP_TYPE]: applyMarkToBaseAttachment,
+    [MARK_TO_LIGATURE_ATTACHMENT_LOOKUP_TYPE]: applyMarkToLigatureAttachment,
+    [MARK_TO_MARK_ATTACHMENT_LOOKUP_TYPE]: applyMarkToMarkAttachment
 };
 
 // like hb_kern_machine_t of HarfBuzz, the kern table kerns a glyph with the next glyph that is not a GDEF mark
 const KERN_TABLE_LOOKUP = { lookupFlag: IGNORE_MARKS };
+
+// how a glyph is attached to another one, the attach_type of HarfBuzz: by the anchors of a mark attachment (lookup
+// types 4, 5 and 6) or of a cursive attachment (lookup type 3)
+const MARK_ATTACHMENT = 'mark';
+const CURSIVE_ATTACHMENT = 'cursive';
+
+// the depth up to which the offsets of a chain of attached glyphs add up, HB_MAX_NESTING_LEVEL of HarfBuzz
+// (propagate_attachment_offsets)
+const MAX_ATTACHMENT_NESTING_LEVEL = 64;
+
+/**
+ * When the shaper of a run sets the advance of the GDEF marks to 0, like the zero_width_marks of the shapers of
+ * HarfBuzz (HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE, BY_GDEF_EARLY and BY_GDEF_LATE): never, before the GPOS lookups (which
+ * can then give a mark an advance) or after them.
+ * @enum {string}
+ */
+const MarkAdvanceZeroing = Object.freeze({
+    NONE: 'none',
+    BEFORE_POSITIONING: 'beforePositioning',
+    AFTER_POSITIONING: 'afterPositioning'
+});
 
 // the field of the Device or VariationIndex table of each field of a value record that horizontal text applies (the
 // y advance and its yAdvDevice are for vertical text)
@@ -65,8 +99,20 @@ function getValueRecordValue(position, valueRecord, field, variation) {
     if (!valueRecord) {
         return 0;
     }
-    const value = valueRecord[field] || 0;
-    const device = valueRecord[VALUE_RECORD_DEVICE_FIELDS[field]];
+    return getVariedValue(position, valueRecord[field] || 0, valueRecord[VALUE_RECORD_DEVICE_FIELDS[field]], variation);
+}
+
+/**
+ * A value of a value record or an anchor with the variation delta of its VariationIndex table when the font is
+ * variable, like HarfBuzz (VariationDevice::get_x_delta): the hinting deltas of a Device table, which depend on the
+ * size in pixels, do not apply to positions in font units.
+ * @param {Position} position
+ * @param {number} value
+ * @param {object|undefined} device - the Device or VariationIndex table of the value
+ * @param {object} [variation] - variation coordinates, the current font variation if omitted
+ * @returns {number}
+ */
+function getVariedValue(position, value, device, variation) {
     const gdef = getLayoutGdefTable(position.font);
     if (!device || device.deltaFormat !== 0x8000 || !position.font.variation || !gdef || !gdef.itemVarStore) {
         return value;
@@ -76,6 +122,22 @@ function getValueRecordValue(position, valueRecord, field, variation) {
         variation || position.font.variation.get()
     );
     return Math.round(value + delta);
+}
+
+/**
+ * The coordinates of an anchor in font units, like HarfBuzz without hinting (Anchor::get_anchor): its x and y
+ * coordinates with the variation deltas of the VariationIndex tables of format 3; the contour point of format 2 is
+ * not used.
+ * @param {Position} position
+ * @param {{xCoordinate: number, yCoordinate: number, xDevice: object, yDevice: object}} anchor
+ * @param {object} [variation] - variation coordinates, the current font variation if omitted
+ * @returns {{x: number, y: number}}
+ */
+function getAnchorCoordinates(position, anchor, variation) {
+    return {
+        x: getVariedValue(position, anchor.xCoordinate, anchor.xDevice, variation),
+        y: getVariedValue(position, anchor.yCoordinate, anchor.yDevice, variation)
+    };
 }
 
 /**
@@ -209,6 +271,374 @@ function applyPairAdjustment(position, lookupTable, subtable, glyphRun, index) {
 }
 
 /**
+ * The entry or the exit anchor of a glyph in a cursive attachment subtable, undefined when the subtable does not
+ * cover the glyph or the glyph has no such anchor.
+ * @param {Position} position
+ * @param {object} subtable - a cursive attachment subtable
+ * @param {number} glyphIndex
+ * @param {string} anchorField - entryAnchor or exitAnchor
+ * @returns {object|undefined}
+ */
+function getCursiveAnchor(position, subtable, glyphIndex, anchorField) {
+    const entryExitRecord = subtable.entryExitRecords[position.getCoverageIndex(subtable.coverage, glyphIndex)];
+    return entryExitRecord && entryExitRecord[anchorField];
+}
+
+/**
+ * Turn the cursive attachments of a chain the other way round from a glyph, like HarfBuzz
+ * (reverse_cursive_minor_offset): when a glyph already attached to another one gets a new parent, the glyphs it was
+ * attached to, up to the new parent, attach to it in turn, with the opposite y offset. The chain is walked in a loop,
+ * not recursively like HarfBuzz, so that a chain of any length fits in the call stack: its links are turned from the
+ * far end back, each parent taking the y offset of its child before that child takes the one of its own child.
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the glyph in the run
+ * @param {number} newParentIndex - the position of its new parent
+ */
+function reverseCursiveAttachments(glyphRun, index, newParentIndex) {
+    const links = [];
+    let childIndex = index;
+    let attachment = glyphRun.attachments[childIndex];
+    while (attachment && attachment.type === CURSIVE_ATTACHMENT) {
+        glyphRun.attachments[childIndex] = undefined;
+        if (attachment.parentIndex === newParentIndex) {
+            break;
+        }
+        links.push({ childIndex, parentIndex: attachment.parentIndex });
+        childIndex = attachment.parentIndex;
+        attachment = glyphRun.attachments[childIndex];
+    }
+    for (let i = links.length - 1; i >= 0; i--) {
+        const link = links[i];
+        glyphRun.glyphPositions[link.parentIndex].yOffset = -glyphRun.glyphPositions[link.childIndex].yOffset;
+        glyphRun.attachments[link.parentIndex] = { type: CURSIVE_ATTACHMENT, parentIndex: link.childIndex };
+    }
+}
+
+/**
+ * Join the advances of two glyphs of a cursive attachment along the direction of the run, like HarfBuzz
+ * (CursivePosFormat1): left-to-right, the advance of the glyph before ends at its exit anchor and the glyph after
+ * moves back to start at its entry anchor; right-to-left, the advance of the glyph after ends at its entry anchor and
+ * the glyph before moves to start at its exit anchor.
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} exitIndex - the position of the glyph before, whose exit anchor joins
+ * @param {number} entryIndex - the position of the glyph after, whose entry anchor joins
+ * @param {number} exitX - the x of the exit anchor
+ * @param {number} entryX - the x of the entry anchor
+ */
+function joinCursiveAdvances(glyphRun, exitIndex, entryIndex, exitX, entryX) {
+    const exitPosition = glyphRun.glyphPositions[exitIndex];
+    const entryPosition = glyphRun.glyphPositions[entryIndex];
+    if (glyphRun.rightToLeft) {
+        const exitDistance = exitX + exitPosition.xOffset;
+        exitPosition.xAdvance -= exitDistance;
+        exitPosition.xOffset -= exitDistance;
+        entryPosition.xAdvance = entryX + entryPosition.xOffset;
+    } else {
+        exitPosition.xAdvance = exitX + exitPosition.xOffset;
+        const entryDistance = entryX + entryPosition.xOffset;
+        entryPosition.xAdvance -= entryDistance;
+        entryPosition.xOffset -= entryDistance;
+    }
+}
+
+/**
+ * Attach a glyph of a cursive attachment to the other one across the direction of the run, like HarfBuzz
+ * (CursivePosFormat1): its y offset follows the other glyph (see propagateAttachmentOffsets); a chain it was attached
+ * to is turned the other way round (see reverseCursiveAttachments), and a parent attached to the glyph is detached
+ * from it (https://github.com/harfbuzz/harfbuzz/issues/2469).
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} childIndex - the position of the glyph to attach
+ * @param {number} parentIndex - the position of the glyph it attaches to
+ * @param {number} yOffset - the y offset of the glyph from the other one
+ */
+function attachCursiveGlyph(glyphRun, childIndex, parentIndex, yOffset) {
+    reverseCursiveAttachments(glyphRun, childIndex, parentIndex);
+    glyphRun.attachments[childIndex] = { type: CURSIVE_ATTACHMENT, parentIndex };
+    glyphRun.glyphPositions[childIndex].yOffset = yOffset;
+    const parentAttachment = glyphRun.attachments[parentIndex];
+    if (parentAttachment && parentAttachment.parentIndex === childIndex) {
+        glyphRun.attachments[parentIndex] = undefined;
+        glyphRun.glyphPositions[parentIndex].yOffset = 0;
+    }
+}
+
+/**
+ * Apply a cursive attachment subtable at a glyph of a run, like HarfBuzz (CursivePosFormat1): the entry anchor of the
+ * glyph joins the exit anchor of the glyph before it that the lookup does not ignore, along the direction of the run
+ * (see joinCursiveAdvances), and across it the glyph before is attached to the glyph after with the RightToLeft flag
+ * of the lookupFlag (the last glyph of the text stays on the baseline), otherwise the glyph after to the glyph before
+ * (see attachCursiveGlyph).
+ * @param {Position} position
+ * @param {object} lookupTable - the lookup of the subtable, for its lookupFlag
+ * @param {object} subtable - a cursive attachment subtable
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the glyph in the run
+ * @returns {number} the position the lookup goes on at, -1 when the subtable does not apply
+ */
+function applyCursiveAttachment(position, lookupTable, subtable, glyphRun, index) {
+    const entryAnchor = getCursiveAnchor(position, subtable, glyphRun.glyphIndexes[index], 'entryAnchor');
+    if (!entryAnchor) {
+        return -1;
+    }
+    const gdef = getLayoutGdefTable(position.font);
+    const previousIndex = findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphRun.glyphIndexes, index, -1);
+    const exitAnchor = previousIndex < 0 ? undefined : getCursiveAnchor(position, subtable, glyphRun.glyphIndexes[previousIndex], 'exitAnchor');
+    if (!exitAnchor) {
+        return -1;
+    }
+    const entry = getAnchorCoordinates(position, entryAnchor, glyphRun.variation);
+    const exit = getAnchorCoordinates(position, exitAnchor, glyphRun.variation);
+    joinCursiveAdvances(glyphRun, previousIndex, index, exit.x, entry.x);
+    if (lookupTable.lookupFlag & RIGHT_TO_LEFT) {
+        attachCursiveGlyph(glyphRun, previousIndex, index, entry.y - exit.y);
+    } else {
+        attachCursiveGlyph(glyphRun, index, previousIndex, exit.y - entry.y);
+    }
+    return index + 1;
+}
+
+/**
+ * Attach a mark to a glyph before it in a run, like HarfBuzz (MarkArray::apply): the mark is moved so that its anchor
+ * of its mark record is on the anchor of the glyph for its mark class, its offsets then follow the glyph (see
+ * propagateAttachmentOffsets). The attachment does not apply when the glyph has no anchor for the mark class, nor when
+ * the mark has no mark record (a malformed subtable); like HarfBuzz, a mark record without anchor (a NULL offset, which
+ * the specification does not allow) has its anchor at 0 0.
+ * @param {Position} position
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the mark in the run
+ * @param {{markClass: number, markAnchor: object|undefined}|undefined} markRecord - the mark record of the mark
+ * @param {Array<object|undefined>|undefined} parentAnchors - the anchors of the glyph, by mark class
+ * @param {number} parentIndex - the position of the glyph in the run
+ * @returns {number} the position the lookup goes on at, -1 when the attachment does not apply
+ */
+function attachMark(position, glyphRun, index, markRecord, parentAnchors, parentIndex) {
+    const parentAnchor = markRecord && parentAnchors && parentAnchors[markRecord.markClass];
+    if (!parentAnchor) {
+        return -1;
+    }
+    const markCoordinates = markRecord.markAnchor ? getAnchorCoordinates(position, markRecord.markAnchor, glyphRun.variation) : { x: 0, y: 0 };
+    const parentCoordinates = getAnchorCoordinates(position, parentAnchor, glyphRun.variation);
+    const glyphPosition = glyphRun.glyphPositions[index];
+    glyphPosition.xOffset = parentCoordinates.x - markCoordinates.x;
+    glyphPosition.yOffset = parentCoordinates.y - markCoordinates.y;
+    glyphRun.attachments[index] = { type: MARK_ATTACHMENT, parentIndex };
+    return index + 1;
+}
+
+/**
+ * The position of the glyph before each glyph of a run that is not a GDEF mark, the base or the ligature a mark
+ * attaches to, like MarkBasePos and MarkLigPos of HarfBuzz: whatever the lookupFlag of the lookup. One pass over the
+ * run, as GPOS changes no glyph, like HarfBuzz caches the base of the marks after it (last_base).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {number[]} glyphIndexes - the glyph indexes of the run
+ * @returns {number[]} -1 for a glyph without one
+ */
+function getMarkBaseIndexes(gdef, glyphIndexes) {
+    const markBaseIndexes = [];
+    let baseIndex = -1;
+    for (let i = 0; i < glyphIndexes.length; i++) {
+        markBaseIndexes.push(baseIndex);
+        if (!isMarkGlyph(gdef, glyphIndexes[i])) {
+            baseIndex = i;
+        }
+    }
+    return markBaseIndexes;
+}
+
+/**
+ * Apply a mark-to-base attachment subtable at a mark of a run, like HarfBuzz (MarkBasePosFormat1): the mark attaches
+ * to the glyph before it that is not a GDEF mark (see getMarkBaseIndexes) when the subtable covers both. In a font
+ * without glyph classes, a lookup that ignores the mark as a mark (see isMarkIgnoredWithoutGlyphClasses) does not
+ * attach it. Not yet like HarfBuzz: a mark after the second glyph of a multiple substitution attaches to that
+ * glyph when the subtable covers it, otherwise to nothing, where HarfBuzz attaches it to the first glyph of the
+ * substitution (https://github.com/harfbuzz/harfbuzz/issues/740).
+ * @param {Position} position
+ * @param {object} lookupTable - the lookup of the subtable
+ * @param {object} subtable - a mark-to-base attachment subtable
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the mark in the run
+ * @returns {number} the position the lookup goes on at, -1 when the subtable does not apply
+ */
+function applyMarkToBaseAttachment(position, lookupTable, subtable, glyphRun, index) {
+    const glyphIndex = glyphRun.glyphIndexes[index];
+    const markCoverageIndex = position.getCoverageIndex(subtable.markCoverage, glyphIndex);
+    if (markCoverageIndex < 0 || isMarkIgnoredWithoutGlyphClasses(getLayoutGdefTable(position.font), lookupTable, glyphIndex)) {
+        return -1;
+    }
+    const baseIndex = glyphRun.markBaseIndexes[index];
+    const baseCoverageIndex = baseIndex < 0 ? -1 : position.getCoverageIndex(subtable.baseCoverage, glyphRun.glyphIndexes[baseIndex]);
+    if (baseCoverageIndex < 0) {
+        return -1;
+    }
+    return attachMark(position, glyphRun, index, subtable.markArray[markCoverageIndex], subtable.baseArray[baseCoverageIndex], baseIndex);
+}
+
+/**
+ * The index of the component of a ligature that a mark after it attaches to, like HarfBuzz (MarkLigPosFormat1): the
+ * component the ligature substitution recorded for the mark (see LigatureProperties) when the mark belongs to this
+ * ligature, otherwise the last component.
+ * @param {LigatureProperties|undefined} markProperties
+ * @param {LigatureProperties|undefined} ligatureProperties
+ * @param {number} componentCount - the number of components of the ligature in the subtable
+ * @returns {number} 0 for the first component
+ */
+function getMarkLigatureComponentIndex(markProperties, ligatureProperties, componentCount) {
+    const ligatureId = getLigatureId(ligatureProperties);
+    const markComponent = getLigatureComponent(markProperties);
+    if (ligatureId && ligatureId === getLigatureId(markProperties) && markComponent > 0) {
+        return Math.min(componentCount, markComponent) - 1;
+    }
+    return componentCount - 1;
+}
+
+/**
+ * Apply a mark-to-ligature attachment subtable at a mark of a run, like HarfBuzz (MarkLigPosFormat1): the mark
+ * attaches to the glyph before it that is not a GDEF mark (see getMarkBaseIndexes), when the subtable covers both, at
+ * the anchor of the ligature component of the mark (see getMarkLigatureComponentIndex). In a font without glyph
+ * classes, a lookup that ignores the mark as a mark (see isMarkIgnoredWithoutGlyphClasses) does not attach it.
+ * @param {Position} position
+ * @param {object} lookupTable - the lookup of the subtable
+ * @param {object} subtable - a mark-to-ligature attachment subtable
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the mark in the run
+ * @returns {number} the position the lookup goes on at, -1 when the subtable does not apply
+ */
+function applyMarkToLigatureAttachment(position, lookupTable, subtable, glyphRun, index) {
+    const glyphIndex = glyphRun.glyphIndexes[index];
+    const markCoverageIndex = position.getCoverageIndex(subtable.markCoverage, glyphIndex);
+    if (markCoverageIndex < 0 || isMarkIgnoredWithoutGlyphClasses(getLayoutGdefTable(position.font), lookupTable, glyphIndex)) {
+        return -1;
+    }
+    const ligatureIndex = glyphRun.markBaseIndexes[index];
+    const ligatureCoverageIndex = ligatureIndex < 0 ? -1 : position.getCoverageIndex(subtable.ligatureCoverage, glyphRun.glyphIndexes[ligatureIndex]);
+    const componentAnchors = ligatureCoverageIndex < 0 ? undefined : subtable.ligatureArray[ligatureCoverageIndex];
+    if (!componentAnchors || !componentAnchors.length) {
+        return -1;
+    }
+    const componentIndex = getMarkLigatureComponentIndex(
+        glyphRun.ligatureProperties[index], glyphRun.ligatureProperties[ligatureIndex], componentAnchors.length
+    );
+    return attachMark(position, glyphRun, index, subtable.markArray[markCoverageIndex], componentAnchors[componentIndex], ligatureIndex);
+}
+
+/**
+ * Whether a mark can attach to a mark before it, like HarfBuzz (MarkMarkPosFormat1): when both follow the same
+ * glyph, or the same component of a ligature (see LigatureProperties), or when one of them is itself a ligature (a
+ * glyph with its own ligatureId and no ligatureComponent; a ligature of marks only keeps the ligature properties of
+ * its first mark).
+ * @param {LigatureProperties|undefined} markProperties
+ * @param {LigatureProperties|undefined} previousMarkProperties
+ * @returns {boolean}
+ */
+function areMarksOfSameGlyph(markProperties, previousMarkProperties) {
+    const ligatureId = getLigatureId(markProperties);
+    const previousLigatureId = getLigatureId(previousMarkProperties);
+    const component = getLigatureComponent(markProperties);
+    const previousComponent = getLigatureComponent(previousMarkProperties);
+    if (ligatureId === previousLigatureId) {
+        return !ligatureId || component === previousComponent;
+    }
+    return Boolean((ligatureId && !component) || (previousLigatureId && !previousComponent));
+}
+
+/**
+ * Apply a mark-to-mark attachment subtable at a mark of a run, like HarfBuzz (MarkMarkPosFormat1): the mark attaches
+ * to the glyph before it that the mark filtering set and the mark attachment type of the lookup do not skip (its
+ * IgnoreBaseGlyphs, IgnoreLigatures and IgnoreMarks do not apply), when that glyph is a GDEF mark of the same glyph
+ * (see areMarksOfSameGlyph) and the subtable covers both.
+ * @param {Position} position
+ * @param {object} lookupTable - the lookup of the subtable, for its lookupFlag
+ * @param {object} subtable - a mark-to-mark attachment subtable
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the mark in the run
+ * @returns {number} the position the lookup goes on at, -1 when the subtable does not apply
+ */
+function applyMarkToMarkAttachment(position, lookupTable, subtable, glyphRun, index) {
+    const mark1CoverageIndex = position.getCoverageIndex(subtable.mark1Coverage, glyphRun.glyphIndexes[index]);
+    if (mark1CoverageIndex < 0) {
+        return -1;
+    }
+    const gdef = getLayoutGdefTable(position.font);
+    const markFilterLookup = {
+        lookupFlag: lookupTable.lookupFlag & ~(IGNORE_BASE_GLYPHS | IGNORE_LIGATURES | IGNORE_MARKS),
+        markFilteringSet: lookupTable.markFilteringSet
+    };
+    const previousIndex = findNextNotIgnoredGlyphPosition(gdef, markFilterLookup, glyphRun.glyphIndexes, index, -1);
+    if (previousIndex < 0 || !isMarkGlyph(gdef, glyphRun.glyphIndexes[previousIndex]) ||
+        !areMarksOfSameGlyph(glyphRun.ligatureProperties[index], glyphRun.ligatureProperties[previousIndex])) {
+        return -1;
+    }
+    const mark2CoverageIndex = position.getCoverageIndex(subtable.mark2Coverage, glyphRun.glyphIndexes[previousIndex]);
+    if (mark2CoverageIndex < 0) {
+        return -1;
+    }
+    return attachMark(position, glyphRun, index, subtable.mark1Array[mark1CoverageIndex], subtable.mark2Array[mark2CoverageIndex], previousIndex);
+}
+
+/**
+ * Add to the offsets of an attached glyph the offsets of the glyph it is attached to, like HarfBuzz
+ * (propagate_attachment_offsets), that glyph first, up to a chain of MAX_ATTACHMENT_NESTING_LEVEL glyphs: the y offset
+ * of a cursive attachment, the x and y offsets of a mark attachment, whose mark also moves back over the advances
+ * from its glyph to it (forward over them in a right-to-left run), so that it stays on its anchor.
+ * @param {GlyphRun} glyphRun - its attachments are consumed, its glyph positions updated
+ * @param {number} index - the position of the glyph in the run
+ * @param {number} nestingLevel - how many more glyphs of the chain can add their offsets
+ */
+function propagateAttachmentOffsets(glyphRun, index, nestingLevel) {
+    const attachment = glyphRun.attachments[index];
+    if (!attachment) {
+        return;
+    }
+    glyphRun.attachments[index] = undefined;
+    if (!nestingLevel) {
+        return;
+    }
+    const parentIndex = attachment.parentIndex;
+    propagateAttachmentOffsets(glyphRun, parentIndex, nestingLevel - 1);
+    const glyphPosition = glyphRun.glyphPositions[index];
+    const parentPosition = glyphRun.glyphPositions[parentIndex];
+    switch (attachment.type) {
+        case CURSIVE_ATTACHMENT:
+            glyphPosition.yOffset += parentPosition.yOffset;
+            break;
+        case MARK_ATTACHMENT:
+            glyphPosition.xOffset += parentPosition.xOffset;
+            glyphPosition.yOffset += parentPosition.yOffset;
+            if (glyphRun.rightToLeft) {
+                for (let i = parentIndex + 1; i <= index; i++) {
+                    glyphPosition.xOffset += glyphRun.glyphPositions[i].xAdvance;
+                }
+            } else {
+                for (let i = parentIndex; i < index; i++) {
+                    glyphPosition.xOffset -= glyphRun.glyphPositions[i].xAdvance;
+                }
+            }
+            break;
+        default:
+            throw new Error(`Unknown attachment type: ${attachment.type}`);
+    }
+}
+
+/**
+ * Set the x advance of the GDEF marks of a run to 0, like HarfBuzz (zero_mark_widths_by_gdef), moving their x offset
+ * back by the advance they lose when asked (adjust_mark_offsets).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {GlyphRun} glyphRun - updated
+ * @param {boolean} isOffsetMovedBack
+ */
+function zeroMarkAdvances(gdef, glyphRun, isOffsetMovedBack) {
+    for (let i = 0; i < glyphRun.glyphIndexes.length; i++) {
+        if (isMarkGlyph(gdef, glyphRun.glyphIndexes[i])) {
+            const glyphPosition = glyphRun.glyphPositions[i];
+            if (isOffsetMovedBack) {
+                glyphPosition.xOffset -= glyphPosition.xAdvance;
+            }
+            glyphPosition.xAdvance = 0;
+        }
+    }
+}
+
+/**
  * The subtables of a lookup with their lookup type, the subtables of an extension lookup (type 9) unwrapped,
  * each one with the lookup type of its extension subtable, like HarfBuzz; a malformed extension subtable
  * (without lookup type, see the GPOS parser) is skipped.
@@ -255,14 +685,42 @@ function getAppliedLookupSubtables(font, lookupTable) {
 }
 
 /**
- * A run of glyphs that the GPOS lookups position.
+ * A run of glyphs that the GPOS lookups position (see createGlyphRun).
  * @typedef GlyphRun
  * @type Object
  * @property {number[]} glyphIndexes - the glyph indexes, in the order of the text
  * @property {Array<{xAdvance: number, yAdvance: number, xOffset: number, yOffset: number}>} glyphPositions - the
  * positions of the glyphs, in font units, which the lookups adjust
+ * @property {Array<LigatureProperties|undefined>} ligatureProperties - the ligature properties of the glyphs, which
+ * the mark-to-ligature and mark-to-mark attachments read
+ * @property {number[]} markBaseIndexes - the position of the base or of the ligature of each mark (see
+ * getMarkBaseIndexes)
+ * @property {Array<{type: string, parentIndex: number}|undefined>} attachments - the glyph each glyph is attached to
+ * by the lookups, with the type of the attachment (see MARK_ATTACHMENT and CURSIVE_ATTACHMENT), like the
+ * attach_chain and attach_type of HarfBuzz
+ * @property {boolean} rightToLeft - whether the run is laid out from right to left
  * @property {object} [variation] - variation coordinates, the current font variation if omitted
  */
+
+/**
+ * Create a run of glyphs for the GPOS lookups, without attachments.
+ * @param {object|undefined} gdef - the GDEF table of the font, for the bases of the marks
+ * @param {number[]} glyphIndexes - in the order of the text
+ * @param {object[]} glyphPositions - in the order of the text
+ * @param {{ligatureProperties: Array<LigatureProperties|undefined>, rightToLeft: boolean, variation: object|undefined}} runProperties
+ * @returns {GlyphRun}
+ */
+function createGlyphRun(gdef, glyphIndexes, glyphPositions, runProperties) {
+    return {
+        glyphIndexes,
+        glyphPositions,
+        ligatureProperties: runProperties.ligatureProperties,
+        markBaseIndexes: getMarkBaseIndexes(gdef, glyphIndexes),
+        attachments: [],
+        rightToLeft: runProperties.rightToLeft,
+        variation: runProperties.variation
+    };
+}
 
 /**
  * Apply a GPOS lookup to a run of glyphs, like HarfBuzz (apply_forward): at each glyph that the lookup does not
@@ -466,30 +924,104 @@ function applyKernTable(font, glyphRun) {
     }
 }
 
+// the ISO 15924 codes of the scripts of the Indic shaper of HarfBuzz and of its Universal Shaping Engine (USE), see
+// getMarkAdvanceZeroing
+const INDIC_SCRIPTS = ['Beng', 'Deva', 'Gujr', 'Guru', 'Knda', 'Mlym', 'Orya', 'Taml', 'Telu'];
+const UNIVERSAL_SHAPING_ENGINE_SCRIPTS = [
+    'Adlm', 'Ahom', 'Bali', 'Batk', 'Bhks', 'Brah', 'Bugi', 'Buhd', 'Cakm', 'Cham', 'Chrs', 'Cpmn', 'Diak', 'Dogr',
+    'Dupl', 'Egyp', 'Elym', 'Gara', 'Gong', 'Gonm', 'Gran', 'Gukh', 'Hano', 'Hmng', 'Hmnp', 'Java', 'Kali', 'Kawi',
+    'Khar', 'Khoj', 'Kits', 'Krai', 'Kthi', 'Lana', 'Lepc', 'Limb', 'Mahj', 'Maka', 'Mand', 'Mani', 'Marc', 'Medf',
+    'Modi', 'Mong', 'Mtei', 'Mult', 'Nagm', 'Nand', 'Newa', 'Nkoo', 'Onao', 'Ougr', 'Phag', 'Phlp', 'Plrd', 'Rjng',
+    'Rohg', 'Saur', 'Shrd', 'Sidd', 'Sind', 'Sinh', 'Sogd', 'Sogo', 'Soyo', 'Sund', 'Sunu', 'Sylo', 'Tagb', 'Takr',
+    'Tale', 'Tavt', 'Tfng', 'Tglg', 'Tibt', 'Tirh', 'Tnsa', 'Todr', 'Toto', 'Tutg', 'Vith', 'Wcho', 'Yezi', 'Zanb'
+];
+const INDIC_SCRIPT_TAGS = INDIC_SCRIPTS.flatMap(getOpenTypeScriptTags);
+const UNIVERSAL_SHAPING_ENGINE_SCRIPT_TAGS = UNIVERSAL_SHAPING_ENGINE_SCRIPTS.flatMap(getOpenTypeScriptTags);
+// the script tags of the Hangul and Khmer shapers of HarfBuzz, whatever the script of GSUB
+const MARK_ADVANCE_KEEPING_SCRIPT_TAGS = ['hang', 'khmr'];
+const MYANMAR_SCRIPT_TAGS = getOpenTypeScriptTags('Mymr');
+// the GSUB scripts that make an Indic, Myanmar or USE run take the default shaper of HarfBuzz
+const DEFAULT_SHAPER_GSUB_SCRIPT_TAGS = ['DFLT', 'latn'];
+
 /**
- * Position the glyphs of a run of one script and one direction, like hb_ot_position of HarfBuzz: the lookups of
- * the GPOS features of the script and language and of its required feature (see getPositioningLookupTables) apply
+ * When the HarfBuzz shaper of a run sets the advance of the GDEF marks to 0 (see MarkAdvanceZeroing), from the
+ * OpenType script tags of the run and the script HarfBuzz chose for them in GSUB (hb_ot_shaper_categorize, see
+ * getChosenScriptTag): never with the Hangul and Khmer shapers and with the Indic shaper (an Indic script whose GSUB
+ * script is its tag of the first or second version, or none), before GPOS with the USE and Myanmar shapers (a USE
+ * script, an Indic script whose GSUB script is a tag of the third version, Myanmar), after GPOS with the default,
+ * Arabic, Hebrew and Thai shapers, which an Indic, Myanmar or USE script takes when its GSUB script is DFLT or latn
+ * (or mymr, for Myanmar).
+ * @param {string[]} scriptTags - the OpenType script tags of the run (see getOpenTypeScriptTags)
+ * @param {string|undefined} gsubScriptTag - the script HarfBuzz chose in GSUB, undefined for none
+ * @returns {MarkAdvanceZeroing}
+ */
+function getMarkAdvanceZeroing(scriptTags, gsubScriptTag) {
+    const hasScriptTag = tags => scriptTags.some(tag => tags.includes(tag));
+    if (hasScriptTag(MARK_ADVANCE_KEEPING_SCRIPT_TAGS)) {
+        return MarkAdvanceZeroing.NONE;
+    }
+    if (DEFAULT_SHAPER_GSUB_SCRIPT_TAGS.includes(gsubScriptTag)) {
+        return MarkAdvanceZeroing.AFTER_POSITIONING;
+    }
+    if (hasScriptTag(INDIC_SCRIPT_TAGS)) {
+        return gsubScriptTag && gsubScriptTag.endsWith('3') ? MarkAdvanceZeroing.BEFORE_POSITIONING : MarkAdvanceZeroing.NONE;
+    }
+    if (hasScriptTag(MYANMAR_SCRIPT_TAGS)) {
+        return gsubScriptTag === 'mymr' ? MarkAdvanceZeroing.AFTER_POSITIONING : MarkAdvanceZeroing.BEFORE_POSITIONING;
+    }
+    if (hasScriptTag(UNIVERSAL_SHAPING_ENGINE_SCRIPT_TAGS)) {
+        return MarkAdvanceZeroing.BEFORE_POSITIONING;
+    }
+    return MarkAdvanceZeroing.AFTER_POSITIONING;
+}
+
+/**
+ * Position the glyphs of a run of one script and one direction, like hb_ot_position_complex of HarfBuzz: the lookups
+ * of the GPOS features of the script and language and of its required feature (see getPositioningLookupTables) apply
  * to the glyphs in the order of the text (the reverse of the visual order in a right-to-left run), in LookupList
  * order; then, when kern is one of the features and GPOS has no kern feature for the script and language, the kern
- * table applies, in visual order.
+ * table applies, in visual order. The advances of the GDEF marks are set to 0 before or after these adjustments (see
+ * getMarkAdvanceZeroing; like HarfBuzz, without a GPOS table the x offset of a mark of a left-to-right run moves back
+ * by the advance it loses), then the offsets of the attached glyphs follow the glyphs they are attached to (see
+ * propagateAttachmentOffsets).
  * @param {Position} position
  * @param {number[]} glyphIndexes - the glyph indexes of the run, in visual order
  * @param {Array<{xAdvance: number, yAdvance: number, xOffset: number, yOffset: number}>} glyphPositions - the
  * positions of the glyphs, in visual order, in font units, updated
  * @param {{rightToLeft: boolean, script: string, language: string|undefined, featureTags: string[],
- * variation: object|undefined}} runOptions - the direction of the run, its OpenType script and language tags, the
- * GPOS features to apply, the variation coordinates
+ * variation: object|undefined, markAdvanceZeroing: MarkAdvanceZeroing,
+ * ligatureProperties: Array<LigatureProperties|undefined>|undefined}} runOptions - the direction of the run, its
+ * OpenType script and language tags, the GPOS features to apply, the variation coordinates, when the advances of the
+ * marks are set to 0 (see getMarkAdvanceZeroing), and the ligature properties of the glyphs in visual order (see
+ * LigatureProperties), none if omitted
  */
 function positionGlyphRun(position, glyphIndexes, glyphPositions, runOptions) {
-    const { rightToLeft, script, language, featureTags, variation } = runOptions;
-    const lookupTables = getPositioningLookupTables(position, script, language, featureTags);
-    applyPositioningLookups(position, lookupTables, {
-        glyphIndexes: rightToLeft ? glyphIndexes.slice().reverse() : glyphIndexes,
-        glyphPositions: rightToLeft ? glyphPositions.slice().reverse() : glyphPositions,
+    const { rightToLeft, script, language, featureTags, variation, markAdvanceZeroing } = runOptions;
+    if (!Object.values(MarkAdvanceZeroing).includes(markAdvanceZeroing)) {
+        throw new Error(`Unknown mark advance zeroing: ${markAdvanceZeroing}`);
+    }
+    const ligatureProperties = runOptions.ligatureProperties || [];
+    const toTextOrder = glyphs => rightToLeft ? glyphs.slice().reverse() : glyphs;
+    const gdef = getLayoutGdefTable(position.font);
+    const glyphRun = createGlyphRun(gdef, toTextOrder(glyphIndexes), toTextOrder(glyphPositions), {
+        // one entry per glyph, so that the reversal of a right-to-left run keeps them with their glyphs
+        ligatureProperties: toTextOrder(glyphIndexes.map((glyphIndex, runPosition) => ligatureProperties[runPosition])),
+        rightToLeft,
         variation
-    }, glyphIndexes.length - 1);
+    });
+    const isMarkOffsetMovedBack = !position.getTable() && !rightToLeft;
+    if (markAdvanceZeroing === MarkAdvanceZeroing.BEFORE_POSITIONING) {
+        zeroMarkAdvances(gdef, glyphRun, isMarkOffsetMovedBack);
+    }
+    applyPositioningLookups(position, getPositioningLookupTables(position, script, language, featureTags), glyphRun, glyphIndexes.length - 1);
     if (featureTags.includes('kern') && !getKernFeatureTable(position, script, language)) {
         applyKernTable(position.font, { glyphIndexes, glyphPositions });
+    }
+    if (markAdvanceZeroing === MarkAdvanceZeroing.AFTER_POSITIONING) {
+        zeroMarkAdvances(gdef, glyphRun, isMarkOffsetMovedBack);
+    }
+    for (let i = 0; i < glyphIndexes.length; i++) {
+        propagateAttachmentOffsets(glyphRun, i, MAX_ATTACHMENT_NESTING_LEVEL);
     }
 }
 
@@ -547,11 +1079,8 @@ Position.prototype.getGlyphRunKerningValue = function(kerningLookups, glyphIndex
         const kernTablePair = getKernTablePair(this.font, glyphIndexes, position);
         return kernTablePair ? kernTablePair.value : 0;
     }
-    const glyphRun = {
-        glyphIndexes,
-        glyphPositions: glyphIndexes.map(() => ({ xAdvance: 0, yAdvance: 0, xOffset: 0, yOffset: 0 })),
-        variation
-    };
+    const glyphPositions = glyphIndexes.map(() => ({ xAdvance: 0, yAdvance: 0, xOffset: 0, yOffset: 0 }));
+    const glyphRun = createGlyphRun(getLayoutGdefTable(this.font), glyphIndexes, glyphPositions, { ligatureProperties: [], rightToLeft: false, variation });
     // a pair that starts after the glyph does not adjust it
     applyPositioningLookups(this, kerningLookups, glyphRun, position);
     return glyphRun.glyphPositions[position].xAdvance;
@@ -601,4 +1130,11 @@ Position.prototype.getKerningTables = function(script, language) {
 };
 
 export default Position;
-export { DEFAULT_POSITIONING_FEATURES, positionGlyphRun };
+export {
+    DEFAULT_POSITIONING_FEATURES,
+    MarkAdvanceZeroing,
+    getMarkAdvanceZeroing,
+    getMarkLigatureComponentIndex,
+    areMarksOfSameGlyph,
+    positionGlyphRun
+};

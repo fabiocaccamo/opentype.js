@@ -1,10 +1,17 @@
 import assert from 'assert';
 import { readFileSync } from 'fs';
 import { Font, Glyph, Path, parse } from '../src/opentype.mjs';
-import { DEFAULT_POSITIONING_FEATURES, positionGlyphRun } from '../src/position.mjs';
+import {
+    DEFAULT_POSITIONING_FEATURES,
+    MarkAdvanceZeroing,
+    getMarkAdvanceZeroing,
+    getMarkLigatureComponentIndex,
+    areMarksOfSameGlyph,
+    positionGlyphRun
+} from '../src/position.mjs';
 import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
 import { replaceTextGlyphs } from './testutil.mjs';
-import { shapeText, assertShape } from './regression/helpers.mjs';
+import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
 
 // a pair adjustment subtable (format 1) kerning leftGlyph + rightGlyph by xAdvance
 function pairPosSubtable(leftGlyph, rightGlyph, xAdvance) {
@@ -53,6 +60,35 @@ function extensionLookup(subtables) {
 
 function langSys(featureIndexes) {
     return { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes };
+}
+
+// position glyphs of a font as one run with positionGlyphRun, in visual order, in the format of hb-shape without the
+// clusters: glyph@x,y+advance, the offsets when one is not 0, the y advance after the x advance (+x,y) when it is not 0;
+// the run options are the ones of a left-to-right latn run of the default GPOS features and of the default shaper of
+// HarfBuzz if omitted
+function positionGlyphs(font, glyphIndexes, runOptions) {
+    const glyphPositions = glyphIndexes.map(glyphIndex => ({
+        xAdvance: font.glyphs.get(glyphIndex).advanceWidth,
+        yAdvance: 0,
+        xOffset: 0,
+        yOffset: 0
+    }));
+    positionGlyphRun(font.position, glyphIndexes, glyphPositions, Object.assign({
+        rightToLeft: false,
+        script: 'latn',
+        language: undefined,
+        featureTags: DEFAULT_POSITIONING_FEATURES,
+        variation: undefined,
+        markAdvanceZeroing: MarkAdvanceZeroing.AFTER_POSITIONING
+    }, runOptions));
+    return glyphPositions.map(({ xAdvance, yAdvance, xOffset, yOffset }, index) =>
+        `${glyphIndexes[index]}${xOffset || yOffset ? `@${xOffset},${yOffset}` : ''}+${xAdvance}${yAdvance ? `,${yAdvance}` : ''}`
+    ).join('|');
+}
+
+// position the glyphs of the characters of a text (see positionGlyphs)
+function positionTextGlyphs(font, text, runOptions) {
+    return positionGlyphs(font, Array.from(text).map(character => font.charToGlyphIndex(character)), runOptions);
 }
 
 // a font whose GPOS has the given script records, features and lookups
@@ -483,7 +519,7 @@ describe('position.mjs', function() {
             it('kerns a mark at the start of the run with the next glyph', function() {
                 // -u 0301,0062: [5=0@20,0+0|2=1@-20,0+480], the -40 of acute b split between the two glyphs; HarfBuzz then
                 // sets the advance of the acute, a GDEF mark, to 0 and moves its offset back by the -20 it loses
-                // (zero_mark_widths_by_gdef and adjust_mark_offsets, see the expected failure of Font.shape)
+                // (zero_mark_widths_by_gdef and adjust_mark_offsets, see the test of Font.shape)
                 assert.equal(font.position.getGlyphRunKerningValue(undefined, [acute, glyphB], 0), -40);
                 assert.equal(font.position.getKerningValue(undefined, acute, glyphB), -40);
             });
@@ -538,27 +574,8 @@ describe('position.mjs', function() {
             pairFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
         });
 
-        // position the glyphs of the characters of a text as one run, in visual order, in the format of hb-shape
-        // without the clusters: glyph@x,y+advance, the offsets when one is not 0, the y advance after the x advance
-        // (+x,y) when it is not 0
         function positionText(text, runOptions, font = pairFont) {
-            const glyphIndexes = Array.from(text).map(character => font.charToGlyphIndex(character));
-            const glyphPositions = glyphIndexes.map(glyphIndex => ({
-                xAdvance: font.glyphs.get(glyphIndex).advanceWidth,
-                yAdvance: 0,
-                xOffset: 0,
-                yOffset: 0
-            }));
-            positionGlyphRun(font.position, glyphIndexes, glyphPositions, Object.assign({
-                rightToLeft: false,
-                script: 'latn',
-                language: undefined,
-                featureTags: DEFAULT_POSITIONING_FEATURES,
-                variation: undefined
-            }, runOptions));
-            return glyphPositions.map(({ xAdvance, yAdvance, xOffset, yOffset }, index) =>
-                `${glyphIndexes[index]}${xOffset || yOffset ? `@${xOffset},${yOffset}` : ''}+${xAdvance}${yAdvance ? `,${yAdvance}` : ''}`
-            ).join('|');
+            return positionTextGlyphs(font, text, runOptions);
         }
 
         it('applies the two value records of a pair, their placements and their x advances', function() {
@@ -847,6 +864,698 @@ describe('position.mjs', function() {
                 valueRecordsSubtable.values = valueRecordsSubtable.values.map(() => undefined);
                 assert.strictEqual(positionText('ABCH', { featureTags: ['cpsp'] }, singleFont), '2+600|3+500|4+500|5+600');
             });
+        });
+    });
+
+    describe('getMarkAdvanceZeroing', function() {
+        // TestMarkAttachment.ttf (a mark with an advance of 100, ss01 adds 40 to it) with the script record DFLT of GSUB
+        // renamed to the tag of the script (fontTools), -u 0061,0323 --features=+ss01: the advance of the mark is 0 after
+        // GPOS (default shaper), 40 before it (USE, Myanmar), 140 never (Indic, Khmer, Hangul)
+        it('sets the advance of the marks to 0 after GPOS with the default, Arabic, Hebrew and Thai shapers of HarfBuzz', function() {
+            for (const [scriptTags, gsubScriptTag] of [[['latn'], 'latn'], [['arab'], 'arab'], [['hebr'], 'DFLT'], [['thai'], 'thai'], [['cyrl'], undefined]]) {
+                assert.strictEqual(getMarkAdvanceZeroing(scriptTags, gsubScriptTag), MarkAdvanceZeroing.AFTER_POSITIONING, scriptTags.join());
+            }
+        });
+
+        it('keeps the advance of the marks with the Indic shaper of HarfBuzz, before GPOS with the USE shaper (a tag of the third version)', function() {
+            // --script=Deva with deva or dev2 in GSUB, or no GSUB: 140; with dev3: 40
+            const devanagariTags = ['dev3', 'dev2', 'deva'];
+            assert.strictEqual(getMarkAdvanceZeroing(devanagariTags, 'deva'), MarkAdvanceZeroing.NONE);
+            assert.strictEqual(getMarkAdvanceZeroing(devanagariTags, 'dev2'), MarkAdvanceZeroing.NONE);
+            assert.strictEqual(getMarkAdvanceZeroing(devanagariTags, undefined), MarkAdvanceZeroing.NONE);
+            assert.strictEqual(getMarkAdvanceZeroing(devanagariTags, 'dev3'), MarkAdvanceZeroing.BEFORE_POSITIONING);
+            assert.strictEqual(getMarkAdvanceZeroing(['bng2'], 'bng2'), MarkAdvanceZeroing.NONE);
+        });
+
+        it('sets the advance of the marks to 0 before GPOS with the USE and Myanmar shapers of HarfBuzz', function() {
+            // --script=Gonm with gonm in GSUB or no GSUB: 40, --script=Mymr with mym2 or no GSUB: 40, with mymr: 0
+            assert.strictEqual(getMarkAdvanceZeroing(['gonm'], 'gonm'), MarkAdvanceZeroing.BEFORE_POSITIONING);
+            assert.strictEqual(getMarkAdvanceZeroing(['gonm'], undefined), MarkAdvanceZeroing.BEFORE_POSITIONING);
+            assert.strictEqual(getMarkAdvanceZeroing(['nko '], 'nko '), MarkAdvanceZeroing.BEFORE_POSITIONING);
+            assert.strictEqual(getMarkAdvanceZeroing(['mym2', 'mymr'], 'mym2'), MarkAdvanceZeroing.BEFORE_POSITIONING);
+            assert.strictEqual(getMarkAdvanceZeroing(['mym2', 'mymr'], undefined), MarkAdvanceZeroing.BEFORE_POSITIONING);
+            assert.strictEqual(getMarkAdvanceZeroing(['mym2', 'mymr'], 'mymr'), MarkAdvanceZeroing.AFTER_POSITIONING);
+        });
+
+        it('takes the default shaper of HarfBuzz for an Indic, USE or Myanmar run whose GSUB script is DFLT or latn', function() {
+            // --script=Deva, Gonm and Mymr with DFLT and latn in GSUB: 0
+            for (const scriptTags of [['dev3', 'dev2', 'deva'], ['gonm'], ['mym2', 'mymr']]) {
+                for (const gsubScriptTag of ['DFLT', 'latn']) {
+                    assert.strictEqual(getMarkAdvanceZeroing(scriptTags, gsubScriptTag), MarkAdvanceZeroing.AFTER_POSITIONING, `${scriptTags} ${gsubScriptTag}`);
+                }
+            }
+            // not dflt, the tag that some fonts use by mistake: --script=Deva with dflt in GSUB: 140
+            assert.strictEqual(getMarkAdvanceZeroing(['dev3', 'dev2', 'deva'], 'dflt'), MarkAdvanceZeroing.NONE);
+        });
+
+        it('keeps the advance of the marks with the Khmer and Hangul shapers of HarfBuzz, whatever the GSUB script', function() {
+            // --script=Khmr and Hang with DFLT and latn in GSUB, or no GSUB: 140
+            for (const scriptTag of ['khmr', 'hang']) {
+                for (const gsubScriptTag of [scriptTag, 'DFLT', undefined]) {
+                    assert.strictEqual(getMarkAdvanceZeroing([scriptTag], gsubScriptTag), MarkAdvanceZeroing.NONE, `${scriptTag} ${gsubScriptTag}`);
+                }
+            }
+        });
+    });
+
+    // the values of MarkLigPosFormat1::apply of HarfBuzz (hb-ot-layout-gpos-table.hh): with lig_id, mark_id and mark_comp
+    // the ligatureId of the ligature and of the mark and the component of the mark, comp_count the components of the
+    // ligature in the subtable, comp_index = min(comp_count, mark_comp) - 1 when lig_id && lig_id == mark_id &&
+    // mark_comp > 0, comp_count - 1 otherwise
+    describe('getMarkLigatureComponentIndex', function() {
+        const ligatureId = Symbol('ligature');
+        const ligatureProperties = { ligatureId, ligatureComponentCount: 3 };
+
+        it('gives the component the ligature substitution recorded for a mark of the ligature', function() {
+            assert.strictEqual(getMarkLigatureComponentIndex({ ligatureId, ligatureComponent: 1 }, ligatureProperties, 3), 0);
+            assert.strictEqual(getMarkLigatureComponentIndex({ ligatureId, ligatureComponent: 2 }, ligatureProperties, 3), 1);
+        });
+
+        it('gives the last component of the subtable for a component past it', function() {
+            assert.strictEqual(getMarkLigatureComponentIndex({ ligatureId, ligatureComponent: 3 }, ligatureProperties, 2), 1);
+        });
+
+        it('gives the last component for a mark of another ligature, without component or without ligature properties', function() {
+            assert.strictEqual(getMarkLigatureComponentIndex({ ligatureId: Symbol('other'), ligatureComponent: 1 }, ligatureProperties, 3), 2);
+            assert.strictEqual(getMarkLigatureComponentIndex({ ligatureId }, ligatureProperties, 3), 2);
+            assert.strictEqual(getMarkLigatureComponentIndex(undefined, ligatureProperties, 3), 2);
+            // a ligature without ligatureId (of a base glyph and marks): a mark without one does not belong to it
+            assert.strictEqual(getMarkLigatureComponentIndex({ ligatureComponent: 1 }, undefined, 3), 2);
+        });
+    });
+
+    // the values of MarkMarkPosFormat1::apply of HarfBuzz: with id1, id2, comp1 and comp2 the ligatureIds and the
+    // components of the two marks, they attach when id1 == id2 and (id1 == 0 or comp1 == comp2), or when id1 != id2
+    // and ((id1 > 0 and comp1 == 0) or (id2 > 0 and comp2 == 0)), one of them a ligature
+    describe('areMarksOfSameGlyph', function() {
+        const ligatureId = Symbol('ligature');
+
+        it('takes two marks of no ligature as marks of the same glyph', function() {
+            assert.strictEqual(areMarksOfSameGlyph(undefined, undefined), true);
+        });
+
+        it('takes two marks of a ligature as marks of the same glyph when they follow the same component', function() {
+            assert.strictEqual(areMarksOfSameGlyph({ ligatureId, ligatureComponent: 2 }, { ligatureId, ligatureComponent: 2 }), true);
+            assert.strictEqual(areMarksOfSameGlyph({ ligatureId, ligatureComponent: 2 }, { ligatureId, ligatureComponent: 1 }), false);
+        });
+
+        it('does not take marks of different ligatures as marks of the same glyph, unless one of them is a ligature', function() {
+            const otherLigatureId = Symbol('other');
+            assert.strictEqual(areMarksOfSameGlyph({ ligatureId, ligatureComponent: 1 }, { ligatureId: otherLigatureId, ligatureComponent: 1 }), false);
+            assert.strictEqual(areMarksOfSameGlyph({ ligatureId, ligatureComponent: 1 }, undefined), false);
+            assert.strictEqual(areMarksOfSameGlyph({ ligatureId, ligatureComponentCount: 2 }, undefined), true);
+            assert.strictEqual(areMarksOfSameGlyph(undefined, { ligatureId, ligatureComponentCount: 2 }), true);
+            assert.strictEqual(areMarksOfSameGlyph({ ligatureId: otherLigatureId, ligatureComponent: 1 }, { ligatureId, ligatureComponentCount: 2 }), true);
+        });
+    });
+
+    // TestMarkAttachment.ttf, built by test/generate-mark-attachment-font.py:
+    // hb-shape --no-glyph-names --cluster-level=1 [--features=<features>] TestMarkAttachment.ttf -u <code points>
+    describe('the mark and cursive attachments', function() {
+        let markFont;
+
+        beforeEach(function() {
+            markFont = parse(readFileSync('./test/fonts/TestMarkAttachment.ttf'));
+        });
+
+        // position the glyphs of a text as one run of TestMarkAttachment.ttf (see positionGlyphs)
+        function positionMarkText(text, runOptions) {
+            return positionTextGlyphs(markFont, text, runOptions);
+        }
+
+        it('attaches a mark to the base before it, at their anchors of the class of the mark', function() {
+            // -u 0061,0301: [2=0+500|10=1@-250,20+0], the acute at 0 500 on the a at 250 520, moved back by the advance of a
+            assert.strictEqual(positionMarkText('a\u{301}'), '2+500|10@-250,20+0');
+            // -u 0062,0323: [3=0+500|12=1+0], b has no anchor for the class of the dot below
+            assert.strictEqual(positionMarkText('b\u{323}'), '3+500|12+0');
+        });
+
+        it('attaches a mark to the glyph before it that is not a mark, past the marks between them', function() {
+            // --features=-mkmk -u 0061,0323,0301: [2=0+500|12=1@-300,30+0|10=2@-250,20+0], the acute on the a
+            assert.strictEqual(positionMarkText('a\u{323}\u{301}', { featureTags: ['mark'] }), '2+500|12@-300,30+0|10@-250,20+0');
+        });
+
+        it('attaches a mark to the glyph before it that is not a mark whatever the lookupFlag of its lookup, like HarfBuzz', function() {
+            // MARK_TO_BASE_IGNORE_LIGATURES (ss04, lookupflag IgnoreLigatures): --features=-mark,+ss04 -u 0061,0066,0069,0301
+            // [2=0+500|9=1+550|10=3+0], the ligature f_i before the acute, which the lookup does not cover, is not
+            // skipped; -u 0061,0301 [2=0+500|10=1@-250,400+0]
+            const ligatureGlyphIndexes = [markFont.charToGlyphIndex('a'), markFont.nameToGlyphIndex('f_i'), markFont.charToGlyphIndex('\u{301}')];
+            assert.strictEqual(positionGlyphs(markFont, ligatureGlyphIndexes, { featureTags: ['ss04'] }), '2+500|9+550|10+0');
+            assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['ss04'] }), '2+500|10@-250,400+0');
+        });
+
+        it('attaches the marks of a long run to the base before them', function() {
+            // --features=-mkmk -u 0061 followed by 3000 times 0301: [2=0+500|10=1@-250,20+0|...|10=3000@-250,20+0]
+            const shape = positionMarkText('a' + '\u{301}'.repeat(3000), { featureTags: ['mark'] });
+            assert.strictEqual(shape, ['2+500'].concat(Array(3000).fill('10@-250,20+0')).join('|'));
+        });
+
+        it('attaches a mark whose mark record has no anchor at the anchor 0 0, like HarfBuzz', function() {
+            // TestMarkAttachment.ttf with the MarkAnchor of acutecomb in MARK_TO_BASE set to None (fontTools), a NULL
+            // offset: -u 0061,0301 [2=0+500|10=1@-250,520+0]
+            const subtable = markFont.tables.gpos.lookups[0].subtables[0];
+            const acuteCoverageIndex = markFont.position.getCoverageIndex(subtable.markCoverage, markFont.charToGlyphIndex('\u{301}'));
+            subtable.markArray[acuteCoverageIndex].markAnchor = undefined;
+            assert.strictEqual(positionMarkText('a\u{301}'), '2+500|10@-250,520+0');
+        });
+
+        it('skips the marks of another mark attachment class or out of the mark filtering set of the lookup', function() {
+            // MARK_TO_BASE_ATTACHMENT_TYPE (ss13, MarkAttachmentType [acutecomb]): --features=-mark,-mkmk,+ss13
+            // -u 0061,0301 [2=0+500|10=1@-250,400+0], -u 0061,0300 [2=0+500|11=1+0]; the same with MARK_TO_BASE_FILTERED
+            // (ss14, UseMarkFilteringSet [acutecomb]); MARK_TO_LIGATURE_ATTACHMENT_TYPE (ss15, MarkAttachmentType
+            // [acutecomb]): --features=-mark,-mkmk,+ss15 -u 0066,0069,0301 [9=0+550|10=2@-130,400+0], -u 0066,0069,0300
+            // [9=0+550|11=2+0]
+            const ligature = markFont.nameToGlyphIndex('f_i');
+            for (const featureTag of ['ss13', 'ss14']) {
+                assert.strictEqual(positionMarkText('a\u{301}', { featureTags: [featureTag] }), '2+500|10@-250,400+0');
+                assert.strictEqual(positionMarkText('a\u{300}', { featureTags: [featureTag] }), '2+500|11+0');
+            }
+            assert.strictEqual(positionGlyphs(markFont, [ligature, markFont.charToGlyphIndex('\u{301}')], { featureTags: ['ss15'] }), '9+550|10@-130,400+0');
+            assert.strictEqual(positionGlyphs(markFont, [ligature, markFont.charToGlyphIndex('\u{300}')], { featureTags: ['ss15'] }), '9+550|11+0');
+        });
+
+        it('does not attach the marks that a mark-to-base or mark-to-ligature lookup ignores as marks without the glyph classes of GDEF, like HarfBuzz', function() {
+            // TestMarkAttachment.ttf with the GlyphClassDef of GDEF removed (fontTools), whose marks HarfBuzz takes from
+            // Unicode, without a mark attachment class: --features=-mark,-mkmk,+ss13 -u 0061,0301 [2=0+500|10=1+0],
+            // --features=-mark,-mkmk,+ss14 -u 0061,0301 [2=0+500|10=1@-250,400+0] (the mark glyph set of GDEF covers the
+            // acute) and -u 0061,0300 [2=0+500|11=1+0], --features=-mark,-mkmk,+ss15 -u 0066,0069,0301 [9=0+550|10=2+0];
+            // the mark-to-base lookup without lookupFlag, --features=-mkmk -u 0061,0301 [2=0+500|10=1@-250,20+0]
+            const ligature = markFont.nameToGlyphIndex('f_i');
+            markFont.tables.gdef.classDef = undefined;
+            assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['ss13'] }), '2+500|10+0');
+            assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['ss14'] }), '2+500|10@-250,400+0');
+            assert.strictEqual(positionMarkText('a\u{300}', { featureTags: ['ss14'] }), '2+500|11+0');
+            assert.strictEqual(positionGlyphs(markFont, [ligature, markFont.charToGlyphIndex('\u{301}')], { featureTags: ['ss15'] }), '9+550|10+0');
+            assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['mark'] }), '2+500|10@-250,20+0');
+            // a GDEF table that the layout ignores, like HarfBuzz the GDEF of the fonts of its blocklist: TestMarkAttachment.ttf
+            // without GDEF (fontTools), --features=-mark,-mkmk,+ss14 -u 0061,0301 [2=0+500|10=1+0]
+            markFont.isGdefIgnoredByLayout = true;
+            assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['ss14'] }), '2+500|10+0');
+        });
+
+        itFailsUntilFixed('attaches a mark after a default ignorable to the base before it, like HarfBuzz',
+            'getMarkBaseIndexes (src/position.mjs): the glyph of the soft hyphen U+00AD, which the font has not, is the base ' +
+            'of the acute, .notdef drawn with its advance, which MARK_TO_BASE does not cover, so the acute is not attached; ' +
+            'HarfBuzz skips the default ignorables but U+200D when it looks for the base of a mark and hides them with the ' +
+            'space glyph and an advance of 0 (hb_ot_hide_default_ignorables)',
+            function() {
+                // -u 0061,00AD,0301: [2=0+500|1=1+0|10=2@-250,20+0], the acute on the a, the same with U+200C and U+034F;
+                // -u 0061,200D,0301: [2=0+500|1=1+0|10=2+0], the acute not attached
+                assertShape(shapeText(markFont, 'a\u{AD}\u{301}'), {
+                    glyphs: [2, 1, 10], clusters: [0, 1, 2], advances: [500, 0, 0], offsets: [[0, 0], [0, 0], [-250, 20]]
+                });
+            });
+
+        itFailsUntilFixed('attaches the glyph of a spacing character that a mark-to-base lookup ignoring marks covers, without the glyph classes of GDEF, like HarfBuzz',
+            'isMarkIgnoredWithoutGlyphClasses (src/layout.mjs): every glyph the subtable covers is taken as a mark, where HarfBuzz ' +
+            'takes only the glyphs of nonspacing marks (Mn), so the acute of U+00B4 is ignored by the MarkAttachmentType of the lookup',
+            function() {
+                // TestMarkAttachment.ttf with the GlyphClassDef of GDEF removed and U+00B4 mapped to acutecomb (fontTools):
+                // --features=-mark,-mkmk,+ss13 -u 0061,00B4 [2=0+500|10=1@-250,400+0], a base glyph for HarfBuzz, which no
+                // lookupFlag skips (-u 0061,0301 [2=0+500|10=1+0])
+                markFont.tables.gdef.classDef = undefined;
+                markFont.tables.cmap.glyphIndexMap[0xB4] = markFont.nameToGlyphIndex('acutecomb');
+                assertShape(shapeText(markFont, 'a\u{B4}', { features: { mark: false, mkmk: false, ss13: true } }), {
+                    glyphs: [2, 10], clusters: [0, 1], advances: [500, 0], offsets: [[0, 0], [-250, 400]]
+                });
+            });
+
+        it('applies the variation deltas of the VariationIndex tables of the anchors', function() {
+            // -u 0062,0301: [3=0+500|10=1@-240,200+0], --variations=wght=500 [3=0+500|10=1@-220,230+0],
+            // --variations=wght=900 [3=0+500|10=1@-200,260+0]
+            assert.strictEqual(positionMarkText('b\u{301}'), '3+500|10@-240,200+0');
+            assert.strictEqual(positionMarkText('b\u{301}', { variation: { wght: 500 } }), '3+500|10@-220,230+0');
+            assert.strictEqual(positionMarkText('b\u{301}', { variation: { wght: 900 } }), '3+500|10@-200,260+0');
+        });
+
+        it('takes the coordinates of an anchor of format 2, without its contour point, like HarfBuzz without hinting', function() {
+            // -u 0069,0301: [5=0+250|10=1@-125,100+0], the anchor 125 600 contourpoint 2 of i
+            assert.strictEqual(positionMarkText('i\u{301}'), '5+250|10@-125,100+0');
+        });
+
+        it('attaches a mark to the mark before it of the same base, at their anchors', function() {
+            // -u 0061,0301,0301: [2=0+500|10=1@-250,20+0|10=2@-250,270+0], -u 0061,0301,0300: [2=0+500|10=1@-250,20+0|11=2@-250,270+0]
+            assert.strictEqual(positionMarkText('a\u{301}\u{301}'), '2+500|10@-250,20+0|10@-250,270+0');
+            assert.strictEqual(positionMarkText('a\u{301}\u{300}'), '2+500|10@-250,20+0|11@-250,270+0');
+            // -u 0061,0301,0300,0301: [2=0+500|10=1@-250,20+0|11=2@-250,270+0|10=3@-250,20+0], the second acute after the
+            // grave, which mkmk does not cover as a base mark
+            assert.strictEqual(positionMarkText('a\u{301}\u{300}\u{301}'), '2+500|10@-250,20+0|11@-250,270+0|10@-250,20+0');
+            // --variations=wght=500 -u 0062,0301,0301: [3=0+500|10=1@-220,230+0|10=2@-220,480+0], the variable anchor of b
+            assert.strictEqual(positionMarkText('b\u{301}\u{301}', { variation: { wght: 500 } }), '3+500|10@-220,230+0|10@-220,480+0');
+        });
+
+        it('attaches a mark to the mark before it that the mark filtering set of the lookup does not skip', function() {
+            // MARK_TO_MARK_FILTERED (ss02, UseMarkFilteringSet [acutecomb]): --features=-mkmk,+ss02 -u 0061,0301,0300,0301
+            // [2=0+500|10=1@-250,20+0|11=2@-250,20+0|10=3@-250,270+0], the second acute on the first one, past the grave
+            assert.strictEqual(positionMarkText('a\u{301}\u{300}\u{301}', { featureTags: ['mark', 'ss02'] }), '2+500|10@-250,20+0|11@-250,20+0|10@-250,270+0');
+        });
+
+        it('attaches a mark to the mark before it that the mark attachment type of the lookup does not skip', function() {
+            // MARK_TO_MARK_ATTACHMENT_TYPE (ss08, MarkAttachmentType [acutecomb]): --features=-mkmk,+ss08
+            // -u 0061,0301,0300,0301 [2=0+500|10=1@-250,20+0|11=2@-250,20+0|10=3@-250,270+0]
+            assert.strictEqual(positionMarkText('a\u{301}\u{300}\u{301}', { featureTags: ['mark', 'ss08'] }), '2+500|10@-250,20+0|11@-250,20+0|10@-250,270+0');
+        });
+
+        it('attaches a mark to a mark whatever the IgnoreBaseGlyphs of the lookup, like HarfBuzz', function() {
+            // MARK_TO_MARK_IGNORE_BASES (ss06, IgnoreBaseGlyphs): --features=-mkmk,+ss06 -u 0061,0301,0062,0301
+            // [2=0+450|10=1@-200,20+0|3=2+500|10=3@-240,200+0], the acute of b on b, not on the acute of a past b
+            const featureTags = DEFAULT_POSITIONING_FEATURES.filter(featureTag => featureTag !== 'mkmk').concat('ss06');
+            assert.strictEqual(positionMarkText('a\u{301}b\u{301}', { featureTags }), '2+450|10@-200,20+0|3+500|10@-240,200+0');
+        });
+
+        it('attaches a mark to a mark whatever the IgnoreLigatures of the lookup, like HarfBuzz', function() {
+            // MARK_TO_MARK_IGNORE_LIGATURES (ss18, IgnoreLigatures): --features=-mark,-mkmk,+ss18 -u 0061,0301,0066,0069,0301
+            // [2=0+500|10=1+0|9=2+550|10=4+0], the ligature f_i before the second acute is not skipped, so the acute is
+            // not attached to the acute of a past it
+            const acute = markFont.charToGlyphIndex('\u{301}');
+            const ligatureGlyphIndexes = [markFont.charToGlyphIndex('a'), acute, markFont.nameToGlyphIndex('f_i'), acute];
+            assert.strictEqual(positionGlyphs(markFont, ligatureGlyphIndexes, { featureTags: ['ss18'] }), '2+500|10+0|9+550|10+0');
+        });
+
+        it('attaches the marks at the start of a run to no base, and the second one to the first one, like HarfBuzz', function() {
+            // -u 0301,0301,0061: [10=0+0|10=1@0,250+0|2=2+500]
+            assert.strictEqual(positionMarkText('\u{301}\u{301}a'), '10+0|10@0,250+0|2+500');
+        });
+
+        it('attaches a glyph that is not a mark to the mark before it whatever the IgnoreMarks of the mark-to-mark lookup, like HarfBuzz', function() {
+            // TestMarkAttachment.ttf with MARK_TO_MARK (mkmk) set to IgnoreMarks and b added to its Mark1Coverage with the
+            // mark record of the acute (fontTools): --features=-kern -u 0061,0301,0062
+            // [2=0+500|10=1@-250,20+0|3=2@-250,270+500], b on the acute, which the lookup does not skip
+            const lookup = markFont.tables.gpos.lookups[2];
+            const subtable = lookup.subtables[0];
+            const glyphB = markFont.charToGlyphIndex('b');
+            const markGlyphIndexes = ['\u{301}', '\u{300}'].map(char => markFont.charToGlyphIndex(char));
+            const markRecords = markGlyphIndexes.map(glyphIndex => subtable.mark1Array[markFont.position.getCoverageIndex(subtable.mark1Coverage, glyphIndex)]);
+            lookup.lookupFlag = 0x0008;
+            subtable.mark1Coverage = { format: 1, glyphs: [glyphB, ...markGlyphIndexes] };
+            subtable.mark1Array = [markRecords[0], ...markRecords];
+            assert.strictEqual(positionMarkText('a\u{301}b', { featureTags: ['mark', 'mkmk'] }), '2+500|10@-250,20+0|3@-250,270+500');
+        });
+
+        it('does not attach a mark to a glyph before it that is not a GDEF mark, even when the mark-to-mark subtable covers it, like HarfBuzz', function() {
+            // MARK_TO_MARK_BASE_GLYPH (ss19), whose Mark2Coverage covers a: --features=-mark,-mkmk,+ss19 -u 0061,0301
+            // [2=0+500|10=1+0]
+            assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['ss19'] }), '2+500|10+0');
+        });
+
+        it('moves an attached mark back over the advances of the glyphs from its base, after the advances of the marks are set to 0', function() {
+            // -u 0061,0323,0301: [2=0+500|12=1@-300,30+0|10=2@-250,20+0], the dot below loses its advance of 100
+            assert.strictEqual(positionMarkText('a\u{323}\u{301}', { featureTags: ['mark'] }), '2+500|12@-300,30+0|10@-250,20+0');
+            // -u 0061,0301,0062: [2=0+450|10=1@-200,20+0|3=2+500], the a b -50 of kern (IgnoreMarks) shortens the advance
+            // of a, which the acute follows
+            assert.strictEqual(positionMarkText('a\u{301}b'), '2+450|10@-200,20+0|3+500');
+        });
+
+        it('sets the advance of the marks to 0 before the lookups or never, as the shaper of the run', function() {
+            // TestMarkAttachment.ttf with the script record DFLT of GSUB renamed gonm (fontTools): --script=Gonm
+            // --features=+ss01 -u 0061,0323,0301 [2=0+500|12=1@-300,30+40|10=2@-290,20+0], the 40 of ss01 after the advance of
+            // the dot below is set to 0 (the USE shaper of HarfBuzz)
+            const features = DEFAULT_POSITIONING_FEATURES.concat('ss01');
+            assert.strictEqual(positionMarkText('a\u{323}\u{301}', { featureTags: features, markAdvanceZeroing: MarkAdvanceZeroing.BEFORE_POSITIONING }),
+                '2+500|12@-300,30+40|10@-290,20+0');
+            // --script=Gonm -u 0062,0323: [3=0+500|12=1+0], the dot below, which b does not attach, keeps its x offset in a
+            // font with a GPOS table
+            assert.strictEqual(positionMarkText('b\u{323}', { markAdvanceZeroing: MarkAdvanceZeroing.BEFORE_POSITIONING }), '3+500|12+0');
+            // --script=Khmr -u 0061,0323,0301: [2=0+500|12=1@-300,30+100|10=2@-350,20+0], --script=Khmr --features=+ss01
+            // -u 0061,0323,0062: [2=0+450|12=1@-250,30+140|3=2+500]
+            assert.strictEqual(positionMarkText('a\u{323}\u{301}', { markAdvanceZeroing: MarkAdvanceZeroing.NONE }), '2+500|12@-300,30+100|10@-350,20+0');
+            assert.strictEqual(positionMarkText('a\u{323}b', { featureTags: features, markAdvanceZeroing: MarkAdvanceZeroing.NONE }), '2+450|12@-250,30+140|3+500');
+            assert.throws(() => positionMarkText('a', { markAdvanceZeroing: 'late' }), /Unknown mark advance zeroing: late/);
+        });
+
+        it('moves the x offset of a mark back by the advance it loses in a font without GPOS, in a left-to-right run only, like HarfBuzz', function() {
+            // TestMarkAttachment.ttf without GPOS and with the script record DFLT of GSUB renamed gonm (fontTools): --script=Gonm
+            // -u 0061,0323 [2=0+500|12=1@-100,0+0]; renamed adlm: --script=Adlm -u 0061,0323 [12=1+0|2=0+500], the USE
+            // shaper, which has no fallback mark positioning
+            delete markFont.tables.gpos;
+            assert.strictEqual(positionMarkText('a\u{323}', { markAdvanceZeroing: MarkAdvanceZeroing.BEFORE_POSITIONING }), '2+500|12@-100,0+0');
+            assert.strictEqual(positionMarkText('\u{323}a', { rightToLeft: true, script: 'arab', markAdvanceZeroing: MarkAdvanceZeroing.BEFORE_POSITIONING }),
+                '12+0|2+500');
+        });
+
+        it('moves an attached mark of a right-to-left run forward over the advances of the glyphs from its base', function() {
+            // TestMarkAttachment.ttf with the script record DFLT of GSUB renamed adlm (fontTools): --script=Adlm
+            // --features=+ss01 -u 0061,0323,0301 [10=2@290,20+0|12=1@240,30+40|2=0+500], the glyphs in visual order
+            const features = DEFAULT_POSITIONING_FEATURES.concat('ss01');
+            assert.strictEqual(
+                positionMarkText('\u{301}\u{323}a', { rightToLeft: true, script: 'arab', featureTags: features, markAdvanceZeroing: MarkAdvanceZeroing.BEFORE_POSITIONING }),
+                '10@290,20+0|12@240,30+40|2+500'
+            );
+            // -u 0628,064E: [14=1@260,30+0|13=0+500]
+            assert.strictEqual(positionMarkText('\u{64E}\u{628}', { rightToLeft: true, script: 'arab' }), '14@260,30+0|13+500');
+        });
+
+        it('joins the exit anchor of a glyph to the entry anchor of the next one, the glyph after attached to the glyph before', function() {
+            // CURSIVE_LEFT_TO_RIGHT (curs): -u 0078,0079,007A [6=0+450|7=1@-30,100+440|8=2@-20,0+480]: the advance of x ends
+            // at its exit anchor, y starts at its entry anchor and is attached to x, 100 higher; z is attached to y,
+            // whose exit anchor is 60 lower, 40 under its entry anchor (the Device tables of z do not apply)
+            assert.strictEqual(positionMarkText('xyz'), '6+450|7@-30,100+440|8@-20,0+480');
+            // TestMarkAttachment.ttf with the script record DFLT of GSUB renamed adlm (fontTools): --script=Adlm
+            // -u 0078,0079,007A [8=2+20|7=1@-470,100+-440|6=0@-450,0+50], in a right-to-left run the glyph after starts at
+            // its entry anchor and the glyph before ends at its exit anchor
+            assert.strictEqual(positionMarkText('zyx', { rightToLeft: true, script: 'arab' }), '8+20|7@-470,100+-440|6@-450,0+50');
+        });
+
+        it('applies the variation deltas of the VariationIndex tables of the cursive anchors', function() {
+            // CURSIVE_VARIABLE (ss07): --features=-curs,+ss07 -u 0078,0079 [6=0+450|7=1@-30,100+470],
+            // --variations=wght=900 [6=0+450|7=1@-90,180+410]
+            assert.strictEqual(positionMarkText('xy', { featureTags: ['ss07'] }), '6+450|7@-30,100+470');
+            assert.strictEqual(positionMarkText('xy', { featureTags: ['ss07'], variation: { wght: 900 } }), '6+450|7@-90,180+410');
+        });
+
+        it('applies the cursive attachments of an extension lookup', function() {
+            // TestMarkAttachment.ttf with CURSIVE_LEFT_TO_RIGHT in an extension lookup (useExtension of feaLib): -u
+            // 0078,0079,007A [6=0+450|7=1@-30,100+440|8=2@-20,0+480]
+            const lookups = markFont.tables.gpos.lookups;
+            lookups[6] = extensionLookup(lookups[6].subtables.map(extension => ({ lookupType: 3, extension })));
+            assert.strictEqual(positionMarkText('xyz'), '6+450|7@-30,100+440|8@-20,0+480');
+        });
+
+        it('attaches the glyph before to the glyph after with the RightToLeft flag, the last glyph on the baseline', function() {
+            // CURSIVE_RIGHT_TO_LEFT (curs, RightToLeft and IgnoreMarks): -u 0628,0628,0628 [13=2+480|13=1@-20,30+460|13=0@-20,60+480]
+            assert.strictEqual(positionMarkText('\u{628}\u{628}\u{628}', { rightToLeft: true, script: 'arab' }), '13+480|13@-20,30+460|13@-20,60+480');
+            // -u 0628,064E,0628: [13=2+480|14=1@240,60+0|13=0@-20,30+480], across the fatha, which follows its beh
+            assert.strictEqual(positionMarkText('\u{628}\u{64E}\u{628}', { rightToLeft: true, script: 'arab' }), '13+480|14@240,60+0|13@-20,30+480');
+            // SINGLE_BEH (ss09, before CURSIVE_RIGHT_TO_LEFT): --features=+ss09 -u 0628,0628 [13=1@15,0+495|13=0@-20,30+465],
+            // the advance of the glyph after ends at its entry anchor moved by its x offset
+            const featureTags = DEFAULT_POSITIONING_FEATURES.concat('ss09');
+            assert.strictEqual(positionMarkText('\u{628}\u{628}', { rightToLeft: true, script: 'arab', featureTags }), '13@15,0+495|13@-20,30+465');
+        });
+
+        it('turns a cursive attachment of a glyph the other way round when it gets a new parent, like HarfBuzz', function() {
+            // CURSIVE_REVERSED (ss03, RightToLeft) attaches x to y and y to z, then CURSIVE_LEFT_TO_RIGHT (curs) y to x and z
+            // to y: --features=+ss03 -u 0078,0079,007A [6=0+450|7=1@-30,100+440|8=2@-20,0+480], -u 0078,0079
+            // [6=0+450|7=1@-30,100+470]
+            const featureTags = DEFAULT_POSITIONING_FEATURES.concat('ss03');
+            assert.strictEqual(positionMarkText('xyz', { featureTags }), '6+450|7@-30,100+440|8@-20,0+480');
+            assert.strictEqual(positionMarkText('xy', { featureTags }), '6+450|7@-30,100+470');
+            // CURSIVE_REVERSED alone: --features=-curs,+ss03 -u 0078,0079,007A [6=0@0,50+450|7=1@-30,100+440|8=2@-20,0+480],
+            // z on the baseline, y 100 higher, x 50 under y
+            assert.strictEqual(positionMarkText('xyz', { featureTags: ['ss03'] }), '6@0,50+450|7@-30,100+440|8@-20,0+480');
+            // CURSIVE_X_Y (ss05) after CURSIVE_REVERSED joins x and y only, so z keeps its attachment to y, turned the other
+            // way round: --features=-curs,+ss03,+ss05 -u 0078,0079,007A [6=0+450|7=1@-30,70+440|8=2@-20,-30+480]
+            assert.strictEqual(positionMarkText('xyz', { featureTags: ['ss03', 'ss05'] }), '6+450|7@-30,70+440|8@-20,-30+480');
+        });
+
+        it('turns a long chain of cursive attachments the other way round, like HarfBuzz', function() {
+            // --features=+ss03 -u 0078, 10000 times 0079, 007A: [6=0+450|7=1@-30,100+440|7=2@-30,40+440|...
+            // |7=10000@-30,-599840+440|8=10001@-20,-599940+480], each y 60 under the one before it
+            const length = 10000;
+            const featureTags = DEFAULT_POSITIONING_FEATURES.concat('ss03');
+            const expectedGlyphs = ['6+450'];
+            for (let i = 0; i < length; i++) {
+                expectedGlyphs.push(`7@-30,${100 - 60 * i}+440`);
+            }
+            expectedGlyphs.push(`8@-20,${-60 * (length - 1)}+480`);
+            assert.strictEqual(positionMarkText('x' + 'y'.repeat(length) + 'z', { featureTags }), expectedGlyphs.join('|'));
+        });
+
+        it('adds up the y offsets of a chain of cursive attachments up to 64 glyphs, like HarfBuzz', function() {
+            // seventy beh: -u 0628,...,0628 [13=69+480|13=68@-20,30+460|...|13=0@-20,1950+480]: each beh 30 higher than the
+            // next one, the chain from the first beh added up over 64 glyphs (HB_MAX_NESTING_LEVEL), so the beh 64 does not
+            // get the offset of the beh 65 and the ones before it start again from 30
+            const shape = positionMarkText('\u{628}'.repeat(70), { rightToLeft: true, script: 'arab' }).split('|');
+            const yOffsets = shape.map(glyph => glyph.includes('@') ? Number(glyph.split(',')[1].split('+')[0]) : 0);
+            const expectedYOffsets = shape.map((glyph, visualIndex) => {
+                const textIndex = 69 - visualIndex;
+                return textIndex >= 65 ? 30 * (69 - textIndex) : 30 * (65 - textIndex);
+            });
+            assert.deepStrictEqual(yOffsets, expectedYOffsets);
+            assert.strictEqual(shape[69], '13@-20,1950+480');
+        });
+
+        // TestMarkAttachment.ttf with a copy of the first subtable of a lookup, whose coverage and records keep fewer
+        // glyphs, prepended to the lookup (fontTools): the first subtable that applies at a glyph applies, like HarfBuzz
+        describe('a subtable that does not apply', function() {
+            // prepend to a lookup a copy of its first subtable with the given fields
+            function prependSubtable(lookupIndex, fields) {
+                const subtables = markFont.tables.gpos.lookups[lookupIndex].subtables;
+                subtables.unshift({ ...subtables[0], ...fields });
+            }
+
+            // the coverage of one glyph
+            function createCoverage(glyphIndex) {
+                return { format: 1, glyphs: [glyphIndex] };
+            }
+
+            // the record of a glyph in a list of records by coverage index
+            function getCoverageRecord(coverage, records, glyphIndex) {
+                return records[markFont.position.getCoverageIndex(coverage, glyphIndex)];
+            }
+
+            it('lets the next subtable attach a mark to a base that the mark-to-base subtable does not cover', function() {
+                // a first MARK_TO_BASE subtable of b only: --features=-mkmk -u 0061,0301 [2=0+500|10=1@-250,20+0]
+                const subtable = markFont.tables.gpos.lookups[0].subtables[0];
+                const glyphB = markFont.charToGlyphIndex('b');
+                prependSubtable(0, {
+                    baseCoverage: createCoverage(glyphB),
+                    baseArray: [getCoverageRecord(subtable.baseCoverage, subtable.baseArray, glyphB)]
+                });
+                assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['mark'] }), '2+500|10@-250,20+0');
+            });
+
+            it('lets the next subtable attach a mark to a base without an anchor for the class of the mark', function() {
+                // a first MARK_TO_BASE subtable of a only, without its anchor for @TOP: --features=-mkmk -u 0061,0301
+                // [2=0+500|10=1@-250,20+0]
+                const subtable = markFont.tables.gpos.lookups[0].subtables[0];
+                const glyphA = markFont.charToGlyphIndex('a');
+                const acuteRecord = getCoverageRecord(subtable.markCoverage, subtable.markArray, markFont.charToGlyphIndex('\u{301}'));
+                const anchorsWithoutTop = getCoverageRecord(subtable.baseCoverage, subtable.baseArray, glyphA).slice();
+                anchorsWithoutTop[acuteRecord.markClass] = undefined;
+                prependSubtable(0, { baseCoverage: createCoverage(glyphA), baseArray: [anchorsWithoutTop] });
+                assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['mark'] }), '2+500|10@-250,20+0');
+            });
+
+            it('lets the next subtable attach a mark to a ligature that the mark-to-ligature subtable does not cover', function() {
+                // a first MARK_TO_LIGATURE subtable of a_f_i only: -u 0066,0069,0301 [9=0+550|10=2@-130,200+0]
+                const subtable = markFont.tables.gpos.lookups[1].subtables[0];
+                const ligature = markFont.nameToGlyphIndex('a_f_i');
+                prependSubtable(1, {
+                    ligatureCoverage: createCoverage(ligature),
+                    ligatureArray: [getCoverageRecord(subtable.ligatureCoverage, subtable.ligatureArray, ligature)]
+                });
+                const glyphIndexes = [markFont.nameToGlyphIndex('f_i'), markFont.charToGlyphIndex('\u{301}')];
+                assert.strictEqual(positionGlyphs(markFont, glyphIndexes, { featureTags: ['mark'] }), '9+550|10@-130,200+0');
+            });
+
+            it('lets the next subtable attach a mark to a mark that the mark-to-mark subtable does not cover', function() {
+                // a first MARK_TO_MARK subtable whose Mark2Coverage has the grave only: -u 0061,0301,0301
+                // [2=0+500|10=1@-250,20+0|10=2@-250,270+0]
+                const subtable = markFont.tables.gpos.lookups[2].subtables[0];
+                prependSubtable(2, { mark2Coverage: createCoverage(markFont.charToGlyphIndex('\u{300}')), mark2Array: [subtable.mark2Array[0]] });
+                assert.strictEqual(positionMarkText('a\u{301}\u{301}'), '2+500|10@-250,20+0|10@-250,270+0');
+            });
+
+            it('lets the next subtable join a glyph to the glyph before it without an exit anchor in the cursive subtable', function() {
+                // a first CURSIVE_LEFT_TO_RIGHT subtable of y only: -u 0078,0079 [6=0+450|7=1@-30,100+470]
+                const subtable = markFont.tables.gpos.lookups[6].subtables[0];
+                const glyphY = markFont.charToGlyphIndex('y');
+                prependSubtable(6, {
+                    coverage: createCoverage(glyphY),
+                    entryExitRecords: [getCoverageRecord(subtable.coverage, subtable.entryExitRecords, glyphY)]
+                });
+                assert.strictEqual(positionMarkText('xy'), '6+450|7@-30,100+470');
+            });
+        });
+
+        describe('of ligatures', function() {
+            // the glyphs of font.shape, with the GSUB ligature of liga (lookupflag IgnoreMarks; sub f i by f_i;)
+            it('attaches a mark after a ligature to its last component', function() {
+                // -u 0066,0069,0301: [9=0+550|10=2@-130,200+0], at the 420 700 of the second component
+                assertShape(shapeText(markFont, 'fi\u{301}'), { glyphs: [9, 10], clusters: [0, 2], advances: [550, 0], offsets: [[0, 0], [-130, 200]] });
+                // -u 0066,0069,0323: [9=0+550|12=2+0], the second component has no anchor for the dot below
+                assertShape(shapeText(markFont, 'fi\u{323}'), { glyphs: [9, 12], clusters: [0, 2], advances: [550, 0], offsets: [[0, 0], [0, 0]] });
+            });
+
+            it('attaches a mark that the ligature substitution skipped to the component it follows', function() {
+                // -u 0066,0301,0069: [9=0+550|10=0@-400,200+0], at the 150 700 of the first component
+                assertShape(shapeText(markFont, 'f\u{301}i'), { glyphs: [9, 10], clusters: [0, 0], advances: [550, 0], offsets: [[0, 0], [-400, 200]] });
+                // -u 0066,0323,0069: [9=0+550|12=0@-450,30+0]
+                assertShape(shapeText(markFont, 'f\u{323}i'), { glyphs: [9, 12], clusters: [0, 0], advances: [550, 0], offsets: [[0, 0], [-450, 30]] });
+            });
+
+            it('does not attach a mark to a mark of another component of the ligature', function() {
+                // -u 0066,0301,0069,0300: [9=0+550|10=0@-400,200+0|11=3@-130,200+0], the grave on the second component, not
+                // on the acute of the first one
+                assertShape(shapeText(markFont, 'f\u{301}i\u{300}'), {
+                    glyphs: [9, 10, 11], clusters: [0, 0, 3], advances: [550, 0, 0], offsets: [[0, 0], [-400, 200], [-130, 200]]
+                });
+            });
+
+            it('does not attach a mark to a mark of another component of the same ligature', function() {
+                // LIGA_F_I: sub f i i by f_i; -u 0066,0301,0069,0301,0069: [9=0+550|10=0@-400,200+0|10=0@-130,200+0], the
+                // second acute on the second component, not on the first acute
+                assertShape(shapeText(markFont, 'f\u{301}i\u{301}i'), {
+                    glyphs: [9, 10, 10], clusters: [0, 0, 0], advances: [550, 0, 0], offsets: [[0, 0], [-400, 200], [-130, 200]]
+                });
+            });
+
+            it('attaches a mark that the ligature of a contextual rule skipped to the component it follows', function() {
+                // CONTEXTUAL_LIGA_F_I (ss11, IgnoreMarks): sub f' lookup LIGA_F_I i'; --features=-liga,+ss11
+                // -u 0066,0301,0069,0300: [9=0+550|10=0@-400,200+0|11=3@-130,200+0]
+                assertShape(shapeText(markFont, 'f\u{301}i\u{300}', { features: { liga: false, ss11: true } }), {
+                    glyphs: [9, 10, 11], clusters: [0, 0, 3], advances: [550, 0, 0], offsets: [[0, 0], [-400, 200], [-130, 200]]
+                });
+            });
+
+            it('attaches a mark after a component that is a ligature at its component of the new ligature', function() {
+                // LIGA_A_F_I (ss12, IgnoreMarks): sub a f_i by a_f_i; after sub f i by f_i; --features=+ss12
+                // -u 0061,0066,0301,0069,0300: [15=0+1000|10=0@-400,200+0|11=4@-150,200+0], the acute on the second
+                // component of a_f_i (the f of f_i, at 600 700), the grave after the ligature on its last component
+                assertShape(shapeText(markFont, 'af\u{301}i\u{300}', { features: { ss12: true } }), {
+                    glyphs: [15, 10, 11], clusters: [0, 0, 4], advances: [1000, 0, 0], offsets: [[0, 0], [-400, 200], [-150, 200]]
+                });
+            });
+
+            it('attaches a mark after a component that is a ligature, of none of its components, to the last component of that ligature', function() {
+                // LIGA_F_I_A (ss16, IgnoreMarks): sub f_i a by a_f_i; after sub f i by f_i; --features=+ss16
+                // -u 0066,0069,0301,0061: [15=0+1000|10=0@-400,200+0], the acute after f_i on the second component of a_f_i
+                // (the i of f_i, at 600 700)
+                assertShape(shapeText(markFont, 'fi\u{301}a', { features: { ss16: true } }), {
+                    glyphs: [15, 10], clusters: [0, 0], advances: [1000, 0], offsets: [[0, 0], [-400, 200]]
+                });
+            });
+
+            it('attaches a mark of a multiple substitution that a ligature skipped at the component its index in the substitution gives it, like HarfBuzz', function() {
+                // MULTIPLE_Z_MARKS (ss20): sub z by dotbelowcomb acutecomb; after sub f i by f_i; then LIGA_F_I_A (ss16,
+                // IgnoreMarks): sub f_i a by a_f_i; --features=+ss20,+ss16 fiza: [15=0+1000|12=0+0|10=0@-750,200+0], the
+                // acute, the second glyph of the substitution, on the first component of a_f_i (at 250 700), the dot below
+                // on its last component (no anchor)
+                assertShape(shapeText(markFont, 'fiza', { features: { ss20: true, ss16: true } }), {
+                    glyphs: [15, 12, 10], clusters: [0, 0, 0], advances: [1000, 0, 0], offsets: [[0, 0], [0, 0], [-750, 200]]
+                });
+                // --features=+ss20 fiza: [9=0+550|12=2+0|10=2@-130,200+0|2=3+500], the acute after f_i on its last component
+                assertShape(shapeText(markFont, 'fiza', { features: { ss20: true } }), {
+                    glyphs: [9, 12, 10, 2], clusters: [0, 2, 2, 3], advances: [550, 0, 0, 500], offsets: [[0, 0], [0, 0], [-130, 200], [0, 0]]
+                });
+            });
+
+            it('does not attach a ligature of marks to a mark of a component of a ligature, like HarfBuzz', function() {
+                // LIGA_MARKS (ss17): sub dotbelowcomb gravecomb by acutecomb; --features=+ss17 -u 0066,0301,0069,0323,0300:
+                // [9=0+550|10=0@-400,200+0|10=3@-130,200+0], the ligature of marks takes no ligature of its own, so mkmk
+                // does not attach it to the acute of the first component of f_i: it stays on the last component
+                assertShape(shapeText(markFont, 'f\u{301}i\u{323}\u{300}', { features: { ss17: true } }), {
+                    glyphs: [9, 10, 10], clusters: [0, 0, 3], advances: [550, 0, 0], offsets: [[0, 0], [-400, 200], [-130, 200]]
+                });
+            });
+
+            it('does not attach a mark to a ligature without anchors, like HarfBuzz', function() {
+                // TestMarkAttachment.ttf with the LigatureAttach of f_i in MARK_TO_LIGATURE set to None, or without
+                // ComponentRecord (fontTools): -u 0066,0069,0301 [9=0+550|10=2+0], -u 0066,0301,0069 [9=0+550|10=0+0]
+                const ligatureArray = markFont.tables.gpos.lookups[1].subtables[0].ligatureArray;
+                for (const componentAnchors of [undefined, []]) {
+                    ligatureArray[0] = componentAnchors;
+                    assertShape(shapeText(markFont, 'fi\u{301}'), { glyphs: [9, 10], clusters: [0, 2], advances: [550, 0], offsets: [[0, 0], [0, 0]] });
+                    assertShape(shapeText(markFont, 'f\u{301}i'), { glyphs: [9, 10], clusters: [0, 0], advances: [550, 0], offsets: [[0, 0], [0, 0]] });
+                }
+            });
+
+            it('attaches the marks without the ligature as usual', function() {
+                // --features=-liga -u 0066,0301,0069: [4=0+300|10=1+0|5=2+250], f has no anchor
+                assertShape(shapeText(markFont, 'f\u{301}i', { features: { liga: false } }), {
+                    glyphs: [4, 10, 5], clusters: [0, 1, 2], advances: [300, 0, 250], offsets: [[0, 0], [0, 0], [0, 0]]
+                });
+                // --features=-liga -u 0066,0069,0301: [4=0+300|5=1+250|10=2@-125,100+0], on the i
+                assertShape(shapeText(markFont, 'fi\u{301}', { features: { liga: false } }), {
+                    glyphs: [4, 5, 10], clusters: [0, 1, 2], advances: [300, 250, 0], offsets: [[0, 0], [0, 0], [-125, 100]]
+                });
+            });
+        });
+
+        itFailsUntilFixed('attaches a mark after the second glyph of a multiple substitution that the subtable does not cover to the first glyph, like HarfBuzz',
+            'applyMarkToBaseAttachment (src/position.mjs): the base of the mark is the glyph before it, the x of the substitution, ' +
+            'which MARK_TO_BASE does not cover, so the mark is not attached (https://github.com/harfbuzz/harfbuzz/issues/740)',
+            function() {
+                // MULTIPLE_Z (ss10): sub z by a x; --features=+ss10 -u 007A,0301: [2=0+500|6=0+500|10=1@-750,20+0], the acute
+                // on the a
+                assertShape(shapeText(markFont, 'z\u{301}', { features: { ss10: true } }), {
+                    glyphs: [2, 6, 10], clusters: [0, 0, 1], advances: [500, 500, 0], offsets: [[0, 0], [0, 0], [-750, 20]]
+                });
+            });
+    });
+
+    describe('the mark and cursive attachments of real fonts', function() {
+        // hb-shape --no-glyph-names --cluster-level=1 <font> -u <code points>
+        it('places the marks of a variable Latin font at a variation, with the deltas of its anchors', function() {
+            // Roboto-VF-gsub-chaining-subset.ttf --language=en --variations=wght=750,wdth=80 -u 006A,0301,0301:
+            // [25=0+559|17=1@156,-25+0|17=2@156,351+0], the dotless j of ccmp and two acutes (mark, then mkmk); -u
+            // 006E,0323,0301: [36=0+1038|17=2@-69,0+0], the ligature of n and the dot below, then the acute
+            const robotoFont = loadFont('Roboto-VF-gsub-chaining-subset.ttf');
+            const variation = { wght: 750, wdth: 80 };
+            assertShape(shapeText(robotoFont, 'j\u{301}\u{301}', { variation }), {
+                glyphs: [25, 17, 17], clusters: [0, 1, 2], advances: [559, 0, 0], offsets: [[0, 0], [156, -25], [156, 351]]
+            });
+            assertShape(shapeText(robotoFont, 'n\u{323}\u{301}', { variation }), {
+                glyphs: [36, 17], clusters: [0, 2], advances: [1038, 0], offsets: [[0, 0], [-69, 0]]
+            });
+        });
+
+        it('places the marks of a variable Thai font at the default location and at a variation', function() {
+            // NotoSansThaiLooped-VF-gsub-chaining-subset.ttf -u 0E01,0E34,0E49: [1=0+616|8=1@-7,0+0|6=2@-6,-18+0], the
+            // mai tho on the sara i (mkmk); --variations=wght=700,wdth=70: [1=0+508|8=1@-6,0+0|6=2@-6,-19+0]
+            const thaiFont = loadFont('NotoSansThaiLooped-VF-gsub-chaining-subset.ttf');
+            assertShape(shapeText(thaiFont, '\u{E01}\u{E34}\u{E49}'), {
+                glyphs: [1, 8, 6], clusters: [0, 1, 2], advances: [616, 0, 0], offsets: [[0, 0], [-7, 0], [-6, -18]]
+            });
+            assertShape(shapeText(thaiFont, '\u{E01}\u{E34}\u{E49}', { variation: { wght: 700, wdth: 70 } }), {
+                glyphs: [1, 8, 6], clusters: [0, 1, 2], advances: [508, 0, 0], offsets: [[0, 0], [-6, 0], [-6, -19]]
+            });
+            // NotoSansThai-Medium-Testing-v1.ttf -u 0E1B,0E37,0E49: [343=0+614|464=1@-1,0+0|444=2@-208,0+0], the mai tho
+            // moved left of the tall ascender of po pla
+            const notoThaiFont = loadFont('../NotoSansThai-Medium-Testing-v1.ttf');
+            assertShape(shapeText(notoThaiFont, '\u{E1B}\u{E37}\u{E49}'), {
+                glyphs: [343, 464, 444], clusters: [0, 1, 2], advances: [614, 0, 0], offsets: [[0, 0], [-1, 0], [-208, 0]]
+            });
+        });
+
+        it('places the marks of the script fonts Pacifico and Playwrite', function() {
+            // Pacifico-Regular-calt-kern-subset.ttf -u 0061,0301: [18=0+458|44=1@149,0+0]
+            assertShape(shapeText(loadFont('Pacifico-Regular-calt-kern-subset.ttf'), 'a\u{301}'), {
+                glyphs: [18, 44], clusters: [0, 1], advances: [458, 0], offsets: [[0, 0], [149, 0]]
+            });
+            // PlaywriteUSTrad-VF-calt-subset.ttf -u 0065,0301,006C,0075: [20=0+444|25=0+0|8=0@-267,0+0|32=2+394|18=2+0|16=3+671],
+            // the acute after the connector of e (calt); its cluster is 1 in the fork, which does not compose e and the
+            // acute (see playwriteCursive.spec.mjs)
+            assertShape(shapeText(loadFont('PlaywriteUSTrad-VF-calt-subset.ttf'), 'e\u{301}lu'), {
+                glyphs: [20, 25, 8, 32, 18, 16], clusters: [0, 0, 1, 2, 2, 3], advances: [444, 0, 0, 394, 0, 671],
+                offsets: [[0, 0], [0, 0], [-267, 0], [0, 0], [0, 0], [0, 0]]
+            });
+        });
+
+        it('places the marks of Arabic fonts, on a lam alef ligature at the component of each mark', function() {
+            // Changa-Regular.ttf -u 0644,064E,0627: [773=0@375,180+0|458=0+635], the fatha on the lam of the ligature; -u
+            // 0644,0627,064E: [773=2@57,75+0|458=0+635], on the alef
+            const changaFont = loadFont('../Changa-Regular.ttf');
+            assertShape(shapeText(changaFont, '\u{644}\u{64E}\u{627}'), {
+                glyphs: [773, 458], clusters: [0, 0], advances: [0, 635], offsets: [[375, 180], [0, 0]]
+            });
+            assertShape(shapeText(changaFont, '\u{644}\u{627}\u{64E}'), {
+                glyphs: [773, 458], clusters: [2, 0], advances: [0, 635], offsets: [[57, 75], [0, 0]]
+            });
+            // -u 0628,064E,0633,0645: [408=3+655|343=2+926|773=1@63,0+0|294=0+320], the cursive attachment of curs
+            // (RightToLeft, IgnoreMarks) across the fatha
+            assertShape(shapeText(changaFont, '\u{628}\u{64E}\u{633}\u{645}'), {
+                glyphs: [408, 343, 773, 294], clusters: [3, 2, 1, 0], advances: [655, 926, 0, 320], offsets: [[0, 0], [0, 0], [63, 0], [0, 0]]
+            });
+            // Scheherazade-Bold.ttf --shapers=ot --features=-kern -u 0628,064E,0628,064E:
+            // [1075=3@607,-393+0|609=2+1498|1075=1@85,-93+0|932=0+439], the fathas follow the cursive y offsets of the beh
+            assertShape(shapeText(loadFont('../Scheherazade-Bold.ttf'), '\u{628}\u{64E}\u{628}\u{64E}', { kerning: false }), {
+                glyphs: [1075, 609, 1075, 932], clusters: [3, 2, 1, 0], advances: [0, 1498, 0, 439], offsets: [[607, -393], [0, 0], [85, -93], [0, 0]]
+            });
+        });
+
+        it('joins the cursive Arabic presentation forms from right to left, like HarfBuzz', function() {
+            // Changa-Regular.ttf -u FEDB,FE98,FE8E,FE8F: [0=3+600|276=2+280|301=1+320|394=0@-1,0+701], the forms of
+            // Arabic Presentation Forms-B joined by curs in a right-to-left run; -u FE92,FE92,FE92:
+            // [293=2+320|293=1+320|293=0+320], an advance of 960
+            const changaFont = loadFont('../Changa-Regular.ttf');
+            assertShape(shapeText(changaFont, '\u{FEDB}\u{FE98}\u{FE8E}\u{FE8F}'), {
+                glyphs: [0, 276, 301, 394], clusters: [3, 2, 1, 0], advances: [600, 280, 320, 701], offsets: [[0, 0], [0, 0], [0, 0], [-1, 0]]
+            });
+            assertShape(shapeText(changaFont, '\u{FE92}'.repeat(3)), {
+                glyphs: [293, 293, 293], clusters: [2, 1, 0], advances: [320, 320, 320], offsets: [[0, 0], [0, 0], [0, 0]]
+            });
+            assert.strictEqual(changaFont.getAdvanceWidth('\u{FE92}'.repeat(3), changaFont.unitsPerEm), 960);
         });
     });
 

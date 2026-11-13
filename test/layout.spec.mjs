@@ -2,6 +2,12 @@ import assert  from 'assert';
 import { Font, Path, Glyph } from '../src/opentype.mjs';
 import Layout, {
     getLayoutGdefTable,
+    getGdefGlyphClass,
+    isMarkGlyph,
+    getLigatureId,
+    getLigatureComponent,
+    getChosenScriptTag,
+    isMarkIgnoredWithoutGlyphClasses,
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
     getNotIgnoredGlyphPositions,
@@ -245,6 +251,28 @@ describe('layout.mjs', function() {
         });
     });
 
+    describe('getChosenScriptTag', function() {
+        const langSys = { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [] };
+        const createScripts = tags => tags.map(tag => ({ tag, script: { defaultLangSys: langSys, langSysRecords: [] } }));
+
+        it('chooses the first script tag the table has, otherwise the first of DFLT, dflt and latn, like hb_ot_layout_table_select_script', function() {
+            font.tables.gsub = { version: 1, scripts: createScripts(['DFLT', 'dev2', 'deva', 'latn']), features: [], lookups: [] };
+            assert.strictEqual(getChosenScriptTag(layout, ['dev3', 'dev2', 'deva']), 'dev2');
+            assert.strictEqual(getChosenScriptTag(layout, ['cyrl']), 'DFLT');
+            font.tables.gsub.scripts = createScripts(['dflt', 'latn']);
+            assert.strictEqual(getChosenScriptTag(layout, ['cyrl']), 'dflt');
+            font.tables.gsub.scripts = createScripts(['cyrl', 'latn']);
+            assert.strictEqual(getChosenScriptTag(layout, ['grek']), 'latn');
+        });
+
+        it('chooses no script tag when the table has none of them, nor without a table', function() {
+            font.tables.gsub = { version: 1, scripts: createScripts(['cyrl']), features: [], lookups: [] };
+            assert.strictEqual(getChosenScriptTag(layout, ['grek']), undefined);
+            delete font.tables.gsub;
+            assert.strictEqual(getChosenScriptTag(layout, ['grek']), undefined);
+        });
+    });
+
     describe('getGlyphClass', function() {
         const classDef1 = {
             format: 1,
@@ -336,6 +364,28 @@ describe('layout.mjs', function() {
         });
     });
 
+    describe('getGdefGlyphClass and isMarkGlyph', function() {
+        it('gives the class of a glyph in the GlyphClassDef of GDEF, 0 without it', function() {
+            const gdef = createLookupFlagsGdef();
+            const { a: glyphA, ff, acute } = glyphIndexes;
+            assert.deepStrictEqual([glyphA, ff, acute, 0].map(glyphIndex => getGdefGlyphClass(gdef, glyphIndex)), [1, 2, 3, 0]);
+            assert.deepStrictEqual([glyphA, ff, acute].map(glyphIndex => isMarkGlyph(gdef, glyphIndex)), [false, false, true]);
+            assert.strictEqual(getGdefGlyphClass(undefined, acute), 0);
+            assert.strictEqual(isMarkGlyph({}, acute), false);
+        });
+    });
+
+    describe('getLigatureId and getLigatureComponent', function() {
+        it('read the ligature properties of a glyph, the component 0 for a ligature and for none', function() {
+            const ligatureId = Symbol('ligature');
+            assert.strictEqual(getLigatureId({ ligatureId, ligatureComponent: 2 }), ligatureId);
+            assert.strictEqual(getLigatureComponent({ ligatureId, ligatureComponent: 2 }), 2);
+            assert.strictEqual(getLigatureComponent({ ligatureId, ligatureComponentCount: 3 }), 0);
+            assert.strictEqual(getLigatureId(undefined), undefined);
+            assert.strictEqual(getLigatureComponent(undefined), 0);
+        });
+    });
+
     describe('getLayoutGdefTable', function() {
         it('gives the GDEF table of the font, none when the layout ignores it like HarfBuzz', function() {
             const gdef = createLookupFlagsGdef();
@@ -410,6 +460,33 @@ describe('layout.mjs', function() {
             // the classes come from GDEF only (HarfBuzz synthesizes them from the Unicode general categories, not done here)
             assert.equal(isGlyphIgnoredByLookup(undefined, { lookupFlag: 0x0008 }, acute), false);
             assert.equal(isGlyphIgnoredByLookup({ version: 1 }, { lookupFlag: 0x0008 }, acute), false);
+        });
+    });
+
+    // the classes HarfBuzz synthesizes without the GlyphClassDef of GDEF (hb_synthesize_glyph_classes) give a mark no
+    // mark attachment class, while it still reads the mark glyph sets of GDEF (match_properties_mark); hb-shape references
+    // in position.spec.mjs
+    describe('isMarkIgnoredWithoutGlyphClasses', function() {
+        const { acute, dotbelow } = glyphIndexes;
+        const { markAttachClassDef, markGlyphSets } = createLookupFlagsGdef();
+        const gdefWithoutClasses = { version: 1.2, markAttachClassDef, markGlyphSets };
+        const isIgnored = (gdef, lookupFlag, glyphIndex, markFilteringSet) =>
+            isMarkIgnoredWithoutGlyphClasses(gdef, { lookupFlag, markFilteringSet }, glyphIndex);
+
+        it('ignores a mark with IgnoreMarks and with a MarkAttachmentType, whatever the MarkAttachClassDef of GDEF', function() {
+            assert.deepStrictEqual([acute, dotbelow].map(glyphIndex => isIgnored(gdefWithoutClasses, 0x0008, glyphIndex)), [true, true]);
+            assert.deepStrictEqual([acute, dotbelow].map(glyphIndex => isIgnored(gdefWithoutClasses, 0x0100, glyphIndex)), [true, true]);
+            assert.deepStrictEqual([acute, dotbelow].map(glyphIndex => isIgnored(undefined, 0x0200, glyphIndex)), [true, true]);
+        });
+
+        it('ignores a mark that the mark glyph set of a lookup with UseMarkFilteringSet does not cover, all of them without GDEF', function() {
+            assert.deepStrictEqual([acute, dotbelow].map(glyphIndex => isIgnored(gdefWithoutClasses, 0x0010, glyphIndex, 0)), [true, false]);
+            assert.deepStrictEqual([acute, dotbelow].map(glyphIndex => isIgnored(undefined, 0x0010, glyphIndex, 0)), [true, true]);
+        });
+
+        it('ignores no mark without these flags, nor with the GlyphClassDef of GDEF, whose classes isGlyphIgnoredByLookup reads', function() {
+            assert.deepStrictEqual([0, 0x0002, 0x0004].map(lookupFlag => isIgnored(gdefWithoutClasses, lookupFlag, acute)), [false, false, false]);
+            assert.equal(isIgnored(createLookupFlagsGdef(), 0x0200, acute), false);
         });
     });
 

@@ -87,6 +87,18 @@ function getOpenTypeScriptTags(script) {
 }
 
 /**
+ * The script tag HarfBuzz chooses in a layout table for a list of script tags (hb_ot_layout_table_select_script): the
+ * first one the table has, otherwise the first of the fallback scripts DFLT, dflt and latn that it has.
+ * @param {Layout} layout - a GSUB or GPOS layout (font.substitution, font.position)
+ * @param {string[]} scriptTags - see getOpenTypeScriptTags
+ * @return {string|undefined} undefined when the table has none of them, or without a table
+ */
+function getChosenScriptTag(layout, scriptTags) {
+    const scriptNames = layout.getScriptNames();
+    return scriptTags.concat(FALLBACK_SCRIPT_TAGS).find(tag => scriptNames.includes(tag));
+}
+
+/**
  * The script tag a layout table uses for a list of script tags, like hb_ot_layout_table_select_script of HarfBuzz: the
  * first one the table has, otherwise the first one, which getScriptTable takes to the fallback scripts.
  * @param {Layout} layout - a GSUB or GPOS layout (font.substitution, font.position)
@@ -184,6 +196,7 @@ function getCoverageIndex(coverageTable, glyphIndex) {
 }
 
 // the lookupFlag bits (OpenType Layout Common Table Formats, LookupFlag bit enumeration)
+const RIGHT_TO_LEFT = 0x0001;
 const IGNORE_BASE_GLYPHS = 0x0002;
 const IGNORE_LIGATURES = 0x0004;
 const IGNORE_MARKS = 0x0008;
@@ -221,6 +234,61 @@ function getLayoutGdefTable(font) {
 }
 
 /**
+ * The class of a glyph in the GlyphClassDef of GDEF (1 base, 2 ligature, 3 mark, 4 component).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {number} glyphIndex
+ * @returns {number} 0 for no class, and without a GlyphClassDef
+ */
+function getGdefGlyphClass(gdef, glyphIndex) {
+    return gdef && gdef.classDef ? getGlyphClass(gdef.classDef, glyphIndex) : 0;
+}
+
+/**
+ * Whether a glyph is a mark in the GlyphClassDef of GDEF: without it no glyph is a mark, unlike HarfBuzz, which then
+ * synthesizes the classes from the Unicode general category (a nonspacing mark is a mark).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {number} glyphIndex
+ * @returns {boolean}
+ */
+function isMarkGlyph(gdef, glyphIndex) {
+    return getGdefGlyphClass(gdef, glyphIndex) === MARK_GLYPH_CLASS;
+}
+
+/**
+ * What a ligature substitution records about a glyph, like the lig_props of HarfBuzz: a ligature has its own
+ * ligatureId and the number of its components (ligatureComponentCount), a glyph after one of its components (a mark
+ * the substitution skipped, or a mark after a component that was itself a ligature) has the ligatureId of the ligature
+ * and the component it follows (ligatureComponent, from 1). The glyphs of a multiple substitution of a glyph of no
+ * ligature have no ligatureId and their index in the substitution (ligatureComponent, none for the first one). Other
+ * glyphs have none.
+ * @typedef LigatureProperties
+ * @type Object
+ * @property {symbol|undefined} ligatureId - unique to each ligature substitution, undefined when the substitution is
+ * not a ligature for HarfBuzz (a base and marks, or marks only)
+ * @property {number} [ligatureComponent]
+ * @property {number} [ligatureComponentCount]
+ */
+
+/**
+ * The ligatureId of the ligature properties of a glyph (see LigatureProperties).
+ * @param {LigatureProperties|undefined} ligatureProperties
+ * @returns {symbol|undefined}
+ */
+function getLigatureId(ligatureProperties) {
+    return ligatureProperties && ligatureProperties.ligatureId;
+}
+
+/**
+ * The ligature component of the ligature properties of a glyph (see LigatureProperties), like _hb_glyph_info_get_lig_comp
+ * of HarfBuzz.
+ * @param {LigatureProperties|undefined} ligatureProperties
+ * @returns {number} 0 for a ligature and for a glyph without ligature properties
+ */
+function getLigatureComponent(ligatureProperties) {
+    return (ligatureProperties && ligatureProperties.ligatureComponent) || 0;
+}
+
+/**
  * Whether a lookup ignores a mark, like HarfBuzz (check_glyph_property and match_properties_mark): with IgnoreMarks,
  * every mark, otherwise with UseMarkFilteringSet, a mark the mark glyph set of the lookup does not cover (all the
  * marks when the GDEF table has no such set), otherwise with a MarkAttachmentType, a mark of another mark attachment class.
@@ -244,6 +312,25 @@ function isMarkIgnoredByLookup(gdef, lookupTable, glyphIndex) {
         return markAttachmentClass !== markAttachmentType;
     }
     return false;
+}
+
+/**
+ * Whether a lookup ignores a glyph of a font without glyph classes (no GlyphClassDef in the GDEF table of the layout,
+ * see getLayoutGdefTable) that a mark attachment subtable covers as a mark, taking it as a mark of no mark attachment
+ * class: with IgnoreMarks, with UseMarkFilteringSet when the mark glyph set of the lookup does not cover it, and with a
+ * MarkAttachmentType (see isMarkIgnoredByLookup). Like HarfBuzz with the classes it then synthesizes for the glyphs of
+ * the nonspacing marks of Unicode (Mn); not yet like HarfBuzz for the glyph of a spacing character (e.g. U+00B4), a
+ * base glyph for HarfBuzz, which no such lookupFlag ignores.
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
+ * @param {number} glyphIndex - the index of a glyph that a mark attachment subtable covers as a mark
+ * @returns {boolean} false with a GlyphClassDef, whose classes isGlyphIgnoredByLookup reads
+ */
+function isMarkIgnoredWithoutGlyphClasses(gdef, lookupTable, glyphIndex) {
+    if (gdef && gdef.classDef) {
+        return false;
+    }
+    return isMarkIgnoredByLookup({ markGlyphSets: gdef && gdef.markGlyphSets }, lookupTable, glyphIndex);
 }
 
 /**
@@ -600,11 +687,23 @@ Layout.prototype = {
 export default Layout;
 export {
     getLayoutGdefTable,
+    getGdefGlyphClass,
+    isMarkGlyph,
+    getLigatureId,
+    getLigatureComponent,
+    isMarkIgnoredWithoutGlyphClasses,
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
     getNotIgnoredGlyphPositions,
+    RIGHT_TO_LEFT,
+    IGNORE_BASE_GLYPHS,
+    IGNORE_LIGATURES,
     IGNORE_MARKS,
+    BASE_GLYPH_CLASS,
+    LIGATURE_GLYPH_CLASS,
+    MARK_GLYPH_CLASS,
     getRequiredFeatureIndex,
     getOpenTypeScriptTags,
+    getChosenScriptTag,
     selectScriptTag
 };

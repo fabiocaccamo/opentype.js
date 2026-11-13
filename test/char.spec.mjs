@@ -5,6 +5,7 @@ import {
     getCharScriptExtensions,
     getCharTextScript,
     getScriptRuns,
+    isArabicChar,
     isVariationSequenceSelector
 } from '../src/char.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
@@ -76,6 +77,23 @@ describe('char.mjs', function() {
             assert.deepStrictEqual(getCharScriptExtensions('1'), ['Zyyy']);
             assert.deepStrictEqual(getCharScriptExtensions('\u{0}'), ['Zyyy']);
             assert.deepStrictEqual(getCharScriptExtensions('\u{10FFFF}'), ['Zzzz']);
+        });
+    });
+
+    // the blocks of Blocks.txt (Unicode 16.0.0): FB50..FDFF Arabic Presentation Forms-A, whose ornate parentheses U+FD3E
+    // and U+FD3F are of the Common script (Scripts.txt), FE70..FEFF Arabic Presentation Forms-B, whose last char U+FEFF
+    // ZERO WIDTH NO-BREAK SPACE is of the Common script
+    describe('isArabicChar', function() {
+        it('gives true for the chars of the Arabic script of the Arabic Presentation Forms-A and -B blocks, as HarfBuzz lays them out from right to left', function() {
+            for (const char of ['\u{628}', '\u{FB50}', '\u{FB58}', '\u{FD3D}', '\u{FD40}', '\u{FDFF}', '\u{FE70}', '\u{FE92}', '\u{FEDB}', '\u{FEFC}']) {
+                assert.equal(isArabicChar(char), true, char.codePointAt(0).toString(16));
+            }
+        });
+
+        it('gives false for the chars around these blocks and for their chars of the Common script', function() {
+            for (const char of ['a', '\u{FB4F}', '\u{FD3E}', '\u{FD3F}', '\u{FE00}', '\u{FE6F}', '\u{FEFF}', '\u{FF01}']) {
+                assert.equal(isArabicChar(char), false, char.codePointAt(0).toString(16));
+            }
         });
     });
 

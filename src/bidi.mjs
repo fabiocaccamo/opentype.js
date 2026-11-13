@@ -7,6 +7,7 @@ import Tokenizer from './tokenizer.mjs';
 import FeatureQuery from './features/featureQuery.mjs';
 import {
     getTokenGlyphIndexes,
+    getTokenLigatureProperties,
     applyFeaturesToTokens,
     getRequiredFeatureStage,
     REQUIRED_VARIATION_ALTERNATES_TAG
@@ -331,20 +332,21 @@ Bidi.prototype.getBidiText = function (text) {
 };
 
 /**
- * The glyph indexes of a token that is not deleted in visual order: the order of its multiple substitution, reversed
- * for a token of a right-to-left run, whose tokens reverseArabicSentences reverses, like HarfBuzz reverses the glyphs of
- * a right-to-left run
+ * The glyphs of a token that is not deleted in visual order, each one with its ligature properties (see
+ * getTokenLigatureProperties): the order of its multiple substitution, reversed for a token of a right-to-left run,
+ * whose tokens reverseArabicSentences reverses, like HarfBuzz reverses the glyphs of a right-to-left run
  * @param {Token} token
- * @returns {number[]}
+ * @returns {Array<{index: number, ligatureProperties: LigatureProperties|undefined}>}
  */
-function getTokenVisualGlyphIndexes(token) {
-    const glyphIndexes = getTokenGlyphIndexes(token);
-    return this.rightToLeftTokens.has(token) ? glyphIndexes.slice().reverse() : glyphIndexes;
+function getTokenVisualGlyphs(token) {
+    const ligatureProperties = getTokenLigatureProperties(token);
+    const glyphs = getTokenGlyphIndexes(token).map((index, positionInToken) => ({ index, ligatureProperties: ligatureProperties[positionInToken] }));
+    return this.rightToLeftTokens.has(token) ? glyphs.reverse() : glyphs;
 }
 
 /**
  * Get the glyph indexes of the text in visual order: each glyph of a multiple substitution its own (see
- * getTokenVisualGlyphIndexes), none for a deleted token
+ * getTokenVisualGlyphs), none for a deleted token
  * @param {string} text an input text
  * @returns {number[]}
  */
@@ -352,7 +354,7 @@ Bidi.prototype.getTextGlyphs = function (text) {
     this.processText(text);
     return this.tokenizer.tokens
         .filter(token => !token.state.deleted)
-        .flatMap(token => getTokenVisualGlyphIndexes.call(this, token));
+        .flatMap(token => getTokenVisualGlyphs.call(this, token).map(glyph => glyph.index));
 };
 
 /**
@@ -363,10 +365,12 @@ Bidi.prototype.getTextGlyphs = function (text) {
  * substitution have the cluster of their token, a ligature merges the clusters of its components and of the
  * glyphs between them.
  * @param {string} text an input text
- * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean, scriptRun: Object}>}
- * glyph indexes in visual order (see getTextGlyphs), with the UTF-16 range [start, end) of their characters in the
- * text, whether their run is laid out from right to left (the arabic sentences, in reverse order of the text), and the
- * script run of their token, with its OpenType script tags (scriptRun.scriptTags, see getTokenScriptRuns)
+ * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean, scriptRun: Object,
+ * ligatureProperties: LigatureProperties|undefined}>} glyph indexes in visual order (see getTextGlyphs), with the
+ * UTF-16 range [start, end) of their characters in the text, whether their run is laid out from right to left (the
+ * arabic sentences, in reverse order of the text), the script run of their token, with its OpenType script tags
+ * (scriptRun.scriptTags, see getTokenScriptRuns), and the ligature properties of the glyph (see
+ * getTokenLigatureProperties)
  */
 Bidi.prototype.getTextGlyphClusters = function (text) {
     this.processText(text);
@@ -381,8 +385,8 @@ Bidi.prototype.getTextGlyphClusters = function (text) {
         const { start, end } = clusterRanges.get(token.cluster);
         const rightToLeft = this.rightToLeftTokens.has(token);
         const scriptRun = this.tokenScriptRuns.get(token);
-        for (const index of getTokenVisualGlyphIndexes.call(this, token)) {
-            clusters.push({ index, start, end, rightToLeft, scriptRun });
+        for (const { index, ligatureProperties } of getTokenVisualGlyphs.call(this, token)) {
+            clusters.push({ index, start, end, rightToLeft, scriptRun, ligatureProperties });
         }
     }
     return clusters;

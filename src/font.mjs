@@ -4,7 +4,7 @@ import Path from './path.mjs';
 import sfnt from './tables/sfnt.mjs';
 import { DefaultEncoding } from './encoding.mjs';
 import glyphset from './glyphset.mjs';
-import Position, { DEFAULT_POSITIONING_FEATURES, positionGlyphRun } from './position.mjs';
+import Position, { DEFAULT_POSITIONING_FEATURES, getMarkAdvanceZeroing, positionGlyphRun } from './position.mjs';
 import Substitution from './substitution.mjs';
 import { PaletteManager } from './palettes.mjs';
 import { LayerManager } from './layers.mjs';
@@ -13,7 +13,7 @@ import { VariationManager } from './variation.mjs';
 import HintingTrueType from './hintingtt.mjs';
 import Bidi, { ARABIC_FORM_TAGS, getScriptRunShaper } from './bidi.mjs';
 import { getCharTextScript } from './char.mjs';
-import { getOpenTypeScriptTags, selectScriptTag } from './layout.mjs';
+import { getOpenTypeScriptTags, getChosenScriptTag, selectScriptTag } from './layout.mjs';
 import { applyPaintType } from './tables/cff.mjs';
 
 function createDefaultNamesInfo(options) {
@@ -286,8 +286,9 @@ Font.prototype.stringToGlyphClusters = function(s, options) {
  * its run.
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options]
- * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean, scriptRun: Object}>}
- * the glyphs in visual order, rightToLeft for the glyphs of a right-to-left run, scriptRun the script run of the glyph
+ * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean, scriptRun: Object,
+ * ligatureProperties: Object|undefined}>} the glyphs in visual order, rightToLeft for the glyphs of a right-to-left run,
+ * scriptRun the script run of the glyph, ligatureProperties what the ligature substitutions recorded about the glyph
  * (see Bidi.getTextGlyphClusters)
  * @private
  */
@@ -299,7 +300,8 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
         start: cluster.start,
         end: cluster.end,
         rightToLeft: cluster.rightToLeft,
-        scriptRun: cluster.scriptRun
+        scriptRun: cluster.scriptRun,
+        ligatureProperties: cluster.ligatureProperties
     }));
 };
 
@@ -573,7 +575,8 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                                      when GPOS has no kern feature for the script and language (each glyph
  *                                      kerned with the next glyph that is not a GDEF mark), see Font.shape. The
  *                                      marks are the ones of the GlyphClassDef of GDEF: without it no glyph is
- *                                      a mark, for the GPOS lookups and the kern table, unlike HarfBuzz, which
+ *                                      a mark, for the GPOS lookups (but the mark-to-base and mark-to-ligature
+ *                                      attachments, see Font.shape) and the kern table, unlike HarfBuzz, which
  *                                      then takes the nonspacing marks of Unicode as marks. Like HarfBuzz, which shapes
  *                                      each script run and each direction run on its own, two glyphs of two script
  *                                      runs, or of a left-to-right run and of a right-to-left run, are never kerned
@@ -600,14 +603,15 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                                 which looks each feature up in GSUB and in GPOS, the GSUB features of the run but the
  *                                 Arabic forms, and abvm, blwm, curs, dist, kern (with the kerning option), mark and
  *                                 mkmk, and the required feature of the GPOS language system (its ReqFeatureIndex)
- *                                 whatever the features option, their lookups together in lookup list order; only
- *                                 the single adjustments (lookup type 1, e.g. of case, cpsp, palt, halt or vpal,
- *                                 which the features option enables, or of kern) and the pair adjustments (lookup
- *                                 type 2) are applied yet, the other lookup types are skipped with a warning (see
- *                                 Font.shape): a mark, of the text or substituted by GSUB, is drawn at the pen
- *                                 position, without the offset of its GPOS anchors, and keeps its advance, which
- *                                 HarfBuzz sets to 0 for a GDEF mark in the runs of its default, Arabic, Hebrew,
- *                                 Thai, USE and Myanmar shapers (see Font.shape). Not yet the GPOS lookups of the Arabic
+ *                                 whatever the features option, their lookups together in lookup list order: the
+ *                                 single adjustments (lookup type 1, e.g. of case, cpsp, palt, halt or vpal, which
+ *                                 the features option enables, or of kern), the pair adjustments (lookup type 2), the
+ *                                 cursive attachments (lookup type 3, e.g. of curs) and the mark attachments (lookup
+ *                                 types 4, 5 and 6, e.g. of mark and mkmk), so a mark, of the text or substituted by
+ *                                 GSUB, is drawn on its base at their anchors, and like HarfBuzz the advance of a GDEF
+ *                                 mark is set to 0 in the runs of its default, Arabic, Hebrew, Thai, USE and Myanmar
+ *                                 shapers (see Font.shape); the contextual positionings (lookup types 7 and 8) are
+ *                                 skipped with a warning (see Font.shape). Not yet the GPOS lookups of the Arabic
  *                                 forms, which HarfBuzz applies at the glyphs of each form only: a form that the
  *                                 features option enables applies at every glyph, like a feature of HarfBuzz enabled by
  *                                 the user. Not yet the GPOS lookups of the direction features (ltra, ltrm, rtla, rtlm)
@@ -651,7 +655,9 @@ Font.prototype.defaultRenderOptions = {
  * @property {number} end - the UTF-16 offset after the last character of the cluster of the glyph
  * @property {number} xAdvance - how far the pen moves after the glyph, in font units
  * @property {number} yAdvance - how far the pen moves up after the glyph, in font units: 0 in horizontal text
- * @property {number} xOffset - how far right of the pen the glyph is drawn, in font units
+ * @property {number} xOffset - how far right of the pen the glyph is drawn, in font units: a glyph attached to
+ *                              another one by GPOS (a mark on its base) is drawn from its own pen position, after the
+ *                              advances of the glyphs before it, at the offset that puts it on its anchor
  * @property {number} yOffset - how far above the pen the glyph is drawn, in font units (the y axis goes up, like
  *                              the y offsets of hb-shape)
  */
@@ -668,34 +674,47 @@ Font.prototype.defaultRenderOptions = {
  * kerning option, and the required feature of the GPOS language system (its ReqFeatureIndex) whatever the features
  * option. The single adjustments (lookup type 1, formats 1 and 2) apply their value record to a glyph, the pair
  * adjustments (lookup type 2) the two value records of a pair (x and y placement, x advance, with the variation
- * deltas of a variable font; the y advance of a value record is for vertical text); the other lookup types are
- * not implemented yet and are skipped with a warning (once per font and lookup type). When kern is on and GPOS
- * has no kern feature for the script and language, the kern table applies like in HarfBuzz: in visual order,
- * each glyph kerned with the next glyph that is not a GDEF mark, half of the value added to the advance of the
- * first glyph and the rest to the advance and the x offset of the second one; unlike HarfBuzz, which splits
- * the value of a pair in each kern subtable on its own, the values of a pair in several subtables are added up
- * before the split: the positions and the pen are the same, the advances can differ by a few units (up to half the
- * number of subtables with an odd value for the pair). The marks are the ones of the GlyphClassDef of GDEF: without
- * it no glyph is a mark (see GlyphRenderOptions.kerning). A GDEF mark keeps its advance (its hmtx advance and the
- * GPOS or kern table adjustments), like the Indic and Khmer shapers of HarfBuzz. HarfBuzz picks the shaper of a run
- * from its script and from the GSUB script it chose for it (hb_ot_shaper_categorize): a Khmer run always takes the
- * Khmer shaper, an Indic, USE or Myanmar run takes the default shaper when that GSUB script is DFLT or latn (or
- * mymr, for Myanmar). Not yet like HarfBuzz: in the other runs, its default, Arabic, Hebrew and Thai shapers set
- * the advance of a GDEF mark to 0 after GPOS, its USE and Myanmar shapers before GPOS, keeping the GPOS adjustments
- * (zero_mark_widths_by_gdef); in a font without a GPOS table (e.g. a font with the kern table only, with or without
- * GDEF), its default, Arabic and Hebrew shapers place each mark over or under its base (its fallback mark
- * positioning), where the mark is drawn at the pen position; the default ignorables (e.g. U+200D ZERO WIDTH JOINER,
- * U+00AD SOFT HYPHEN), which HarfBuzz skips in the GPOS and kern table pairs and hides with an advance of 0, are
- * drawn with their glyph (.notdef without one) and their advance, and no pair crosses them; a letter and a
- * combining mark are not composed into the precomposed glyph of the font (e.g. A and U+0300 into Agrave), so the
- * kern table and the GPOS lookups with IgnoreMarks kern the letter across the mark; the GPOS lookups of the Arabic
- * forms (isol, init, medi, fina), which HarfBuzz applies at the glyphs of each form only, apply only when the
- * features option enables them, then at every glyph like a feature that the user of HarfBuzz enables; the GPOS
- * feature variations (the FeatureVariations of the GPOS table), which HarfBuzz applies like the GSUB ones, are not
- * applied yet: the lookups of a GPOS feature are the ones of its FeatureList record at every variation; nor the
- * GPOS lookups of the other features HarfBuzz enables by default, the direction features (ltra, ltrm, rtla, rtlm)
- * and rand, nor the GSUB lookups of abvm, blwm, curs, dist, kern (with the kerning option), mark and mkmk, which
- * HarfBuzz looks up in GSUB too.
+ * deltas of a variable font; the y advance of a value record is for vertical text); the mark attachments (lookup
+ * types 4, 5 and 6) move a mark onto the glyph before it at their anchors (with the variation deltas of the anchors
+ * of a variable font): mark-to-base and mark-to-ligature onto the glyph before it that is not a GDEF mark, at the
+ * anchor of the ligature component the mark follows (see LigatureProperties in layout.mjs), mark-to-mark onto the
+ * mark before it of the same glyph; the cursive attachments (lookup type 3) join the exit anchor of a glyph to the
+ * entry anchor of the next one; after the lookups, the offsets of an attached glyph follow the glyph it is attached
+ * to, over the advances between them, like HarfBuzz (see positionGlyphRun in position.mjs); the contextual
+ * positionings (lookup types 7 and 8) are not implemented yet and are skipped with a warning (once per font and
+ * lookup type). When kern is on and GPOS has no kern feature for the script and language, the kern table applies
+ * like in HarfBuzz: in visual order, each glyph kerned with the next glyph that is not a GDEF mark, half of the value
+ * added to the advance of the first glyph and the rest to the advance and the x offset of the second one; unlike
+ * HarfBuzz, which splits the value of a pair in each kern subtable on its own, the values of a pair in several
+ * subtables are added up before the split: the positions and the pen are the same, the advances can differ by a few
+ * units (up to half the number of subtables with an odd value for the pair). The marks are the ones of the
+ * GlyphClassDef of GDEF: without it no glyph is a mark (see GlyphRenderOptions.kerning), but a mark-to-base or
+ * mark-to-ligature lookup with IgnoreMarks, a MarkAttachmentType, or UseMarkFilteringSet and a mark glyph set that
+ * does not cover the mark, takes every glyph its subtable covers as a mark and does not attach it (see
+ * isMarkIgnoredWithoutGlyphClasses in layout.mjs), like HarfBuzz for the glyphs of the nonspacing marks of Unicode
+ * (Mn), which it then takes as marks of no mark attachment class; not yet like HarfBuzz for the glyph of a spacing
+ * character that the subtable covers as a mark (e.g. U+00B4 mapped to the glyph of U+0301), a base glyph that
+ * HarfBuzz attaches. Like HarfBuzz (zero_mark_widths_by_gdef), the advance of a GDEF mark is set to 0 as the shaper
+ * HarfBuzz picks for the run from its script and from the GSUB script it chose for it (hb_ot_shaper_categorize, see
+ * getMarkAdvanceZeroing in position.mjs): after GPOS with its default, Arabic, Hebrew and Thai shapers, before GPOS
+ * with its USE and Myanmar shapers, keeping the GPOS adjustments, never with its Indic, Khmer and Hangul shapers;
+ * without a GPOS table, the x offset of a mark of a left-to-right run moves back by the advance it loses. Not yet
+ * like HarfBuzz: a mark after the second glyph of a multiple substitution attaches to that glyph when the subtable
+ * covers it, otherwise to nothing, where HarfBuzz attaches it to the first glyph of the substitution; in a font
+ * without a GPOS table (e.g. a font with the kern table only, with or without GDEF), its default, Arabic and Hebrew
+ * shapers place each mark over or under its base (its fallback mark positioning), where the mark is drawn at the
+ * pen position; the default ignorables (e.g. U+200D ZERO WIDTH JOINER, U+00AD SOFT HYPHEN), which HarfBuzz skips in
+ * the GPOS and kern table pairs and when it looks for the base of a mark, and hides with an advance of 0, are drawn
+ * with their glyph (.notdef without one) and their advance, no pair crosses them, and a mark after one of them but
+ * U+200D (e.g. U+00AD, U+200C, U+034F) is not attached to the base before it; a letter and a combining mark are not composed into the precomposed glyph
+ * of the font (e.g. A and U+0300 into Agrave), so the kern table and the GPOS lookups with IgnoreMarks kern the
+ * letter across the mark; the GPOS lookups of the Arabic forms (isol, init, medi, fina), which HarfBuzz applies at
+ * the glyphs of each form only, apply only when the features option enables them, then at every glyph like a feature
+ * that the user of HarfBuzz enables; the GPOS feature variations (the FeatureVariations of the GPOS table), which
+ * HarfBuzz applies like the GSUB ones, are not applied yet: the lookups of a GPOS feature are the ones of its
+ * FeatureList record at every variation; nor the GPOS lookups of the other features HarfBuzz enables by default, the
+ * direction features (ltra, ltrm, rtla, rtlm) and rand, nor the GSUB lookups of abvm, blwm, curs, dist, kern (with
+ * the kerning option), mark and mkmk, which HarfBuzz looks up in GSUB too.
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options] - features, kerning, script, language and variation
  * @return {GlyphPosition[]}
@@ -715,16 +734,19 @@ Font.prototype.shape = function(text, options) {
     }));
     for (const clusterIndexes of getGlyphRuns(glyphClusters)) {
         const firstCluster = glyphClusters[clusterIndexes[0]];
+        const scriptTags = firstCluster.scriptRun.scriptTags;
         positionGlyphRun(
             this.position,
             clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].glyph.index),
             clusterIndexes.map(clusterIndex => glyphPositions[clusterIndex]),
             {
                 rightToLeft: firstCluster.rightToLeft,
-                script: selectScriptTag(this.position, firstCluster.scriptRun.scriptTags),
+                script: selectScriptTag(this.position, scriptTags),
                 language: options.language,
-                featureTags: getPositioningFeatureTags(this, options, firstCluster.scriptRun.scriptTags),
-                variation: options.variation
+                featureTags: getPositioningFeatureTags(this, options, scriptTags),
+                variation: options.variation,
+                markAdvanceZeroing: getMarkAdvanceZeroing(scriptTags, getChosenScriptTag(this.substitution, scriptTags)),
+                ligatureProperties: clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].ligatureProperties)
             }
         );
     }

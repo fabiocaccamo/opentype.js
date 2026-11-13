@@ -113,7 +113,7 @@ hb-subset download/NotoSansModi-Regular.ttf \
 - Source: Noto Sans Thai Looped, variable (wdth, wght), `Version 2.000`
 - URL: https://raw.githubusercontent.com/google/fonts/e1652b5bc0a863e8a239f0a1bf19d07d816e85e5/ofl/notosansthailooped/NotoSansThaiLooped%5Bwdth%2Cwght%5D.ttf
 - sha256 of the download: `a6d220ea215bc2c4bfcd5c5efc4103e20302443f87f6dca7a9ce733a11f2cfbd`
-- Used by: `robotoGsubChaining.spec.mjs` (GSUB chaining context format 3 with a nested Single substitution format 1, upstream issue #860 and PR #870)
+- Used by: `robotoGsubChaining.spec.mjs` (GSUB chaining context format 3 with a nested Single substitution format 1, upstream issue #860 and PR #870) and `test/position.spec.mjs` (the GPOS mark attachments, with the variation deltas of their anchors)
 
 ```sh
 curl -sSL -o download/NotoSansThaiLooped-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/e1652b5bc0a863e8a239f0a1bf19d07d816e85e5/ofl/notosansthailooped/NotoSansThaiLooped%5Bwdth%2Cwght%5D.ttf'
@@ -128,7 +128,7 @@ python -m fontTools.subset download/NotoSansThaiLooped-wdth-wght.ttf \
 - Source: Pacifico Regular, `Version 3.001`
 - URL: https://raw.githubusercontent.com/google/fonts/34ce35e2b6d7a1467c0ecfd9cd13082a87ffd23e/ofl/pacifico/Pacifico-Regular.ttf
 - sha256 of the download: `5b6c0d5334a7bf77dea52b975c5a0c408878c0f7115ed5b6fb151f634b7bf701`
-- Used by: `pacificoContextualAlternates.spec.mjs` (final forms of the calt feature and GPOS pair kerning, upstream issues #372 and #253)
+- Used by: `pacificoContextualAlternates.spec.mjs` (final forms of the calt feature and GPOS pair kerning, upstream issues #372 and #253) and `test/position.spec.mjs` (a GPOS mark attachment)
 
 ```sh
 curl -sSL -o download/Pacifico-Regular.ttf 'https://raw.githubusercontent.com/google/fonts/34ce35e2b6d7a1467c0ecfd9cd13082a87ffd23e/ofl/pacifico/Pacifico-Regular.ttf'
@@ -144,7 +144,7 @@ python -m fontTools.subset download/Pacifico-Regular.ttf \
 - Source: Playwrite US Trad, variable (wght), `Version 1.003`
 - URL: https://raw.githubusercontent.com/google/fonts/7f36bed59352c1b52752f8fbbcd6da7643f5b02c/ofl/playwriteustrad/PlaywriteUSTrad%5Bwght%5D.ttf
 - sha256 of the download: `6f2b0ba3c262a4d23bc06ea78ff5eccd45ebf324635d81bac25165eb2a2f1960`
-- Used by: `playwriteCursive.spec.mjs` (calt of a connected cursive font, upstream PR #848 and issue #801)
+- Used by: `playwriteCursive.spec.mjs` (calt of a connected cursive font, upstream PR #848 and issue #801) and `test/position.spec.mjs` (a GPOS mark attachment after a connector of calt)
 
 ```sh
 curl -sSL -o download/PlaywriteUSTrad-wght.ttf 'https://raw.githubusercontent.com/google/fonts/7f36bed59352c1b52752f8fbbcd6da7643f5b02c/ofl/playwriteustrad/PlaywriteUSTrad%5Bwght%5D.ttf'
@@ -198,7 +198,7 @@ The Reserved Font Name of the license ('RevReading Lexend') is not in the name o
 - Source: Roboto, variable (wdth, wght), `Version 3.015; 2026`
 - URL: https://raw.githubusercontent.com/google/fonts/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf
 - sha256 of the download: `d7598e12c5dbef095ff8272cfc55da0250bd07fbdecbac8a530b9b277872a134`
-- Used by: `robotoGsubChaining.spec.mjs` (GSUB chaining context formats 2 and 3, upstream PRs #816 and #861, issue #874)
+- Used by: `robotoGsubChaining.spec.mjs` (GSUB chaining context formats 2 and 3, upstream PRs #816 and #861, issue #874, and the GPOS mark attachment of an acute on the dotless j) and `test/position.spec.mjs` (the GPOS mark attachments, with the variation deltas of their anchors)
 
 ```sh
 curl -sSL -o download/Roboto-wdth-wght.ttf 'https://raw.githubusercontent.com/google/fonts/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf'
