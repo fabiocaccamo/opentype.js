@@ -1,6 +1,6 @@
 import assert from 'assert';
 import { parse } from '../src/opentype.mjs';
-import FeatureQuery from '../src/features/featureQuery.mjs';
+import FeatureQuery, { getSubstitutionGlyphEdits } from '../src/features/featureQuery.mjs';
 import { ContextParams } from '../src/tokenizer.mjs';
 import {
     glyphIndexes,
@@ -10,6 +10,7 @@ import {
     createCoverages,
     createSingleLookup,
     createMultipleLookup,
+    createLigatureLookup,
     subAcuteBLookup
 } from './lookup-flags-font.mjs';
 import { readFileSync } from 'fs';
@@ -17,8 +18,54 @@ import { itFailsUntilFixed } from './regression/helpers.mjs';
 import { getFeatureLookupTables } from './testutil.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
-// the result of a contextual rule that matches: its substitutions, and the offset of its last input glyph from the current one
-const contextualMatch = (substitutions, lastInputOffset) => ({ substitutions, lastInputOffset });
+// the result of a contextual rule that matches: the substitutions of its nested lookups in the order they apply, and the
+// number of glyphs from the current one to its last input glyph after them
+const contextualMatch = (substitutions, inputLength) => ({ substitutions, inputLength });
+// a substitution of a nested lookup at an offset from the current glyph, of the type id: single substitution format 1
+// (11) or 2 (12), multiple substitution (21), ligature substitution (41)
+const nestedSubstitution = (offset, id, substitution) => ({ offset, id, substitution });
+
+// a b in class 1, the other glyphs in class 0
+const classDef = { format: 2, ranges: [{ start: glyphIndexes.a, end: glyphIndexes.b, classId: 1 }] };
+// a b in class 1, c in class 2, the other glyphs in class 0
+const classDefWithC = {
+    format: 2,
+    ranges: [{ start: glyphIndexes.a, end: glyphIndexes.b, classId: 1 }, { start: glyphIndexes.c, end: glyphIndexes.c, classId: 2 }]
+};
+
+// the chaining context subtables of formats 1, 2 and 3 of a rule of the glyphs a, b and c
+function chainingSubtables(backtrack, input, lookahead, lookupRecords) {
+    const glyphClasses = glyphs => glyphs.map(glyph => glyph === glyphIndexes.c ? 2 : 1);
+    const coverages = glyphs => glyphs.map(glyph => ({ format: 1, glyphs: [glyph] }));
+    const firstCoverage = coverages([input[0]])[0];
+    return [
+        {
+            substFormat: 1,
+            coverage: firstCoverage,
+            chainRuleSets: [[{ backtrack: backtrack.slice().reverse(), input: input.slice(1), lookahead, lookupRecords }]]
+        },
+        {
+            substFormat: 2,
+            coverage: firstCoverage,
+            backtrackClassDef: classDefWithC,
+            inputClassDef: classDefWithC,
+            lookaheadClassDef: classDefWithC,
+            chainClassSet: [[], [{
+                backtrack: glyphClasses(backtrack.slice().reverse()),
+                input: glyphClasses(input.slice(1)),
+                lookahead: glyphClasses(lookahead),
+                lookupRecords
+            }]]
+        },
+        {
+            substFormat: 3,
+            backtrackCoverage: coverages(backtrack.slice().reverse()),
+            inputCoverage: coverages(input),
+            lookaheadCoverage: coverages(lookahead),
+            lookupRecords
+        }
+    ];
+}
 
 describe('featureQuery.mjs', function() {
     let arabicFont;
@@ -139,7 +186,7 @@ describe('featureQuery.mjs', function() {
             let contextParams = new ContextParams([882, 520], 0);
             const substitutions = lookup(contextParams, featureLookups[0]);
             // an input of one glyph, 520 is the lookahead
-            assert.deepEqual(substitutions, contextualMatch([1348], 0));
+            assert.deepEqual(substitutions, contextualMatch([nestedSubstitution(0, 12, 1348)], 1));
         });
         it('should find a substitute - required ligature substitution format 1 (41)', function () {
             /** arab */
@@ -177,14 +224,11 @@ describe('featureQuery.mjs', function() {
             assert.equal(substitutionType, 51);
             const lookup = query.sub5.getLookupMethod(featureLookups[0], lookupSubtables[0]);
             // space endash space: both spaces become uni2009 (86), like HarfBuzz does;
-            // the endash (88) is not substituted, so it is a hole in the substitutions
+            // the endash (88) is not substituted, so no substitution applies at its offset
             let contextParams = new ContextParams([1, 88, 1], 0);
-            const { substitutions, lastInputOffset } = lookup(contextParams, featureLookups[0]);
-            assert.equal(substitutions.length, 3);
-            assert.equal(substitutions[0], 86);
-            assert.equal(1 in substitutions, false);
-            assert.equal(substitutions[2], 86);
-            assert.equal(lastInputOffset, 2);
+            const { substitutions, inputLength } = lookup(contextParams, featureLookups[0]);
+            assert.deepEqual(substitutions, [nestedSubstitution(0, 11, 86), nestedSubstitution(2, 11, 86)]);
+            assert.equal(inputLength, 3);
         });
         it('should parse multiple glyphs -ligature substitution format 3 (53)', function () {
             const feature = query.sub5.getFeature({tag: 'ccmp', script: 'DFLT'});
@@ -195,7 +239,7 @@ describe('featureQuery.mjs', function() {
             const lookup = query.sub5.getLookupMethod(featureLookups[0], lookupSubtables[0]);
             let contextParams = new ContextParams([2, 3], 0);
             const substitutions = lookup(contextParams, featureLookups[1]);
-            assert.deepEqual(substitutions, contextualMatch([54, 54], 1));
+            assert.deepEqual(substitutions, contextualMatch([nestedSubstitution(0, 12, 54), nestedSubstitution(1, 12, 54)], 2));
         });
         it('should decompose a glyph - multiple substitution format 1 (21)', function () {
             const feature = query.arabic.getFeature({tag: 'ccmp', script: 'arab'});
@@ -241,10 +285,6 @@ describe('featureQuery.mjs', function() {
         ];
         const aCoverage = { format: 1, glyphs: [glyphA] };
         const bCoverage = { format: 1, glyphs: [glyphB] };
-        // a b in class 1, the other glyphs in class 0
-        const classDef = { format: 2, ranges: [{ start: glyphA, end: glyphB, classId: 1 }] };
-        // a b in class 1, c in class 2, the other glyphs in class 0
-        const classDefWithC = { format: 2, ranges: [{ start: glyphA, end: glyphB, classId: 1 }, { start: glyphC, end: glyphC, classId: 2 }] };
 
         function createQuery(lookupTable, scriptTag = 'latn', featureTag = 'calt') {
             const lookups = nestedLookups.concat([lookupTable]);
@@ -262,15 +302,6 @@ describe('featureQuery.mjs', function() {
             return substituteIn(lookupTable, [glyphA, acute, glyphB], position);
         }
 
-        // the substitutions of a contextual rule are by offset from the current glyph, holes for the glyphs it keeps
-        function sparse(entries) {
-            const substitutions = [];
-            for (const [offset, glyphIndex] of entries) {
-                substitutions[offset] = glyphIndex;
-            }
-            return substitutions;
-        }
-
         it('skips the marks of the input sequence: context formats 1, 2 and 3', function() {
             // lookupflag IgnoreMarks; sub a' b' lookup SUB_B; -u 0061,0301,0062: [1=0+500|5=1+0|8=2+500]
             const lookupRecords = [{ sequenceIndex: 1, lookupListIndex: 1 }];
@@ -281,7 +312,7 @@ describe('featureQuery.mjs', function() {
             ];
             for (const subtable of subtables) {
                 const lookupTable = { lookupType: 5, lookupFlag: IGNORE_MARKS, subtables: [subtable] };
-                assert.deepStrictEqual(substituteAt(lookupTable, 0), contextualMatch(sparse([[2, bAlternate]]), 2), `format ${subtable.substFormat}`);
+                assert.deepStrictEqual(substituteAt(lookupTable, 0), contextualMatch([nestedSubstitution(2, 12, bAlternate)], 3), `format ${subtable.substFormat}`);
                 assert.equal(substituteAt({ ...lookupTable, lookupFlag: 0 }, 0), null, `format ${subtable.substFormat} without the flag`);
             }
         });
@@ -303,7 +334,7 @@ describe('featureQuery.mjs', function() {
             ];
             for (const subtable of subtables) {
                 const lookupTable = { lookupType: 6, lookupFlag: IGNORE_MARKS, subtables: [subtable] };
-                assert.deepStrictEqual(substituteAt(lookupTable, 2), contextualMatch([bAlternate], 0), `format ${subtable.substFormat}`);
+                assert.deepStrictEqual(substituteAt(lookupTable, 2), contextualMatch([nestedSubstitution(0, 12, bAlternate)], 1), `format ${subtable.substFormat}`);
                 assert.equal(substituteAt({ ...lookupTable, lookupFlag: 0 }, 2), null, `format ${subtable.substFormat} without the flag`);
             }
         });
@@ -325,7 +356,7 @@ describe('featureQuery.mjs', function() {
             ];
             for (const subtable of subtables) {
                 const lookupTable = { lookupType: 6, lookupFlag: IGNORE_MARKS, subtables: [subtable] };
-                assert.deepStrictEqual(substituteAt(lookupTable, 0), contextualMatch([aAlternate], 0), `format ${subtable.substFormat}`);
+                assert.deepStrictEqual(substituteAt(lookupTable, 0), contextualMatch([nestedSubstitution(0, 12, aAlternate)], 1), `format ${subtable.substFormat}`);
                 assert.equal(substituteAt({ ...lookupTable, lookupFlag: 0 }, 0), null, `format ${subtable.substFormat} without the flag`);
             }
         });
@@ -400,43 +431,9 @@ describe('featureQuery.mjs', function() {
             for (const subtable of subtables) {
                 const lookupTable = { lookupType: 5, lookupFlag: IGNORE_MARKS, subtables: [subtable] };
                 const substitutions = substituteIn(lookupTable, [glyphA, acute, glyphB, dotbelow, glyphA], 0);
-                assert.deepStrictEqual(substitutions, contextualMatch(sparse([[4, aAlternate]]), 4), `format ${subtable.substFormat}`);
+                assert.deepStrictEqual(substitutions, contextualMatch([nestedSubstitution(4, 12, aAlternate)], 5), `format ${subtable.substFormat}`);
             }
         });
-
-        // the chaining context subtables of formats 1, 2 and 3 of a rule of glyphs
-        function chainingSubtables(backtrack, input, lookahead, lookupRecords) {
-            const glyphClasses = glyphs => glyphs.map(glyph => glyph === glyphC ? 2 : 1);
-            const coverages = glyphs => glyphs.map(glyph => ({ format: 1, glyphs: [glyph] }));
-            const firstCoverage = coverages([input[0]])[0];
-            return [
-                {
-                    substFormat: 1,
-                    coverage: firstCoverage,
-                    chainRuleSets: [[{ backtrack: backtrack.slice().reverse(), input: input.slice(1), lookahead, lookupRecords }]]
-                },
-                {
-                    substFormat: 2,
-                    coverage: firstCoverage,
-                    backtrackClassDef: classDefWithC,
-                    inputClassDef: classDefWithC,
-                    lookaheadClassDef: classDefWithC,
-                    chainClassSet: [[], [{
-                        backtrack: glyphClasses(backtrack.slice().reverse()),
-                        input: glyphClasses(input.slice(1)),
-                        lookahead: glyphClasses(lookahead),
-                        lookupRecords
-                    }]]
-                },
-                {
-                    substFormat: 3,
-                    backtrackCoverage: coverages(backtrack.slice().reverse()),
-                    inputCoverage: coverages(input),
-                    lookaheadCoverage: coverages(lookahead),
-                    lookupRecords
-                }
-            ];
-        }
 
         it('matches the lookahead after the last input glyph: chaining context formats 1, 2 and 3', function() {
             // ss12: lookupflag IgnoreMarks; sub a' lookup SUB_A b' c;
@@ -444,11 +441,12 @@ describe('featureQuery.mjs', function() {
             for (const subtable of chainingSubtables([], [glyphA, glyphB], [glyphC], [{ sequenceIndex: 0, lookupListIndex: 0 }])) {
                 const lookupTable = { lookupType: 6, lookupFlag: IGNORE_MARKS, subtables: [subtable] };
                 const message = `format ${subtable.substFormat}`;
-                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, glyphB, acute, glyphC], 0), contextualMatch([aAlternate], 1), message);
+                const aSubstitution = nestedSubstitution(0, 12, aAlternate);
+                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, glyphB, acute, glyphC], 0), contextualMatch([aSubstitution], 2), message);
                 // -u 0061,0301,0062,0063: [7=0+500|5=1+0|2=2+500|3=3+500], the mark inside the input
-                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, acute, glyphB, glyphC], 0), contextualMatch([aAlternate], 2), `inside ${message}`);
+                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, acute, glyphB, glyphC], 0), contextualMatch([aSubstitution], 3), `inside ${message}`);
                 // -u 0061,0062,0063: [7=0+500|2=1+500|3=2+500]
-                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, glyphB, glyphC], 0), contextualMatch([aAlternate], 1), message);
+                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, glyphB, glyphC], 0), contextualMatch([aSubstitution], 2), message);
             }
         });
 
@@ -458,9 +456,9 @@ describe('featureQuery.mjs', function() {
                 const lookupTable = { lookupType: 6, lookupFlag: IGNORE_MARKS, subtables: [subtable] };
                 // -u 0063,0301,0061,0062: [3=0+500|5=1+0|1=2+500|8=3+500]
                 const message = `format ${subtable.substFormat}`;
-                assert.deepStrictEqual(substituteIn(lookupTable, [glyphC, acute, glyphA, glyphB], 2), contextualMatch(sparse([[1, bAlternate]]), 1), message);
+                assert.deepStrictEqual(substituteIn(lookupTable, [glyphC, acute, glyphA, glyphB], 2), contextualMatch([nestedSubstitution(1, 12, bAlternate)], 2), message);
                 // -u 0063,0061,0301,0062: [3=0+500|1=1+500|5=2+0|8=3+500]
-                assert.deepStrictEqual(substituteIn(lookupTable, [glyphC, glyphA, acute, glyphB], 1), contextualMatch(sparse([[2, bAlternate]]), 2), message);
+                assert.deepStrictEqual(substituteIn(lookupTable, [glyphC, glyphA, acute, glyphB], 1), contextualMatch([nestedSubstitution(2, 12, bAlternate)], 3), message);
             }
         });
 
@@ -469,7 +467,7 @@ describe('featureQuery.mjs', function() {
             // -u 0062,0063: [8=0+500|1=1+500|5=1+0], the lookahead a is the first glyph of the glyphs of c
             for (const subtable of chainingSubtables([], [glyphB], [glyphA], [{ sequenceIndex: 0, lookupListIndex: 1 }])) {
                 const lookupTable = { lookupType: 6, lookupFlag: IGNORE_MARKS, subtables: [subtable] };
-                assert.deepStrictEqual(substituteIn(lookupTable, [glyphB, glyphA, acute], 0), contextualMatch([bAlternate], 0), `format ${subtable.substFormat}`);
+                assert.deepStrictEqual(substituteIn(lookupTable, [glyphB, glyphA, acute], 0), contextualMatch([nestedSubstitution(0, 12, bAlternate)], 1), `format ${subtable.substFormat}`);
                 assert.equal(substituteIn(lookupTable, [glyphB, acute, glyphC], 0), null, `format ${subtable.substFormat}`);
             }
         });
@@ -490,7 +488,7 @@ describe('featureQuery.mjs', function() {
             for (const lookupTable of lookupTables) {
                 const message = `lookup type ${lookupTable.lookupType} format ${lookupTable.subtables[0].substFormat}`;
                 // the glyphs of c, a acute, then b: the acute is a glyph of its own that the lookup skips
-                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, acute, glyphB], 0), contextualMatch(sparse([[2, bAlternate]]), 2), message);
+                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, acute, glyphB], 0), contextualMatch([nestedSubstitution(2, 12, bAlternate)], 3), message);
             }
         });
 
@@ -506,7 +504,7 @@ describe('featureQuery.mjs', function() {
             const context = [glyphA, acute, glyphB];
             assert.equal(substituteIn(lookupTable, context, 0), null);
             // ss20, the same rule without the flag: [7=0+500|5=0+0|2=1+500]
-            assert.deepStrictEqual(substituteIn({ ...lookupTable, lookupFlag: 0 }, context, 0), contextualMatch([aAlternate], 0));
+            assert.deepStrictEqual(substituteIn({ ...lookupTable, lookupFlag: 0 }, context, 0), contextualMatch([nestedSubstitution(0, 12, aAlternate)], 1));
         });
 
         it('matches nothing with a rule of format 3 without input glyphs', function() {
@@ -544,15 +542,16 @@ describe('featureQuery.mjs', function() {
             // ss01, a then class 0: -u 0061: [1=0+500], -u 0061,FB00: [7=0+500|4=1+500]
             const contextLookup = { lookupType: 5, lookupFlag: 0, subtables: [{ substFormat: 2, coverage: aCoverage, classDef, classSets: [[], [{ classes: [0], lookupRecords }]] }] };
             assert.equal(substituteIn(contextLookup, [glyphA], 0), null);
-            assert.deepStrictEqual(substituteIn(contextLookup, [glyphA, ff], 0), contextualMatch([aAlternate], 1));
+            const aSubstitution = nestedSubstitution(0, 12, aAlternate);
+            assert.deepStrictEqual(substituteIn(contextLookup, [glyphA, ff], 0), contextualMatch([aSubstitution], 2));
             // ss02, the lookahead class 0: -u 0061: [1=0+500], -u 0061,FB00: [7=0+500|4=1+500]
             const lookaheadLookup = { lookupType: 6, lookupFlag: 0, subtables: [chainingSubtable([], [0])] };
             assert.equal(substituteIn(lookaheadLookup, [glyphA], 0), null);
-            assert.deepStrictEqual(substituteIn(lookaheadLookup, [glyphA, ff], 0), contextualMatch([aAlternate], 0));
+            assert.deepStrictEqual(substituteIn(lookaheadLookup, [glyphA, ff], 0), contextualMatch([aSubstitution], 1));
             // ss03, the backtrack class 0: -u 0061: [1=0+500], -u FB00,0061: [4=0+500|7=1+500]
             const backtrackLookup = { lookupType: 6, lookupFlag: 0, subtables: [chainingSubtable([0], [])] };
             assert.equal(substituteIn(backtrackLookup, [glyphA], 0), null);
-            assert.deepStrictEqual(substituteIn(backtrackLookup, [ff, glyphA], 1), contextualMatch([aAlternate], 0));
+            assert.deepStrictEqual(substituteIn(backtrackLookup, [ff, glyphA], 1), contextualMatch([aSubstitution], 1));
         });
 
         it('matches nothing at a glyph outside of the first coverage of a rule of format 3: context and chaining context', function() {
@@ -585,7 +584,7 @@ describe('featureQuery.mjs', function() {
             };
 
             it('skips the glyphs its lookupFlag ignores in a contextual rule, not the flags of its subtable', function() {
-                assert.deepStrictEqual(substituteAt(extensionLookup, 0), contextualMatch([aAlternate], 0));
+                assert.deepStrictEqual(substituteAt(extensionLookup, 0), contextualMatch([nestedSubstitution(0, 12, aAlternate)], 1));
             });
         });
 
@@ -619,7 +618,7 @@ describe('featureQuery.mjs', function() {
                 const action = createQuery(lookupTable, scriptTag, featureTag).lookupSubstitution(lookupTable, new ContextParams(context, position), featureTag);
                 return action && action.substitution;
             };
-            assert.deepStrictEqual(substituteInFeature(lookaheadLookup, 'thai', 'ccmp', [glyphA, acute, glyphB], 0), contextualMatch([aAlternate], 0));
+            assert.deepStrictEqual(substituteInFeature(lookaheadLookup, 'thai', 'ccmp', [glyphA, acute, glyphB], 0), contextualMatch([nestedSubstitution(0, 12, aAlternate)], 1));
             assert.strictEqual(substituteInFeature(acuteLookup, 'thai', 'ccmp', [glyphA, acute, glyphB], 1), null);
         });
 
@@ -649,6 +648,9 @@ describe('featureQuery.mjs', function() {
         const acuteAlternate = glyphIndexes['acute.alt'];
         const IGNORE_MARKS = 0x0008;
         const multipleThenSingleRecords = [{ sequenceIndex: 0, lookupListIndex: 0 }, { sequenceIndex: 1, lookupListIndex: 1 }];
+        const bAlternate = glyphIndexes['b.alt'];
+        // the nested substitution of c by the glyphs of MULTIPLE_C, at the offset 0
+        const multipleCSubstitution = sequence => nestedSubstitution(0, 21, sequence);
 
         // the substitution of a contextual lookup at a position of a context, with the nested lookups
         // 0: MULTIPLE_C, sub c by a acute; (or the given sequence) and 1: SUB_ACUTE_B, sub acute by acute.alt; sub b by b.alt;
@@ -667,7 +669,8 @@ describe('featureQuery.mjs', function() {
                 lookupFlag: 0,
                 subtables: [{ substFormat: 3, coverages: createCoverages([glyphC, glyphB]), lookupRecords: multipleThenSingleRecords }]
             };
-            assert.deepStrictEqual(substituteIn(contextLookup, [glyphC, glyphB], 0), contextualMatch([[glyphA, acuteAlternate]], 1));
+            const substitutions = [multipleCSubstitution([glyphA, acute]), nestedSubstitution(1, 12, acuteAlternate)];
+            assert.deepStrictEqual(substituteIn(contextLookup, [glyphC, glyphB], 0), contextualMatch(substitutions, 3));
             // ss24: lookupflag IgnoreMarks; sub c' lookup MULTIPLE_C b' lookup SUB_ACUTE_B c;
             // -u 0063,0062,0063: [1=0+500|11=0+0|2=1+500|3=2+500]
             const chainingLookup = {
@@ -681,7 +684,7 @@ describe('featureQuery.mjs', function() {
                     lookupRecords: multipleThenSingleRecords
                 }]
             };
-            assert.deepStrictEqual(substituteIn(chainingLookup, [glyphC, glyphB, glyphC], 0), contextualMatch([[glyphA, acuteAlternate]], 1));
+            assert.deepStrictEqual(substituteIn(chainingLookup, [glyphC, glyphB, glyphC], 0), contextualMatch(substitutions, 3));
         });
 
         // the rule of ss23 (sub c' lookup MULTIPLE_C b' lookup SUB_ACUTE_B;) with the given lookup records
@@ -694,16 +697,23 @@ describe('featureQuery.mjs', function() {
         it('counts the input glyphs after a nested multiple substitution from its last glyph', function() {
             // the rule of ss23 with the second record at the sequence index 2: c b, then a acute b, the glyph at the index 2 is b
             // --features=-kern,+ss23 LookupFlagsNestedSequenceIndex.ttf -u 0063,0062: [1=0+500|5=0+0|8=1+500]
-            const substitutions = [];
-            substitutions[0] = [glyphA, acute];
-            substitutions[1] = glyphIndexes['b.alt'];
+            const substitutions = [multipleCSubstitution([glyphA, acute]), nestedSubstitution(2, 12, bAlternate)];
             const sequenceIndexRecords = [{ sequenceIndex: 0, lookupListIndex: 0 }, { sequenceIndex: 2, lookupListIndex: 1 }];
-            assert.deepStrictEqual(substituteIn(ss23Lookup(sequenceIndexRecords), [glyphC, glyphB], 0), contextualMatch(substitutions, 1));
+            assert.deepStrictEqual(substituteIn(ss23Lookup(sequenceIndexRecords), [glyphC, glyphB], 0), contextualMatch(substitutions, 3));
+            // ss54 with the second record at the sequence index 2: sub c' lookup MULTIPLE_C_A_ACUTE_B lookup SUB_ACUTE_B; (sub c by
+            // a acute b;), the glyph at the index 2 is the third glyph of c
+            // --features=-kern,+ss54 LookupFlagsNestedMultipleThreeSequenceIndex.ttf -u 0063: [1=0+500|5=0+0|8=0+500]
+            const threeGlyphsLookup = {
+                lookupType: 5,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 3, coverages: createCoverages([glyphC]), lookupRecords: sequenceIndexRecords }]
+            };
+            const threeGlyphsSubstitutions = [multipleCSubstitution([glyphA, acute, glyphB]), nestedSubstitution(2, 12, bAlternate)];
+            const threeGlyphsMatch = substituteIn(threeGlyphsLookup, [glyphC], 0, [glyphA, acute, glyphB]);
+            assert.deepStrictEqual(threeGlyphsMatch, contextualMatch(threeGlyphsSubstitutions, 3));
             // a nested multiple substitution into no glyph removes it from the input: with sub c by NULL; the index 0 is b
             // --features=-kern,+ss23 LookupFlagsNestedDeletion.ttf -u 0063,0062: [8=0+500]
-            const deletions = [];
-            deletions[0] = [];
-            deletions[1] = glyphIndexes['b.alt'];
+            const deletions = [multipleCSubstitution([]), nestedSubstitution(0, 12, bAlternate)];
             const deletionRecords = [{ sequenceIndex: 0, lookupListIndex: 0 }, { sequenceIndex: 0, lookupListIndex: 1 }];
             assert.deepStrictEqual(substituteIn(ss23Lookup(deletionRecords), [glyphC, glyphB], 0, []), contextualMatch(deletions, 1));
         });
@@ -712,21 +722,19 @@ describe('featureQuery.mjs', function() {
             // the rule of ss23 with the second record at the sequence index 3: c b, then a acute b, there is no glyph at the index 3
             // --features=-kern,+ss23 LookupFlagsNestedSequenceIndexPastEnd.ttf -u 0063,0062: [1=0+500|5=0+0|2=1+500], b is kept
             const pastEndRecords = [{ sequenceIndex: 0, lookupListIndex: 0 }, { sequenceIndex: 3, lookupListIndex: 1 }];
-            assert.deepStrictEqual(substituteIn(ss23Lookup(pastEndRecords), [glyphC, glyphB], 0), contextualMatch([[glyphA, acute]], 1));
+            assert.deepStrictEqual(substituteIn(ss23Lookup(pastEndRecords), [glyphC, glyphB], 0), contextualMatch([multipleCSubstitution([glyphA, acute])], 3));
         });
 
         it('applies the lookup records after one whose sequence index is past the end of the input', function() {
             // the rule of ss23 with the records at the sequence indexes 0, 3 and 2: there is no glyph at the index 3, b is at the index 2
             // --features=-kern,+ss23 LookupFlagsNestedSequenceIndexPastEndThenValid.ttf -u 0063,0062: [1=0+500|5=0+0|8=1+500]
-            const substitutions = [];
-            substitutions[0] = [glyphA, acute];
-            substitutions[1] = glyphIndexes['b.alt'];
+            const substitutions = [multipleCSubstitution([glyphA, acute]), nestedSubstitution(2, 12, bAlternate)];
             const pastEndThenValidRecords = [
                 { sequenceIndex: 0, lookupListIndex: 0 },
                 { sequenceIndex: 3, lookupListIndex: 1 },
                 { sequenceIndex: 2, lookupListIndex: 1 }
             ];
-            assert.deepStrictEqual(substituteIn(ss23Lookup(pastEndThenValidRecords), [glyphC, glyphB], 0), contextualMatch(substitutions, 1));
+            assert.deepStrictEqual(substituteIn(ss23Lookup(pastEndThenValidRecords), [glyphC, glyphB], 0), contextualMatch(substitutions, 3));
         });
 
         it('applies a later lookup record at the index of a deleted glyph to the next input glyph, not to a glyph the lookup skips', function() {
@@ -747,9 +755,8 @@ describe('featureQuery.mjs', function() {
                     lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }, { sequenceIndex: 0, lookupListIndex: 1 }]
                 }]
             };
-            const deletions = [];
-            deletions[0] = [];
-            deletions[2] = glyphIndexes['b.alt'];
+            // b at the offset 1 after the deletion of c
+            const deletions = [multipleCSubstitution([]), nestedSubstitution(1, 12, bAlternate)];
             assert.deepStrictEqual(substituteIn(chainingLookup, [glyphC, acute, glyphB, glyphC], 0, []), contextualMatch(deletions, 2));
         });
 
@@ -768,9 +775,8 @@ describe('featureQuery.mjs', function() {
                     lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }, { sequenceIndex: 1, lookupListIndex: 1 }]
                 }]
             };
-            const deletions = [];
-            deletions[0] = [];
-            deletions[3] = glyphIndexes['b.alt'];
+            // the second b at the offset 2 after the deletion of c
+            const deletions = [multipleCSubstitution([]), nestedSubstitution(2, 12, bAlternate)];
             assert.deepStrictEqual(substituteIn(contextLookup, [glyphC, acute, glyphB, glyphB], 0, []), contextualMatch(deletions, 3));
         });
 
@@ -789,9 +795,257 @@ describe('featureQuery.mjs', function() {
                     lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 0 }, { sequenceIndex: 1, lookupListIndex: 1 }]
                 }]
             };
-            const deletions = [];
-            deletions[1] = [];
-            assert.deepStrictEqual(substituteIn(contextLookup, [glyphA, glyphC, glyphB], 0, []), contextualMatch(deletions, 1));
+            assert.deepStrictEqual(substituteIn(contextLookup, [glyphA, glyphC, glyphB], 0, []), contextualMatch([nestedSubstitution(1, 21, [])], 1));
+        });
+    });
+
+    describe('getSubstitutionGlyphEdits', function() {
+        it('replaces the glyph of a single or multiple substitution, and the components of a ligature from the last one', function() {
+            assert.deepStrictEqual(getSubstitutionGlyphEdits({ id: 12, substitution: 8 }), [{ offset: 0, glyphIndexes: [8] }]);
+            assert.deepStrictEqual(getSubstitutionGlyphEdits({ id: 21, substitution: [] }), [{ offset: 0, glyphIndexes: [] }]);
+            const ligature = { id: 41, substitution: { ligGlyph: 10, componentOffsets: [1, 3] } };
+            const ligatureEdits = [{ offset: 3, glyphIndexes: [] }, { offset: 1, glyphIndexes: [] }, { offset: 0, glyphIndexes: [10] }];
+            assert.deepStrictEqual(getSubstitutionGlyphEdits(ligature), ligatureEdits);
+        });
+
+        it('throws for a substitution type that does not replace glyphs', function() {
+            assert.throws(() => getSubstitutionGlyphEdits({ id: 63, substitution: { substitutions: [], inputLength: 1 } }), /type 63/);
+        });
+    });
+
+    // the font of test/lookup-flags-font.mjs; the rules of ss36 to ss49, ss52 and ss53 of LookupFlags.ttf (test/generate-lookup-flags-font.py),
+    // contextual rules that feaLib builds as context or chaining context subtables, here as chaining context format 3
+    // hb-shape --no-glyph-names --cluster-level=1 --features=-kern,+<feature of the rule> LookupFlags.ttf -u <code points>
+    describe('nested ligature substitutions', function() {
+        const { a: glyphA, b: glyphB, c: glyphC, acute } = glyphIndexes;
+        const IGNORE_MARKS = 0x0008;
+        // the lookups 0: LIGATURE_NO_FLAG, sub a b by a_b; 1: SUB_ACUTE_B, sub acute by acute.alt; sub b by b.alt;
+        // 2: LIGATURE_AT_MULTIPLE_IGNORE_MARKS, lookupflag IgnoreMarks; sub a b by a_b; 3: LIGATURE_A_ACUTE, sub a acute by a.alt;
+        // 4: LIGATURE_A_B_C, sub a b c by a_b_c; 5: LIGATURE_ACUTE_B_IGNORE_MARKS, lookupflag IgnoreMarks; sub acute b by acute.alt;
+        // 6: MULTIPLE_C_A_B, sub c by a b; 7: LIGATURE_AT_MULTIPLE_IGNORE_MARKS in an extension lookup
+        const LIGATURE_NO_FLAG = 0;
+        const SUB_ACUTE_B = 1;
+        const LIGATURE_IGNORE_MARKS = 2;
+        const LIGATURE_A_ACUTE = 3;
+        const LIGATURE_A_B_C = 4;
+        const LIGATURE_ACUTE_B_IGNORE_MARKS = 5;
+        const MULTIPLE_C_A_B = 6;
+        const EXTENSION_LIGATURE_IGNORE_MARKS = 7;
+        const nestedLookups = [
+            createLigatureLookup(glyphA, [glyphB], glyphIndexes.a_b),
+            subAcuteBLookup,
+            createLigatureLookup(glyphA, [glyphB], glyphIndexes.a_b, IGNORE_MARKS),
+            createLigatureLookup(glyphA, [acute], glyphIndexes['a.alt']),
+            createLigatureLookup(glyphA, [glyphB, glyphC], glyphIndexes.a_b_c),
+            createLigatureLookup(acute, [glyphB], glyphIndexes['acute.alt'], IGNORE_MARKS),
+            createMultipleLookup([glyphC], [[glyphA, glyphB]]),
+            {
+                lookupType: 7,
+                lookupFlag: IGNORE_MARKS,
+                subtables: [{ substFormat: 1, lookupType: 4, extension: createLigatureLookup(glyphA, [glyphB], glyphIndexes.a_b).subtables[0] }]
+            }
+        ];
+        // the ligature a_b of the components at the offsets 0 and 1 (a b), or at the given offsets
+        const abLigature = (componentOffsets = [1]) => nestedSubstitution(0, 41, { ligGlyph: glyphIndexes.a_b, componentOffsets });
+        // the ligature a_b_c of the components at the offsets 0, 1 and 2 (a b c)
+        const abcLigature = nestedSubstitution(0, 41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [1, 2] });
+
+        // the substitution of a contextual lookup at a position of a context (its first glyph by default), with the nested lookups
+        function substituteIn(lookupTable, context, position = 0) {
+            const lookups = nestedLookups.concat([lookupTable]);
+            const query = new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [lookups.length - 1], lookups) }));
+            const action = query.lookupSubstitution(lookupTable, new ContextParams(context, position), 'calt');
+            return action && action.substitution;
+        }
+
+        // a chaining context lookup of format 3 of the input and lookahead glyphs, with the lookupFlag
+        const chainingLookup = (input, lookahead, lookupRecords, lookupFlag = 0) => ({
+            lookupType: 6,
+            lookupFlag,
+            subtables: [chainingSubtables([], input, lookahead, lookupRecords)[2]]
+        });
+
+        it('applies a nested ligature to the input glyphs from its lookup record: context and chaining context formats 1, 2 and 3', function() {
+            // ss36: sub a' lookup LIGATURE_NO_FLAG b' c; -u 0061,0062,0063: [9=0+500|3=2+500], the lookup goes on at c
+            const lookupRecords = [{ sequenceIndex: 0, lookupListIndex: LIGATURE_NO_FLAG }];
+            const contextSubtables = [
+                { substFormat: 1, coverage: createCoverage([glyphA]), ruleSets: [[{ input: [glyphB], lookupRecords }]] },
+                { substFormat: 2, coverage: createCoverage([glyphA]), classDef, classSets: [[], [{ classes: [1], lookupRecords }]] },
+                { substFormat: 3, coverages: createCoverages([glyphA, glyphB]), lookupRecords }
+            ];
+            const lookupTables = [
+                ...contextSubtables.map(subtable => ({ lookupType: 5, lookupFlag: 0, subtables: [subtable] })),
+                ...chainingSubtables([], [glyphA, glyphB], [glyphC], lookupRecords).map(subtable => ({ lookupType: 6, lookupFlag: 0, subtables: [subtable] }))
+            ];
+            for (const lookupTable of lookupTables) {
+                const message = `lookup type ${lookupTable.lookupType} format ${lookupTable.subtables[0].substFormat}`;
+                assert.deepStrictEqual(substituteIn(lookupTable, [glyphA, glyphB, glyphC]), contextualMatch([abLigature()], 1), message);
+            }
+        });
+
+        it('matches the components of a nested ligature with its own lookupFlag, not the one of the rule', function() {
+            // ss37: sub a' lookup LIGATURE_AT_MULTIPLE_IGNORE_MARKS acute' b'; -u 0061,0301,0062: [9=0+500|5=0+0], the ligature
+            // skips the acute of the input, which stays after it
+            const skippedMarkLookup = chainingLookup([glyphA, acute, glyphB], [], [{ sequenceIndex: 0, lookupListIndex: LIGATURE_IGNORE_MARKS }]);
+            assert.deepStrictEqual(substituteIn(skippedMarkLookup, [glyphA, acute, glyphB]), contextualMatch([abLigature([2])], 2));
+            // ss41: lookupflag IgnoreMarks; sub a' lookup LIGATURE_NO_FLAG b'; -u 0061,0301,0062: [1=0+500|5=1+0|2=2+500], the
+            // ligature does not skip the acute that the rule skips; -u 0061,0062: [9=0+500]
+            const ruleIgnoreMarksLookup = chainingLookup([glyphA, glyphB], [], [{ sequenceIndex: 0, lookupListIndex: LIGATURE_NO_FLAG }], IGNORE_MARKS);
+            assert.deepStrictEqual(substituteIn(ruleIgnoreMarksLookup, [glyphA, acute, glyphB]), contextualMatch([], 3));
+            assert.deepStrictEqual(substituteIn(ruleIgnoreMarksLookup, [glyphA, glyphB]), contextualMatch([abLigature()], 1));
+        });
+
+        it('applies a nested ligature to the glyphs after the input of the rule, and goes on at the ligature glyph', function() {
+            // ss38: sub a' lookup LIGATURE_NO_FLAG b; -u 0061,0062: [9=0+500], the lookahead b is a component; like HarfBuzz the
+            // input ends at the ligature glyph, not before it, so the lookup goes on at a_b
+            const pastInputLookup = chainingLookup([glyphA], [glyphB], [{ sequenceIndex: 0, lookupListIndex: LIGATURE_NO_FLAG }]);
+            assert.deepStrictEqual(substituteIn(pastInputLookup, [glyphA, glyphB]), contextualMatch([abLigature()], 0));
+        });
+
+        it('points the later lookup records into the input shortened by a nested ligature', function() {
+            // ss39: sub a' lookup LIGATURE_NO_FLAG b' lookup SUB_ACUTE_B acute'; -u 0061,0062,0301: [9=0+500|11=2+0], the sequence
+            // index 1 is the acute after a_b
+            const laterRecordLookup = chainingLookup([glyphA, glyphB, acute], [], [
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_NO_FLAG },
+                { sequenceIndex: 1, lookupListIndex: SUB_ACUTE_B }
+            ]);
+            const acuteSubstitution = nestedSubstitution(1, 12, glyphIndexes['acute.alt']);
+            assert.deepStrictEqual(substituteIn(laterRecordLookup, [glyphA, glyphB, acute]), contextualMatch([abLigature(), acuteSubstitution], 2));
+            // ss40: sub a' lookup LIGATURE_NO_FLAG b' acute' lookup SUB_ACUTE_B; -u 0061,0062,0301: [9=0+500|5=2+0], no glyph at the
+            // sequence index 2 of the input of two glyphs
+            const pastEndLookup = chainingLookup([glyphA, glyphB, acute], [], [
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_NO_FLAG },
+                { sequenceIndex: 2, lookupListIndex: SUB_ACUTE_B }
+            ]);
+            assert.deepStrictEqual(substituteIn(pastEndLookup, [glyphA, glyphB, acute]), contextualMatch([abLigature()], 2));
+        });
+
+        it('points a later lookup record at the mark that a nested ligature skips, not at the component after it', function() {
+            // ss53: sub a' lookup LIGATURE_AT_MULTIPLE_IGNORE_MARKS acute' lookup SUB_ACUTE_B b'; -u 0061,0301,0062: [9=0+500|11=0+0],
+            // the sequence index 1 is the acute after a_b
+            const skippedMarkLookup = chainingLookup([glyphA, acute, glyphB], [], [
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_IGNORE_MARKS },
+                { sequenceIndex: 1, lookupListIndex: SUB_ACUTE_B }
+            ]);
+            const acuteSubstitution = nestedSubstitution(1, 12, glyphIndexes['acute.alt']);
+            assert.deepStrictEqual(substituteIn(skippedMarkLookup, [glyphA, acute, glyphB]), contextualMatch([abLigature([2]), acuteSubstitution], 2));
+        });
+
+        it('removes the input glyphs after a nested ligature, as many as its other components, like HarfBuzz', function() {
+            // ss42: lookupflag IgnoreMarks; sub a' lookup LIGATURE_A_ACUTE b' lookup SUB_ACUTE_B; -u 0061,0301,0062: [7=0+500|2=2+500]:
+            // the ligature removes the acute, which the rule skips, and HarfBuzz (apply_lookup) removes the input glyph after a
+            // instead, b, so the record at the sequence index 1 has no glyph and b is kept
+            const skippedByRuleLookup = chainingLookup([glyphA, glyphB], [], [
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_A_ACUTE },
+                { sequenceIndex: 1, lookupListIndex: SUB_ACUTE_B }
+            ], IGNORE_MARKS);
+            const aAcuteLigature = nestedSubstitution(0, 41, { ligGlyph: glyphIndexes['a.alt'], componentOffsets: [1] });
+            assert.deepStrictEqual(substituteIn(skippedByRuleLookup, [glyphA, acute, glyphB]), contextualMatch([aAcuteLigature], 2));
+        });
+
+        it('removes the input glyphs of the other components of a nested ligature of three components, from the last one', function() {
+            // ss45 with the second lookup record at the sequence index 1 (LookupFlagsNestedLigatureSequenceIndex.ttf):
+            // sub a' lookup LIGATURE_A_B_C b' c' acute' lookup SUB_ACUTE_B; -u 0061,0062,0063,0301: [10=0+500|11=3+0], the
+            // sequence index 1 is the acute after a_b_c
+            const laterRecordLookup = chainingLookup([glyphA, glyphB, glyphC, acute], [], [
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_A_B_C },
+                { sequenceIndex: 1, lookupListIndex: SUB_ACUTE_B }
+            ]);
+            const acuteSubstitution = nestedSubstitution(1, 12, glyphIndexes['acute.alt']);
+            assert.deepStrictEqual(substituteIn(laterRecordLookup, [glyphA, glyphB, glyphC, acute]), contextualMatch([abcLigature, acuteSubstitution], 2));
+            // ss45: the second lookup record at the sequence index 3, past the end of the input of two glyphs after the ligature
+            // -u 0061,0062,0063,0301: [10=0+500|5=3+0]
+            const pastEndLookup = chainingLookup([glyphA, glyphB, glyphC, acute], [], [
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_A_B_C },
+                { sequenceIndex: 3, lookupListIndex: SUB_ACUTE_B }
+            ]);
+            assert.deepStrictEqual(substituteIn(pastEndLookup, [glyphA, glyphB, glyphC, acute]), contextualMatch([abcLigature], 2));
+        });
+
+        it('ends the input at the ligature glyph of a nested ligature of two components after the input, not before it', function() {
+            // ss44: sub a' lookup LIGATURE_A_B_C b c; -u 0061,0062,0063: [10=0+500], like HarfBuzz the lookup goes on at a_b_c
+            const pastInputLookup = chainingLookup([glyphA], [glyphB, glyphC], [{ sequenceIndex: 0, lookupListIndex: LIGATURE_A_B_C }]);
+            assert.deepStrictEqual(substituteIn(pastInputLookup, [glyphA, glyphB, glyphC]), contextualMatch([abcLigature], 0));
+        });
+
+        it('ends the input at the ligature glyph of a nested ligature at a later sequence index, not at the current glyph', function() {
+            // ss52: sub b' lookup SUB_B a_b_c; sub b' a' lookup LIGATURE_A_B_C b c; -u 0062,0061,0062,0063: [2=0+500|10=1+500], like
+            // HarfBuzz the lookup goes on at a_b_c, so the first rule does not apply at the b before it
+            const laterRecordLookup = chainingLookup([glyphB, glyphA], [glyphB, glyphC], [{ sequenceIndex: 1, lookupListIndex: LIGATURE_A_B_C }]);
+            const laterLigature = nestedSubstitution(1, 41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [1, 2] });
+            assert.deepStrictEqual(substituteIn(laterRecordLookup, [glyphB, glyphA, glyphB, glyphC]), contextualMatch([laterLigature], 1));
+        });
+
+        it('keeps the input glyph before a nested ligature for a later lookup record', function() {
+            // ss46 with the lookup records in the reverse order (LookupFlagsNestedLigatureRecordOrder.ttf):
+            // sub b' lookup SUB_ACUTE_B a' lookup LIGATURE_NO_FLAG b'; -u 0062,0061,0062: [8=0+500|9=1+500]
+            const reversedRecordsLookup = chainingLookup([glyphB, glyphA, glyphB], [], [
+                { sequenceIndex: 1, lookupListIndex: LIGATURE_NO_FLAG },
+                { sequenceIndex: 0, lookupListIndex: SUB_ACUTE_B }
+            ]);
+            const substitutions = [nestedSubstitution(1, 41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), nestedSubstitution(0, 12, glyphIndexes['b.alt'])];
+            assert.deepStrictEqual(substituteIn(reversedRecordsLookup, [glyphB, glyphA, glyphB]), contextualMatch(substitutions, 2));
+        });
+
+        it('applies a nested ligature to the glyphs of a nested multiple substitution', function() {
+            // ss48: sub c' lookup MULTIPLE_C_A_B lookup LIGATURE_NO_FLAG; -u 0063: [9=0+500]
+            const multipleThenLigatureLookup = {
+                lookupType: 5,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    coverages: createCoverages([glyphC]),
+                    lookupRecords: [{ sequenceIndex: 0, lookupListIndex: MULTIPLE_C_A_B }, { sequenceIndex: 0, lookupListIndex: LIGATURE_NO_FLAG }]
+                }]
+            };
+            const substitutions = [nestedSubstitution(0, 21, [glyphA, glyphB]), abLigature()];
+            assert.deepStrictEqual(substituteIn(multipleThenLigatureLookup, [glyphC]), contextualMatch(substitutions, 1));
+        });
+
+        it('applies the later lookup records to the glyphs that a nested substitution left, after the start of the context', function() {
+            // the rules of ss39, ss48 and ss53 after a glyph that they do not match
+            // ss39: sub a' lookup LIGATURE_NO_FLAG b' lookup SUB_ACUTE_B acute'; -u 0063,0061,0062,0301: [3=0+500|9=1+500|11=3+0]
+            const ligatureThenSingleLookup = chainingLookup([glyphA, glyphB, acute], [], [
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_NO_FLAG },
+                { sequenceIndex: 1, lookupListIndex: SUB_ACUTE_B }
+            ]);
+            const acuteSubstitution = nestedSubstitution(1, 12, glyphIndexes['acute.alt']);
+            const ligatureThenSingleMatch = substituteIn(ligatureThenSingleLookup, [glyphC, glyphA, glyphB, acute], 1);
+            assert.deepStrictEqual(ligatureThenSingleMatch, contextualMatch([abLigature(), acuteSubstitution], 2));
+            // ss48: sub c' lookup MULTIPLE_C_A_B lookup LIGATURE_NO_FLAG; -u 0061,0063: [1=0+500|9=1+500]
+            const multipleThenLigatureLookup = chainingLookup([glyphC], [], [
+                { sequenceIndex: 0, lookupListIndex: MULTIPLE_C_A_B },
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_NO_FLAG }
+            ]);
+            const multipleThenLigatureMatch = substituteIn(multipleThenLigatureLookup, [glyphA, glyphC], 1);
+            assert.deepStrictEqual(multipleThenLigatureMatch, contextualMatch([nestedSubstitution(0, 21, [glyphA, glyphB]), abLigature()], 1));
+            // ss53: sub a' lookup LIGATURE_AT_MULTIPLE_IGNORE_MARKS acute' lookup SUB_ACUTE_B b'; -u 0062,0061,0301,0062:
+            // [2=0+500|9=1+500|11=1+0]
+            const skippedMarkLookup = chainingLookup([glyphA, acute, glyphB], [], [
+                { sequenceIndex: 0, lookupListIndex: LIGATURE_IGNORE_MARKS },
+                { sequenceIndex: 1, lookupListIndex: SUB_ACUTE_B }
+            ]);
+            const skippedMarkMatch = substituteIn(skippedMarkLookup, [glyphB, glyphA, acute, glyphB], 1);
+            assert.deepStrictEqual(skippedMarkMatch, contextualMatch([abLigature([2]), acuteSubstitution], 2));
+        });
+
+        it('applies a nested ligature at a glyph its lookupFlag ignores, like HarfBuzz', function() {
+            // ss49: sub acute' lookup LIGATURE_ACUTE_B_IGNORE_MARKS b; -u 0061,0301,0062: [1=0+500|11=1+0]
+            const ignoredGlyphLookup = chainingLookup([acute], [glyphB], [{ sequenceIndex: 0, lookupListIndex: LIGATURE_ACUTE_B_IGNORE_MARKS }]);
+            const acuteLigature = nestedSubstitution(0, 41, { ligGlyph: glyphIndexes['acute.alt'], componentOffsets: [1] });
+            assert.deepStrictEqual(substituteIn(ignoredGlyphLookup, [acute, glyphB]), contextualMatch([acuteLigature], 0));
+        });
+
+        it('matches the components of a nested ligature of an extension lookup with the lookupFlag of the extension lookup', function() {
+            // ss37 of LookupFlagsExtension.ttf, the rule and its nested ligature in extension lookups:
+            // --features=-kern,+ss37 LookupFlagsExtension.ttf -u 0061,0301,0062: [9=0+500|5=0+0]
+            const lookupRecords = [{ sequenceIndex: 0, lookupListIndex: EXTENSION_LIGATURE_IGNORE_MARKS }];
+            const extensionRuleLookup = {
+                lookupType: 7,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 1, lookupType: 6, extension: chainingSubtables([], [glyphA, acute, glyphB], [], lookupRecords)[2] }]
+            };
+            assert.deepStrictEqual(substituteIn(extensionRuleLookup, [glyphA, acute, glyphB]), contextualMatch([abLigature([2])], 2));
         });
     });
 
@@ -815,7 +1069,7 @@ describe('featureQuery.mjs', function() {
             const lookups = [createSingleLookup([glyphB], [glyphIndexes['b.alt']]), exceptionLookup];
             const query = new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [1], lookups) }));
             const action = query.lookupSubstitution(exceptionLookup, new ContextParams([glyphA, glyphB], 0), 'calt');
-            assert.deepStrictEqual(action.substitution, contextualMatch([], 1));
+            assert.deepStrictEqual(action.substitution, contextualMatch([], 2));
         });
 
         it('ends the lookup at a chaining rule that substitutes nothing, the exception rule of rlig of arab', function() {
@@ -836,9 +1090,9 @@ describe('featureQuery.mjs', function() {
             const query = new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('arab', 'rlig', [1], lookups) }));
             const substituteAtFirstGlyph = context => query.lookupSubstitution(exceptionLookup, new ContextParams(context, 0), 'rlig').substitution;
             // -u 0631,062F: [15=1+500|13=0+500], reh is kept
-            assert.deepStrictEqual(substituteAtFirstGlyph([reh, dal]), contextualMatch([], 0));
+            assert.deepStrictEqual(substituteAtFirstGlyph([reh, dal]), contextualMatch([], 1));
             // -u 0631,0631: [20=1+500|20=0+500]
-            assert.deepStrictEqual(substituteAtFirstGlyph([reh, reh]), contextualMatch([glyphIndexes['reh.alt']], 0));
+            assert.deepStrictEqual(substituteAtFirstGlyph([reh, reh]), contextualMatch([nestedSubstitution(0, 12, glyphIndexes['reh.alt'])], 1));
         });
     });
 

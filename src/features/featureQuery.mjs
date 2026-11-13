@@ -174,46 +174,153 @@ function matchContextRule(gdef, contextParams, lookupTable, rule) {
 }
 
 // nested lookup types (lookupType + substFormat) a contextual rule can apply:
-// single substitution format 1 and 2, multiple substitution format 1
-const NESTED_SUBSTITUTION_TYPES = ['11', '12', '21'];
+// single substitution format 1 and 2, multiple substitution format 1, ligature substitution format 1
+const NESTED_SUBSTITUTION_TYPES = ['11', '12', '21', '41'];
+const SINGLE_SUBSTITUTION_IDS = [11, 12];
+const MULTIPLE_SUBSTITUTION_ID = 21;
+const LIGATURE_SUBSTITUTION_ID = 41;
 
 /**
- * Find the glyph at a sequence index of the input of a contextual rule, whose input glyphs may have been replaced
- * by several glyphs (or none) by the nested lookups of the previous lookup records
- * @param {number[][]} inputGlyphs the glyphs each input glyph became, in the order of the input
- * @param {number} sequenceIndex the index of the glyph in the input, each glyph of a multiple substitution counted
- * @returns {{inputIndex: number, glyphOffset: number}|null} the input glyph the glyph comes from and the offset of
- * the glyph in its glyphs, null past the end of the input
+ * The substitution of a lookup at a glyph (see FeatureQuery.getLookupSubstitution)
+ * @typedef LookupSubstitution
+ * @type Object
+ * @property {number} id substitution type (lookupType + substFormat), as the id of a SubstitutionAction
+ * @property {any} substitution substitution value(s)
  */
-function findInputSequenceGlyph(inputGlyphs, sequenceIndex) {
-    let glyphOffset = sequenceIndex;
-    for (let inputIndex = 0; inputIndex < inputGlyphs.length; inputIndex++) {
-        if (glyphOffset < inputGlyphs[inputIndex].length) {
-            return { inputIndex, glyphOffset };
-        }
-        glyphOffset -= inputGlyphs[inputIndex].length;
-    }
-    return null;
-}
+
+/**
+ * The substitution of a nested lookup of a matched contextual rule
+ * @typedef NestedSubstitution
+ * @type Object
+ * @property {number} offset the offset from the current glyph of the glyph it applies at, in the glyph sequence that
+ * the previous nested substitutions left
+ * @property {number} id substitution type: single, multiple or ligature (see NESTED_SUBSTITUTION_TYPES)
+ * @property {any} substitution substitution value(s)
+ */
 
 /**
  * The substitutions of a matched contextual rule
  * @typedef ContextualMatch
  * @type Object
- * @property {Array} substitutions by offset from the current glyph (sparse, a hole keeps the glyph): the glyph index
- * that replaces the input glyph at the offset, or the glyph indexes (several or none) when a multiple substitution
- * replaced it; empty if nothing is substituted
- * @property {number} lastInputOffset the offset of the last input glyph from the current one, the glyphs the lookup
- * skips between the input glyphs counted
+ * @property {NestedSubstitution[]} substitutions the substitutions of its nested lookups, in the order they apply;
+ * empty if nothing is substituted
+ * @property {number} inputLength the number of glyphs, from the current one, that the lookup goes on after: up to the
+ * last input glyph after the substitutions, the glyphs the lookup skips counted, but like HarfBuzz never ending before
+ * the glyph a nested lookup applied at, so after a nested ligature that takes glyphs past the input it ends before the
+ * ligature glyph (0 when it is the current glyph)
  */
 
 /**
- * Apply the nested lookups of a matched contextual rule to its input sequence.
- * Each lookup record substitutes the glyph at its sequence index, the index of the glyph
+ * The replacement of a glyph by a substitution (see getSubstitutionGlyphEdits)
+ * @typedef GlyphEdit
+ * @type Object
+ * @property {number} offset the offset of the glyph from the current glyph of the substitution
+ * @property {number[]} glyphIndexes the glyphs that replace it, none deletes it
+ */
+
+/**
+ * Get the glyph edits of a single, multiple or ligature substitution, in the order they apply: the glyph becomes the
+ * glyph of a single substitution or the glyphs of a multiple substitution; the other components of a ligature are
+ * deleted from the last one, so that the offsets of the other ones still point to their glyph, then its first
+ * component becomes the ligature glyph
+ * @param {LookupSubstitution|SubstitutionAction} lookupSubstitution
+ * @returns {GlyphEdit[]}
+ */
+function getSubstitutionGlyphEdits(lookupSubstitution) {
+    const { id, substitution } = lookupSubstitution;
+    if (SINGLE_SUBSTITUTION_IDS.includes(id)) {
+        return [{ offset: 0, glyphIndexes: [substitution] }];
+    }
+    if (id === MULTIPLE_SUBSTITUTION_ID) {
+        return [{ offset: 0, glyphIndexes: substitution }];
+    }
+    if (id === LIGATURE_SUBSTITUTION_ID) {
+        const componentEdits = substitution.componentOffsets.map(offset => ({ offset, glyphIndexes: [] })).reverse();
+        return componentEdits.concat([{ offset: 0, glyphIndexes: [substitution.ligGlyph] }]);
+    }
+    throw new Error(`The substitution type ${id} does not replace glyphs`);
+}
+
+/**
+ * The change of the number of glyphs of a nested substitution (single, multiple or ligature)
+ * @param {LookupSubstitution} nestedSubstitution
+ * @returns {number}
+ */
+function getSubstitutionLengthChange(nestedSubstitution) {
+    let lengthChange = 0;
+    for (const glyphEdit of getSubstitutionGlyphEdits(nestedSubstitution)) {
+        lengthChange += glyphEdit.glyphIndexes.length - 1;
+    }
+    return lengthChange;
+}
+
+/**
+ * Substitute the glyphs of a nested substitution in a list of glyph indexes, the glyphs the following lookup records
+ * of the rule see, with the glyph edits that applySubstitution applies to the glyph sequence of the tokens
+ * @param {number[]} glyphIndexes
+ * @param {number} position the position of the glyph the substitution applies at
+ * @param {LookupSubstitution} nestedSubstitution
+ */
+function substituteGlyphIndexes(glyphIndexes, position, nestedSubstitution) {
+    for (const glyphEdit of getSubstitutionGlyphEdits(nestedSubstitution)) {
+        glyphIndexes.splice(position + glyphEdit.offset, 1, ...glyphEdit.glyphIndexes);
+    }
+}
+
+/**
+ * The context params of a nested lookup at a glyph, with what a single, multiple or ligature substitution reads (the
+ * context, the index and the current glyph), without the backtrack and the lookahead copies of a ContextParams
+ * @param {number[]} glyphIndexes
+ * @param {number} index the index of the glyph the nested lookup applies at
+ * @returns {{context: number[], index: number, current: number}}
+ */
+function createNestedContextParams(glyphIndexes, index) {
+    return { context: glyphIndexes, index, current: glyphIndexes[index] };
+}
+
+/**
+ * Update the positions of the input glyphs of a contextual rule after a nested substitution at the input glyph of a
+ * sequence index, like HarfBuzz (apply_lookup) when the number of glyphs grows or a ligature shortens it: the glyphs
+ * a multiple substitution adds are input glyphs after it, and a ligature removes as many input glyphs after it as
+ * the components it removed (the input glyphs left, if fewer), whichever glyphs these components were, then the
+ * positions of the following input glyphs move by the change of the number of glyphs. A multiple substitution into
+ * no glyph removes the input glyph itself (see applyNestedLookupRecords).
+ * @param {number[]} inputPositions positions of the input glyphs, updated
+ * @param {number} sequenceIndex the index of the input glyph the substitution applied at
+ * @param {number} lengthChange the change of the number of glyphs (see getSubstitutionLengthChange)
+ * @param {boolean} isDeletion whether the substitution deleted the glyph
+ */
+function updateInputPositions(inputPositions, sequenceIndex, lengthChange, isDeletion) {
+    let firstMovedIndex = sequenceIndex + 1;
+    if (isDeletion) {
+        inputPositions.splice(sequenceIndex, 1);
+        firstMovedIndex = sequenceIndex;
+    } else if (lengthChange > 0) {
+        const addedPositions = [];
+        for (let i = 1; i <= lengthChange; i++) {
+            addedPositions.push(inputPositions[sequenceIndex] + i);
+        }
+        inputPositions.splice(sequenceIndex + 1, 0, ...addedPositions);
+        firstMovedIndex = sequenceIndex + 1 + lengthChange;
+    } else {
+        inputPositions.splice(sequenceIndex + 1, -lengthChange);
+    }
+    for (let i = firstMovedIndex; i < inputPositions.length; i++) {
+        inputPositions[i] += lengthChange;
+    }
+}
+
+/**
+ * Apply the nested lookups of a matched contextual rule to its input sequence, like HarfBuzz (apply_lookup).
+ * Each lookup record applies its lookup at the glyph at its sequence index, the index of the glyph
  * in the matched input (the glyphs the lookup skips are not counted), in record order,
- * so a record sees the substitutions of the previous ones: like HarfBuzz, the glyphs of
+ * so a record sees the substitutions of the previous ones; the first subtable of the lookup that
+ * substitutes the glyph wins, nested lookups of other types are skipped. Like HarfBuzz, the glyphs of
  * a nested multiple substitution are glyphs of their own in the input sequence of the
- * following records. A glyph it deletes (a sequence of no glyph, which the OpenType
+ * following records. A nested ligature matches its components from the glyph with its own lookupFlag,
+ * among all the glyphs after it (the input glyphs, the glyphs the rule skips, the glyphs after the
+ * input), and the following records see the input sequence of HarfBuzz (see updateInputPositions).
+ * A glyph a multiple substitution deletes (a sequence of no glyph, which the OpenType
  * specification prohibits) leaves the input sequence, and the sequence index of the
  * following records counts on the updated sequence, the results of the previous records
  * of the specification. HarfBuzz instead keeps the match position of the deleted glyph, which
@@ -222,50 +329,55 @@ function findInputSequenceGlyph(inputGlyphs, sequenceIndex) {
  * so a following record at that index substitutes the glyph after the deleted one, and a record at
  * a later index the same input glyph as in the fork. The two differ when the lookup skips glyphs
  * between the input glyphs (the fork substitutes the next input glyph) and when the deleted glyph
- * is the last input glyph (HarfBuzz substitutes the glyph after the input, the fork skips the record). The first subtable of a lookup that substitutes the glyph wins.
- * Nested lookups of other types are skipped.
- * @param {Array} context glyphs of the context
+ * is the last input glyph (HarfBuzz substitutes the glyph after the input, the fork skips the record).
+ * @param {ContextParams} contextParams context params of the rule, its current glyph is the first input glyph
  * @param {number[]} inputPositions positions of the matched input glyphs in the context, the current one first
  * @param {any[]} lookupRecords lookup records of the matched rule
  * @returns {ContextualMatch}
  */
-function applyNestedLookupRecords(context, inputPositions, lookupRecords) {
-    const inputGlyphs = inputPositions.map(position => [context[position]]);
-    const substitutedInputIndexes = new Set();
+function applyNestedLookupRecords(contextParams, inputPositions, lookupRecords) {
+    const context = contextParams.context;
+    const currentPosition = contextParams.index;
+    // the glyphs after the substitutions of the previous records, from the position glyphIndexesStart: the context until
+    // a substitution that a following record sees, then a copy of its glyphs from the current one, the only ones a
+    // nested lookup reads
+    let glyphIndexes = context;
+    let glyphIndexesStart = 0;
+    // the positions of the input glyphs in the context after the substitutions of the previous records
+    const sequencePositions = inputPositions.slice();
+    let inputEnd = inputPositions[inputPositions.length - 1] + 1;
+    const substitutions = [];
     for (let i = 0; i < lookupRecords.length; i++) {
-        const lookupRecord = lookupRecords[i];
-        const sequenceGlyph = findInputSequenceGlyph(inputGlyphs, lookupRecord.sequenceIndex);
-        if (!sequenceGlyph) {
+        const sequenceIndex = lookupRecords[i].sequenceIndex;
+        if (sequenceIndex >= sequencePositions.length) {
             continue;
         }
-        const lookupTable = this.getLookupByIndex(lookupRecord.lookupListIndex);
-        if (!lookupTable) continue;
-        for (let s = 0; s < lookupTable.subtables.length; s++) {
-            let subtableOwner = lookupTable;
-            let subtable = lookupTable.subtables[s];
-            let substitutionType = this.getSubstitutionType(lookupTable, subtable);
-            if (substitutionType === '71') {
-                // This is an extension subtable, so lookup the target subtable
-                subtableOwner = subtable;
-                subtable = subtable.extension;
-                substitutionType = this.getSubstitutionType(subtableOwner, subtable);
-            }
-            if (!NESTED_SUBSTITUTION_TYPES.includes(substitutionType)) continue;
-            const glyphs = inputGlyphs[sequenceGlyph.inputIndex];
-            const substitution = this.getLookupMethod(subtableOwner, subtable)(glyphs[sequenceGlyph.glyphOffset]);
-            if (substitution !== null && substitution !== undefined) {
-                glyphs.splice(sequenceGlyph.glyphOffset, 1, ...(Array.isArray(substitution) ? substitution : [substitution]));
-                substitutedInputIndexes.add(sequenceGlyph.inputIndex);
-                break;
-            }
+        const lookupTable = this.getLookupByIndex(lookupRecords[i].lookupListIndex);
+        if (!lookupTable) {
+            continue;
         }
+        const position = sequencePositions[sequenceIndex];
+        const glyphContextParams = glyphIndexes === context && position === currentPosition ?
+            contextParams : createNestedContextParams(glyphIndexes, position - glyphIndexesStart);
+        const nestedSubstitution = this.getLookupSubstitution(lookupTable, glyphContextParams, NESTED_SUBSTITUTION_TYPES);
+        if (!nestedSubstitution) {
+            continue;
+        }
+        substitutions.push({ offset: position - currentPosition, ...nestedSubstitution });
+        if (i < lookupRecords.length - 1) {
+            if (glyphIndexes === context) {
+                glyphIndexes = context.slice(currentPosition);
+                glyphIndexesStart = currentPosition;
+            }
+            substituteGlyphIndexes(glyphIndexes, position - glyphIndexesStart, nestedSubstitution);
+        }
+        const lengthChange = getSubstitutionLengthChange(nestedSubstitution);
+        // like HarfBuzz, the end of the input does not move before the glyph the substitution applied at
+        inputEnd = Math.max(inputEnd + lengthChange, position);
+        const isDeletion = nestedSubstitution.id === MULTIPLE_SUBSTITUTION_ID && !nestedSubstitution.substitution.length;
+        updateInputPositions(sequencePositions, sequenceIndex, lengthChange, isDeletion);
     }
-    const substitutions = [];
-    for (const inputIndex of substitutedInputIndexes) {
-        const glyphs = inputGlyphs[inputIndex];
-        substitutions[inputPositions[inputIndex] - inputPositions[0]] = glyphs.length === 1 ? glyphs[0] : glyphs;
-    }
-    return { substitutions, lastInputOffset: inputPositions[inputPositions.length - 1] - inputPositions[0] };
+    return { substitutions, inputLength: inputEnd - currentPosition };
 }
 
 /**
@@ -291,7 +403,7 @@ function chainingSubstitutionFormat3(contextParams, subtable, lookupTable) {
     if (!inputPositions) {
         return null;
     }
-    return applyNestedLookupRecords.call(this, contextParams.context, inputPositions, subtable.lookupRecords);
+    return applyNestedLookupRecords.call(this, contextParams, inputPositions, subtable.lookupRecords);
 }
 
 /**
@@ -349,7 +461,7 @@ function contextSubstitutionFormat1(contextParams, subtable, lookupTable) {
         });
         if (inputPositions) {
             // the first matching rule applies, even when its lookups substitute nothing
-            return applyNestedLookupRecords.call(this, contextParams.context, inputPositions, rule.lookupRecords);
+            return applyNestedLookupRecords.call(this, contextParams, inputPositions, rule.lookupRecords);
         }
     }
     return null;
@@ -391,7 +503,7 @@ function contextSubstitutionFormat2(contextParams, subtable, lookupTable) {
         });
         if (inputPositions) {
             // the first matching rule applies, even when its lookups substitute nothing
-            return applyNestedLookupRecords.call(this, contextParams.context, inputPositions, rule.lookupRecords);
+            return applyNestedLookupRecords.call(this, contextParams, inputPositions, rule.lookupRecords);
         }
     }
     return null;
@@ -419,7 +531,7 @@ function chainingSubstitutionFormat1(contextParams, subtable, lookupTable) {
         });
         if (inputPositions) {
             // the first matching rule applies, even when its lookups substitute nothing
-            return applyNestedLookupRecords.call(this, contextParams.context, inputPositions, rule.lookupRecords);
+            return applyNestedLookupRecords.call(this, contextParams, inputPositions, rule.lookupRecords);
         }
     }
     return null;
@@ -452,7 +564,7 @@ function chainingSubstitutionFormat2(contextParams, subtable, lookupTable) {
         });
         if (inputPositions) {
             // the first matching rule applies, even when its lookups substitute nothing
-            return applyNestedLookupRecords.call(this, contextParams.context, inputPositions, rule.lookupRecords);
+            return applyNestedLookupRecords.call(this, contextParams, inputPositions, rule.lookupRecords);
         }
     }
     return null;
@@ -481,7 +593,7 @@ function contextSubstitutionFormat3(contextParams, subtable, lookupTable) {
     if (!inputPositions) {
         return null;
     }
-    return applyNestedLookupRecords.call(this, contextParams.context, inputPositions, subtable.lookupRecords);
+    return applyNestedLookupRecords.call(this, contextParams, inputPositions, subtable.lookupRecords);
 }
 
 /**
@@ -694,26 +806,21 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
 const APPLIED_SUBSTITUTION_TYPES = ['11', '12', '21', '41', '51', '52', '53', '61', '62', '63'];
 
 /**
- * Apply one lookup at the current glyph of a context: the first subtable of the
- * lookup that applies wins (a matching contextual rule ends the lookup even when it
- * substitutes nothing). Lookups of unsupported types are handled by getLookupMethod.
- * The lookup does not apply at a glyph its lookupFlag ignores, and skips the glyphs
- * it ignores when it matches the other glyphs of a rule or of a ligature.
+ * Get the substitution of a lookup at the current glyph of a context: the first subtable of the lookup, of the given
+ * types, that applies wins (a matching contextual rule ends the lookup even when it substitutes nothing). Lookups of
+ * unsupported types are handled by getLookupMethod. The lookup skips the glyphs its lookupFlag ignores when it matches
+ * the other glyphs of a rule or of a ligature; like HarfBuzz for a lookup that a lookup record applies, it applies at
+ * the current glyph even when its lookupFlag ignores it (lookupSubstitution checks that).
  * @param {any} lookupTable lookup table
- * @param {ContextParams} contextParams context params, its current glyph is the one to substitute
- * @param {string} tag feature tag set as the state of the substituted tokens
- * @returns {SubstitutionAction|null} the substitution to apply at the current glyph, if any: a contextual rule that
- * matches gives its ContextualMatch even when it substitutes nothing (e.g. an exception rule), the lookup goes on after
- * its input
+ * @param {ContextParams|{context: number[], index: number, current: number}} contextParams context params, its current
+ * glyph is the one to substitute; the nested lookups of a contextual rule get its context, index and current glyph only
+ * (see createNestedContextParams)
+ * @param {string[]} substitutionTypes the types of the subtables that can apply (lookupType + substFormat)
+ * @returns {LookupSubstitution|null}
  */
-FeatureQuery.prototype.lookupSubstitution = function (lookupTable, contextParams, tag) {
-    if (isGlyphIgnoredByLookup(getLayoutGdefTable(this.font), lookupTable, contextParams.current)) {
-        return null;
-    }
-    const subtables = this.getLookupSubtables(lookupTable) || [];
-    for (let s = 0; s < subtables.length; s++) {
+FeatureQuery.prototype.getLookupSubstitution = function (lookupTable, contextParams, substitutionTypes) {
+    for (let subtable of this.getLookupSubtables(lookupTable) || []) {
         let subtableOwner = lookupTable;
-        let subtable = subtables[s];
         let substitutionType = this.getSubstitutionType(lookupTable, subtable);
         if (substitutionType === '71') {
             // This is an extension subtable, so lookup the target subtable
@@ -723,32 +830,48 @@ FeatureQuery.prototype.lookupSubstitution = function (lookupTable, contextParams
         }
         // getLookupMethod handles the lookups of unsupported types (it throws, or reports and skips them)
         const lookup = this.getLookupMethod(subtableOwner, subtable);
-        if (!lookup || !APPLIED_SUBSTITUTION_TYPES.includes(substitutionType)) continue;
+        if (!lookup || !substitutionTypes.includes(substitutionType)) {
+            continue;
+        }
         const id = parseInt(substitutionType);
         if (substitutionType === '11' || substitutionType === '12') {
             const substitution = lookup(contextParams.current);
             if (substitution !== null && substitution !== undefined) {
-                return new SubstitutionAction({ id, tag, substitution });
+                return { id, substitution };
             }
         } else if (substitutionType === '21') {
             // multiple substitution: the glyph becomes a sequence of glyphs (none deletes it)
             const substitution = lookup(contextParams.current);
             if (Array.isArray(substitution)) {
-                return new SubstitutionAction({ id, tag, substitution });
-            }
-        } else if (substitutionType === '41') {
-            const substitution = lookup(contextParams, lookupTable);
-            if (substitution) {
-                return new SubstitutionAction({ id, tag, substitution });
+                return { id, substitution };
             }
         } else {
             const substitution = lookup(contextParams, lookupTable);
             if (substitution) {
-                return new SubstitutionAction({ id, tag, substitution });
+                return { id, substitution };
             }
         }
     }
     return null;
+};
+
+/**
+ * Apply one lookup at the current glyph of a context (see getLookupSubstitution). The lookup does not apply at a
+ * glyph its lookupFlag ignores.
+ * @param {any} lookupTable lookup table
+ * @param {ContextParams} contextParams context params, its current glyph is the one to substitute
+ * @param {string} tag feature tag set as the state of the substituted tokens
+ * @returns {SubstitutionAction|null} the substitution to apply at the current glyph, if any: a contextual rule that
+ * matches gives its ContextualMatch even when it substitutes nothing (e.g. an exception rule), the lookup goes on after
+ * its input; like HarfBuzz, the input never ends before the glyph a nested lookup applied at, so after a nested
+ * ligature that takes glyphs past the input the lookup goes on at the ligature glyph
+ */
+FeatureQuery.prototype.lookupSubstitution = function (lookupTable, contextParams, tag) {
+    if (isGlyphIgnoredByLookup(getLayoutGdefTable(this.font), lookupTable, contextParams.current)) {
+        return null;
+    }
+    const lookupSubstitution = this.getLookupSubstitution(lookupTable, contextParams, APPLIED_SUBSTITUTION_TYPES);
+    return lookupSubstitution && new SubstitutionAction({ ...lookupSubstitution, tag });
 };
 
 /**
@@ -779,4 +902,4 @@ FeatureQuery.prototype.getFeature = function getFeature(query) {
 };
 
 export default FeatureQuery;
-export { FeatureQuery, SubstitutionAction };
+export { FeatureQuery, SubstitutionAction, getSubstitutionGlyphEdits };
