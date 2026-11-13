@@ -1,4 +1,6 @@
 import assert from 'assert';
+import { readFileSync } from 'fs';
+import { parse } from '../src/opentype.mjs';
 import Tokenizer from '../src/tokenizer.mjs';
 import FeatureQuery, { SubstitutionAction } from '../src/features/featureQuery.mjs';
 import applySubstitution, {
@@ -7,6 +9,7 @@ import applySubstitution, {
     getGlyphSequence,
     applyLookupToTokens,
     getFeaturesLookups,
+    getLookupFeatureValue,
     applyFeaturesToTokens,
     getRequiredFeatureStage,
     applyFeatureStagesToTokens
@@ -24,6 +27,7 @@ import {
     multipleCLookup,
     subAcuteBLookup
 } from './lookup-flags-font.mjs';
+import { itFailsUntilFixed } from './regression/helpers.mjs';
 
 /**
  * The substitutions applied to the tokens of a text and to their glyph sequence, with the glyphs of
@@ -509,8 +513,55 @@ describe('applySubstitution.mjs', function() {
             const initLookup = createSingleLookup([lam], [lamInitial]);
             const query = new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('arab', 'init', [0], [initLookup]) }));
             const tokens = tokenize('\u{644}\u{644}');
-            applyLookupToTokens(query, initLookup, 'init', tokens, token => token === tokens[0]);
+            applyLookupToTokens(query, initLookup, 'init', tokens, token => (token === tokens[0] ? 1 : null));
             assert.deepStrictEqual(getGlyphSequence(tokens).glyphIndexes, [lamInitial, lam]);
+        });
+
+        it('substitutes at each glyph the alternate of the value of its token, like the feature mask of HarfBuzz', function() {
+            // AlternateSet::apply of HarfBuzz 11.3.2: the alternate of the index of the value of the mask of the glyph, 1 for
+            // the first one, none for 0 or past the alternates (aalt sub a from [a.alt b c];)
+            const alternates = [aAlternate, glyphB, glyphC];
+            const alternateLookup = {
+                lookupType: 3,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 1, coverage: createCoverage([glyphA]), alternateSets: [alternates] }]
+            };
+            const query = new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('latn', 'aalt', [0], [alternateLookup]) }));
+            const tokens = tokenize('aaaaa');
+            const tokenValues = new Map(tokens.map((token, index) => [token, [1, 3, 0, 4, null][index]]));
+            applyLookupToTokens(query, alternateLookup, 'aalt', tokens, token => tokenValues.get(token));
+            assert.deepStrictEqual(getGlyphSequence(tokens).glyphIndexes, [aAlternate, glyphC, glyphA, glyphA, glyphA]);
+        });
+
+        it('substitutes in a nested alternate substitution the alternate of the value of the token of its glyph, like HarfBuzz', function() {
+            // AlternateSet::apply of HarfBuzz 11.3.2 in a nested lookup: the lookup mask of the contextual lookup and the mask
+            // of the glyph the nested lookup applies at (cur()), which has no value of the feature where the lookup cannot
+            // start; sub b' a' lookup 1;, lookup 1 sub a from [a.alt b c];
+            const alternateLookup = {
+                lookupType: 3,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 1, coverage: createCoverage([glyphA]), alternateSets: [[aAlternate, glyphB, glyphC]] }]
+            };
+            const ruleLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    backtrackCoverage: [],
+                    inputCoverage: createCoverages([glyphB, glyphA]),
+                    lookaheadCoverage: [],
+                    lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 1 }]
+                }]
+            };
+            const query = new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [0], [ruleLookup, alternateLookup]) }));
+            const substituteWithValues = tokenValues => {
+                const tokens = tokenize('ba');
+                applyLookupToTokens(query, ruleLookup, 'calt', tokens, token => tokenValues[tokens.indexOf(token)]);
+                return getGlyphSequence(tokens).glyphIndexes;
+            };
+            assert.deepStrictEqual(substituteWithValues([1, 3]), [glyphB, glyphC]);
+            assert.deepStrictEqual(substituteWithValues([3, 1]), [glyphB, aAlternate]);
+            assert.deepStrictEqual(substituteWithValues([2, null]), [glyphB, glyphA]);
         });
 
         it('matches the glyphs of the disabled tokens in the lookahead and the backtrack of a rule', function() {
@@ -530,7 +581,7 @@ describe('applySubstitution.mjs', function() {
             const dalLookup = createSingleLookup([dal], [dalAlternate]);
             const finaQuery = new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('arab', 'fina', [1], [dalLookup, lookaheadLookup]) }));
             const lookaheadTokens = tokenize('\u{644}\u{62F} \u{644}');
-            applyLookupToTokens(finaQuery, lookaheadLookup, 'fina', lookaheadTokens, token => token === lookaheadTokens[1]);
+            applyLookupToTokens(finaQuery, lookaheadLookup, 'fina', lookaheadTokens, token => (token === lookaheadTokens[1] ? 1 : null));
             assert.deepStrictEqual(getGlyphSequence(lookaheadTokens).glyphIndexes, [lam, dalAlternate, 0, lam]);
             // LookupFlagsArabicFormsChaining.ttf: fina sub dal by dal.alt; (with sub reh by reh.alt fatha;), then init
             // lookupflag IgnoreMarks; sub [dal.alt reh.alt] lam' by lam.init;, at the initial lams only, whose backtrack is a
@@ -550,8 +601,8 @@ describe('applySubstitution.mjs', function() {
             const lookups = [dalLookup, backtrackLookup, createSingleLookup([lam], [lamInitial])];
             const formsQuery = new FeatureQuery(createLookupFlagsFont({ gsub: createScriptsLayoutTable({ arab: [['fina', [0]], ['init', [1]]] }, lookups) }));
             const backtrackTokens = tokenize('\u{644}\u{62F}\u{644}\u{62F}');
-            applyLookupToTokens(formsQuery, dalLookup, 'fina', backtrackTokens, token => token.char === '\u{62F}');
-            applyLookupToTokens(formsQuery, backtrackLookup, 'init', backtrackTokens, token => token.char === '\u{644}');
+            applyLookupToTokens(formsQuery, dalLookup, 'fina', backtrackTokens, token => (token.char === '\u{62F}' ? 1 : null));
+            applyLookupToTokens(formsQuery, backtrackLookup, 'init', backtrackTokens, token => (token.char === '\u{644}' ? 1 : null));
             assert.deepStrictEqual(getGlyphSequence(backtrackTokens).glyphIndexes, [lam, dalAlternate, lamInitial, dalAlternate]);
         });
 
@@ -673,7 +724,7 @@ describe('applySubstitution.mjs', function() {
             const query = new FeatureQuery(createLookupFlagsFont({ gsub }));
             const tokens = tokenize('\u{644}\u{62F}');
             applyLookupToTokens(query, multipleLookup, 'ccmp', tokens);
-            applyLookupToTokens(query, finaLookup, 'fina', tokens, token => token === tokens[1]);
+            applyLookupToTokens(query, finaLookup, 'fina', tokens, token => (token === tokens[1] ? 1 : null));
             assert.deepStrictEqual(getGlyphSequence(tokens).glyphIndexes, [lam, dalAlternate, glyphIndexes['acute.alt']]);
         });
     });
@@ -817,10 +868,12 @@ describe('applySubstitution.mjs', function() {
         it('adds the lookups of the required feature to the lookups of the features, with its tag', function() {
             const query = createRequiredFeatureQuery();
             assert.deepStrictEqual(getFeaturesLookups(query, ['liga'], 'latn', undefined, true), [
-                { lookupTable: lookups[0], tag: 'liga', isRequiredFeatureLookup: false },
-                { lookupTable: lookups[1], tag: 'ss05', isRequiredFeatureLookup: true }
+                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false },
+                { lookupTable: lookups[1], tag: 'ss05', isEnabledFeatureLookup: false, isRequiredFeatureLookup: true }
             ]);
-            assert.deepStrictEqual(getFeaturesLookups(query, ['liga'], 'latn'), [{ lookupTable: lookups[0], tag: 'liga', isRequiredFeatureLookup: false }]);
+            assert.deepStrictEqual(getFeaturesLookups(query, ['liga'], 'latn'), [
+                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false }
+            ]);
         });
 
         it('gives a lookup of both a feature and the required feature once, as a lookup of the required feature', function() {
@@ -831,8 +884,8 @@ describe('applySubstitution.mjs', function() {
             gsub.scripts[0].script.defaultLangSys.reqFeatureIndex = 1;
             const query = new FeatureQuery(createLookupFlagsFont({ gsub }));
             assert.deepStrictEqual(getFeaturesLookups(query, ['liga'], 'latn', undefined, true), [
-                { lookupTable: lookups[0], tag: 'liga', isRequiredFeatureLookup: false },
-                { lookupTable: lookups[1], tag: 'liga', isRequiredFeatureLookup: true }
+                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false },
+                { lookupTable: lookups[1], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: true }
             ]);
         });
 
@@ -857,10 +910,98 @@ describe('applySubstitution.mjs', function() {
             const gsub = createScriptsLayoutTable({ latn: [['ccmp', [2, 1]], ['liga', [1, 0, 1, 9]]] }, lookups);
             const query = new FeatureQuery(createLookupFlagsFont({ gsub }));
             assert.deepStrictEqual(getFeaturesLookups(query, ['ccmp', 'liga', 'calt'], 'latn'), [
-                { lookupTable: lookups[0], tag: 'liga', isRequiredFeatureLookup: false },
-                { lookupTable: lookups[1], tag: 'ccmp', isRequiredFeatureLookup: false },
-                { lookupTable: lookups[2], tag: 'ccmp', isRequiredFeatureLookup: false }
+                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false },
+                { lookupTable: lookups[1], tag: 'ccmp', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false },
+                { lookupTable: lookups[2], tag: 'ccmp', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false }
             ]);
+        });
+
+        it('computes the lookups of a set of features once for the GSUB table, again after a lookup is added', function() {
+            // TestAlternateSubstitution.ttf: aalt has 2 lookups, swsh none until addAlternate creates it with its lookup
+            const cachedFont = parse(readFileSync('./test/fonts/TestAlternateSubstitution.ttf'));
+            const getLookups = () => getFeaturesLookups(new FeatureQuery(cachedFont), ['aalt', 'swsh'], 'latn');
+            const lookups = getLookups();
+            assert.strictEqual(lookups.length, 2);
+            assert.strictEqual(getLookups(), lookups);
+            cachedFont.substitution.addAlternate('swsh', { sub: 2, by: [3, 4] }, 'latn');
+            const addedLookups = getLookups();
+            assert.notStrictEqual(addedLookups, lookups);
+            assert.strictEqual(addedLookups.length, 3);
+            assert.strictEqual(getLookups(), addedLookups);
+        });
+    });
+
+    describe('getLookupFeatureValue', function() {
+        // the lookup mask of HarfBuzz (hb_ot_map_builder_t::compile): the value of the feature of the lookup, the global
+        // mask (the value 1) for a lookup of the required feature only
+        const query = new FeatureQuery(createLookupFlagsFont(), undefined, { salt: 2, liga: false });
+        const createFeatureLookup = (tag, isEnabledFeatureLookup, isRequiredFeatureLookup) => (
+            { lookupTable: subAcuteBLookup, tag, isEnabledFeatureLookup, isRequiredFeatureLookup }
+        );
+
+        it('gives the value of the feature of the lookup', function() {
+            assert.strictEqual(getLookupFeatureValue(query, createFeatureLookup('salt', true, false)), 2);
+            assert.strictEqual(getLookupFeatureValue(query, createFeatureLookup('calt', true, false)), 1);
+            assert.strictEqual(getLookupFeatureValue(query, createFeatureLookup('rand', true, false)), 255);
+        });
+
+        it('gives the value 1 to a lookup of the required feature only, whatever the features option', function() {
+            assert.strictEqual(getLookupFeatureValue(query, createFeatureLookup('salt', false, true)), 1);
+            assert.strictEqual(getLookupFeatureValue(query, createFeatureLookup('liga', false, true)), 1);
+        });
+    });
+
+    describe('an alternate substitution of the required feature', function() {
+        // TestAlternateSubstitution.ttf (test/generate-alternate-substitution-font.py) with salt sub b from [b.alt1 b.alt2];
+        // as the ReqFeatureIndex of every DefaultLangSys and out of its FeatureIndex (fontTools), saved as required.ttf:
+        // hb-shape --no-glyph-names --cluster-level=1 [--features=<features>] required.ttf -u 0062
+        let requiredFont;
+
+        // the GSUB table is edited before the font shapes a text: the lookups of its features are cached for the table
+        beforeEach(function() {
+            requiredFont = parse(readFileSync('./test/fonts/TestAlternateSubstitution.ttf'));
+            const gsub = requiredFont.tables.gsub;
+            const saltFeatureIndex = gsub.features.findIndex(featureRecord => featureRecord.tag === 'salt');
+            for (const scriptRecord of gsub.scripts) {
+                const defaultLangSys = scriptRecord.script.defaultLangSys;
+                defaultLangSys.reqFeatureIndex = saltFeatureIndex;
+                defaultLangSys.featureIndexes = defaultLangSys.featureIndexes.filter(featureIndex => featureIndex !== saltFeatureIndex);
+            }
+        });
+
+        it('substitutes the first alternate whatever the value of the feature of its tag, like the global mask of HarfBuzz', function() {
+            // [7=0+500], b.alt1, the same with --features=-salt, --features=salt=2 and --features=salt=0
+            for (const features of [undefined, { salt: false }, { salt: 2 }, { salt: 0 }]) {
+                assert.deepStrictEqual(requiredFont.stringToGlyphIndexes('b', { features }), [7], JSON.stringify(features));
+            }
+        });
+
+        describe('when the feature of its tag has it too', function() {
+            // the same font with salt in every FeatureIndex too, saved as required-shared.ttf:
+            // hb-shape --no-glyph-names --cluster-level=1 [--features=<features>] required-shared.ttf -u 0062
+            beforeEach(function() {
+                const gsub = requiredFont.tables.gsub;
+                const saltFeatureIndex = gsub.features.findIndex(featureRecord => featureRecord.tag === 'salt');
+                for (const scriptRecord of gsub.scripts) {
+                    scriptRecord.script.defaultLangSys.featureIndexes.push(saltFeatureIndex);
+                }
+            });
+
+            it('substitutes the first alternate with the value 1 of the feature, like the global mask of HarfBuzz', function() {
+                // [7=0+500], b.alt1, the same with --features=+salt and --features=-salt
+                for (const features of [undefined, { salt: true }, { salt: false }]) {
+                    assert.deepStrictEqual(requiredFont.stringToGlyphIndexes('b', { features }), [7], JSON.stringify(features));
+                }
+            });
+
+            itFailsUntilFixed('substitutes no alternate with a value other than 1 of the feature, like the joined masks of HarfBuzz',
+                'getLookupFeatureValue (src/features/applySubstitution.mjs): a lookup that the required feature shares with an ' +
+                'enabled feature takes the value of the enabled feature, where HarfBuzz joins the global mask of the required ' +
+                'feature to the mask of the feature, an alternate index past the alternates',
+                function() {
+                    // --features=salt=2 [6=0+500], b unchanged (the same with --features=salt=3)
+                    assert.deepStrictEqual(requiredFont.stringToGlyphIndexes('b', { features: { salt: 2 } }), [6]);
+                });
         });
     });
 });

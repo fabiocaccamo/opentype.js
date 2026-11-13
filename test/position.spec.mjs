@@ -658,11 +658,49 @@ describe('position.mjs', function() {
             assert.strictEqual(positionText('AV', { script: 'hebr' }), '2+600|4+600');
         });
 
+        it('computes the lookups of the features of a run once for the GPOS table', function() {
+            // the language system is read only when the lookups are computed (without kern, whose kern table fallback
+            // reads it at every run)
+            const cachedFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
+            const getLangSysTable = cachedFont.position.getLangSysTable;
+            let langSysReadCount = 0;
+            cachedFont.position.getLangSysTable = function(...langSysArguments) {
+                langSysReadCount++;
+                return getLangSysTable.apply(this, langSysArguments);
+            };
+            // --features=ss01 -u 0064,006F: [8=0+420|9=1+500], the d o -80 of ss01
+            assert.strictEqual(positionText('do', { featureTags: ['ss01'] }, cachedFont), '8+420|9+500');
+            const firstRunReadCount = langSysReadCount;
+            assert.ok(firstRunReadCount > 0);
+            assert.strictEqual(positionText('do', { featureTags: ['ss01'] }, cachedFont), '8+420|9+500');
+            assert.strictEqual(langSysReadCount, firstRunReadCount);
+        });
+
+        it('applies a lookup added to a feature through the Layout methods after a run was positioned', function() {
+            // the lookups of the features of a run are cached for the GPOS table: getLookupTables with create clears them
+            const editedFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
+            const [glyphD, glyphO] = ['d', 'o'].map(character => editedFont.charToGlyphIndex(character));
+            // -u 0064,006F: [8=0+500|9=1+500], no ss02
+            assert.strictEqual(positionText('do', { featureTags: ['ss02'] }, editedFont), '8+500|9+500');
+            const [lookupTable] = editedFont.position.getLookupTables('latn', undefined, 'ss02', 2, true);
+            lookupTable.subtables.push({
+                posFormat: 1,
+                coverage: { format: 1, glyphs: [glyphD] },
+                valueFormat1: 4,
+                valueFormat2: 0,
+                pairSets: [[{ secondGlyph: glyphO, value1: { xAdvance: -50 } }]]
+            });
+            // the d o -50 of the new pair adjustment
+            assert.strictEqual(positionText('do', { featureTags: ['ss02'] }, editedFont), '8+450|9+500');
+        });
+
         describe('the required feature of the language system', function() {
             // TestPairPositioning.ttf with ss01 as the ReqFeatureIndex of the DefaultLangSys of each script and not in its
             // FeatureIndex (fontTools: ReqFeatureIndex set, FeatureIndex without ss01, saved as required.ttf)
             // hb-shape --no-glyph-names --cluster-level=1 required.ttf -u <code points>
-            before(function() {
+            // the GPOS table is edited before the font shapes a text: the lookups of its features are cached for the table
+            beforeEach(function() {
+                pairFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
                 const ss01FeatureIndex = pairFont.tables.gpos.features.findIndex(featureRecord => featureRecord.tag === 'ss01');
                 for (const scriptRecord of pairFont.tables.gpos.scripts) {
                     const defaultLangSys = scriptRecord.script.defaultLangSys;
@@ -699,7 +737,9 @@ describe('position.mjs', function() {
             // TestPairPositioning.ttf with ss01 as the ReqFeatureIndex of latn ROM only and not in its FeatureIndex
             // (fontTools: ReqFeatureIndex set, FeatureIndex without ss01, saved as romanian-required.ttf)
             // hb-shape --no-glyph-names --cluster-level=1 romanian-required.ttf -u <code points>
+            // the GPOS table is edited before the font shapes a text: the lookups of its features are cached for the table
             before(function() {
+                pairFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
                 const ss01FeatureIndex = pairFont.tables.gpos.features.findIndex(featureRecord => featureRecord.tag === 'ss01');
                 const latinScript = pairFont.tables.gpos.scripts.find(scriptRecord => scriptRecord.tag === 'latn').script;
                 const romanianLangSys = latinScript.langSysRecords.find(langSysRecord => langSysRecord.tag === 'ROM ').langSys;
@@ -724,7 +764,9 @@ describe('position.mjs', function() {
             // TestPairPositioning.ttf with kern out of the FeatureIndex of every language system and the kern table
             // d a -20, A V -100 (fontTools), saved as gpos-kern-table.ttf:
             // hb-shape --no-glyph-names --cluster-level=1 gpos-kern-table.ttf -u <code points>
+            // the GPOS table is edited before the font shapes a text: the lookups of its features are cached for the table
             before(function() {
+                pairFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
                 const kernFeatureIndex = pairFont.tables.gpos.features.findIndex(featureRecord => featureRecord.tag === 'kern');
                 for (const scriptRecord of pairFont.tables.gpos.scripts) {
                     const langSystems = [scriptRecord.script.defaultLangSys, ...scriptRecord.script.langSysRecords.map(langSysRecord => langSysRecord.langSys)];

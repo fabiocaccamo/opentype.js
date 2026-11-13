@@ -62,6 +62,11 @@ SourceSansPro-Regular.otf
     SIL Open Font License, Version 1.1
     https://www.fontsquirrel.com/license/source-sans-pro
 
+TestAlternateSubstitution.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-alternate-substitution-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 TestAVAR.ttf
     Copyright (c) 2016 by Unicode, Inc.
     SIL Open Font License version 1.1 (OFL-1.1)

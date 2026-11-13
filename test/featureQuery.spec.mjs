@@ -253,53 +253,267 @@ describe('featureQuery.mjs', function() {
         });
     });
     describe('unsupported lookups', function() {
-        it('skips an unsupported lookup and still applies the supported lookups of the same feature', function () {
-            const font = loadSync('./test/fonts/TestGSUB-UnsupportedLookup.ttf');
+        // a reverse chaining substitution (lookup type 8) of b
+        const reverseChainingLookup = {
+            lookupType: 8,
+            lookupFlag: 0,
+            subtables: [{
+                substFormat: 1,
+                coverage: createCoverage([glyphIndexes.b]),
+                backtrackCoverage: [],
+                lookaheadCoverage: [],
+                substitutes: [glyphIndexes['b.alt']]
+            }]
+        };
+
+        // the warnings of a function
+        function getWarnings(run) {
             const originalWarn = console.warn;
             const warnings = [];
             console.warn = message => warnings.push(message);
             try {
-                assert.deepEqual(font.stringToGlyphs('fia').map(glyph => glyph.name), ['f_i', 'a']);
-                assert.deepEqual(font.stringToGlyphs('fia').map(glyph => glyph.name), ['f_i', 'a']);
+                run();
             } finally {
                 console.warn = originalWarn;
             }
-            assert.equal(warnings.length, 1);
-            assert.match(warnings[0], /lookupType: 3 - substFormat: 1 is not yet supported, lookup skipped/);
+            return warnings;
+        }
+
+        it('skips an unsupported lookup and still applies the supported lookups of the same feature', function () {
+            // calt: the reverse chaining substitution of b, then sub a by a.alt;
+            const lookups = [reverseChainingLookup, createSingleLookup([glyphIndexes.a], [glyphIndexes['a.alt']])];
+            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [0, 1], lookups) });
+            const glyphs = [];
+            const warnings = getWarnings(() => {
+                glyphs.push(font.stringToGlyphIndexes('ab'), font.stringToGlyphIndexes('ab'));
+            });
+            assert.deepStrictEqual(glyphs, [[glyphIndexes['a.alt'], glyphIndexes.b], [glyphIndexes['a.alt'], glyphIndexes.b]]);
+            assert.deepStrictEqual(warnings, [
+                '[opentype.js] substitutionType: 81 lookupType: 8 - substFormat: 1 is not yet supported, lookup skipped'
+            ]);
         });
 
         it('warns once for each unsupported substitution type of a font', function () {
-            // calt: an alternate substitution (lookup type 3) of a, a reverse chaining substitution (lookup type 8) of b
-            const alternateLookup = {
-                lookupType: 3,
+            // calt: a lookup of the type 9, which GSUB does not define (the extension of GPOS), and the reverse chaining
+            // substitution of b
+            const undefinedTypeLookup = {
+                lookupType: 9,
                 lookupFlag: 0,
-                subtables: [{ substFormat: 1, coverage: createCoverage([glyphIndexes.a]), alternateSets: [[glyphIndexes['a.alt']]] }]
+                subtables: [{ substFormat: 1, coverage: createCoverage([glyphIndexes.a]) }]
             };
-            const reverseChainingLookup = {
-                lookupType: 8,
-                lookupFlag: 0,
-                subtables: [{
-                    substFormat: 1,
-                    coverage: createCoverage([glyphIndexes.b]),
-                    backtrackCoverage: [],
-                    lookaheadCoverage: [],
-                    substitutes: [glyphIndexes['b.alt']]
-                }]
-            };
-            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [0, 1], [alternateLookup, reverseChainingLookup]) });
-            const originalWarn = console.warn;
-            const warnings = [];
-            console.warn = message => warnings.push(message);
-            try {
+            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [0, 1], [undefinedTypeLookup, reverseChainingLookup]) });
+            const warnings = getWarnings(() => {
                 font.stringToGlyphIndexes('ab');
                 font.stringToGlyphIndexes('ab');
-            } finally {
-                console.warn = originalWarn;
-            }
+            });
             assert.deepStrictEqual(warnings, [
-                '[opentype.js] substitutionType: 31 lookupType: 3 - substFormat: 1 is not yet supported, lookup skipped',
+                '[opentype.js] substitutionType: 91 lookupType: 9 - substFormat: 1 is not yet supported, lookup skipped',
                 '[opentype.js] substitutionType: 81 lookupType: 8 - substFormat: 1 is not yet supported, lookup skipped'
             ]);
+        });
+
+        it('applies the alternate substitution of a default feature, its first alternate, like HarfBuzz', function () {
+            // liga of TestGSUB-UnsupportedLookup.ttf: sub a from [a.alt]; then sub f i by f_i;
+            // hb-shape --cluster-level=1 TestGSUB-UnsupportedLookup.ttf -u 0066,0069,0061: [f_i=0+550|a.alt=2+520]
+            const font = loadSync('./test/fonts/TestGSUB-UnsupportedLookup.ttf');
+            const warnings = getWarnings(() => {
+                assert.deepStrictEqual(font.stringToGlyphs('fia').map(glyph => glyph.name), ['f_i', 'a.alt']);
+            });
+            assert.deepStrictEqual(warnings, []);
+        });
+    });
+
+    // like AlternateSet::apply of HarfBuzz 11.3.2 (OT/Layout/GSUB/AlternateSet.hh): the alternate of the index of the
+    // value of the feature of the lookup, 1 for the first one, none for 0 or past the alternates; at the value 255, a
+    // random alternate for rand; and the minimal standard generator of hb_ot_apply_context_t::random_number, its
+    // product in the unsigned 32-bit integers of HarfBuzz, from the random state 1 of a buffer
+    describe('alternate substitutions', function() {
+        const { a: glyphA, b: glyphB, c: glyphC } = glyphIndexes;
+        const alternates = [glyphIndexes['a.alt'], glyphB, glyphC];
+        const alternateLookup = {
+            lookupType: 3,
+            lookupFlag: 0,
+            subtables: [{ substFormat: 1, coverage: createCoverage([glyphA]), alternateSets: [alternates] }]
+        };
+
+        function createAlternateQuery(lookups) {
+            return new FeatureQuery(createLookupFlagsFont({ gsub: createLayoutTable('latn', 'aalt', [0], lookups) }));
+        }
+
+        // the substitution of a lookup at the first glyph of a context, with the value of its feature at every glyph
+        function substituteFirstGlyph(lookupTable, context, featureTag, featureValue) {
+            const getFeatureValue = featureValue === undefined ? undefined : () => featureValue;
+            const action = createAlternateQuery([lookupTable, alternateLookup]).lookupSubstitution(
+                lookupTable, new ContextParams(context, 0), featureTag, getFeatureValue
+            );
+            return action && { id: action.id, substitution: action.substitution };
+        }
+
+        it('substitutes the alternate of the value of the feature, the first one without a value', function() {
+            assert.deepStrictEqual(substituteFirstGlyph(alternateLookup, [glyphA], 'aalt'), { id: 31, substitution: alternates[0] });
+            for (const value of [1, 2, 3]) {
+                assert.deepStrictEqual(substituteFirstGlyph(alternateLookup, [glyphA], 'aalt', value), { id: 31, substitution: alternates[value - 1] });
+            }
+            assert.strictEqual(substituteFirstGlyph(alternateLookup, [glyphA], 'aalt', 4), null);
+            assert.strictEqual(substituteFirstGlyph(alternateLookup, [glyphA], 'aalt', 0), null);
+            assert.strictEqual(substituteFirstGlyph(alternateLookup, [glyphA], 'aalt', 255), null);
+            assert.strictEqual(substituteFirstGlyph(alternateLookup, [glyphB], 'aalt', 1), null);
+        });
+
+        it('substitutes the alternate of an extension lookup', function() {
+            const extensionLookup = { lookupType: 7, lookupFlag: 0, subtables: [{ substFormat: 1, lookupType: 3, extension: alternateLookup.subtables[0] }] };
+            assert.deepStrictEqual(substituteFirstGlyph(extensionLookup, [glyphA], 'cv01', 2), { id: 31, substitution: alternates[1] });
+        });
+
+        it('leaves the glyph to the next subtable when the value chooses none of the alternates of a subtable', function() {
+            const twoSubtablesLookup = {
+                lookupType: 3,
+                lookupFlag: 0,
+                subtables: [
+                    { substFormat: 1, coverage: createCoverage([glyphA]), alternateSets: [[glyphB]] },
+                    { substFormat: 1, coverage: createCoverage([glyphA]), alternateSets: [alternates] }
+                ]
+            };
+            assert.deepStrictEqual(substituteFirstGlyph(twoSubtablesLookup, [glyphA], 'cv02', 1), { id: 31, substitution: glyphB });
+            assert.deepStrictEqual(substituteFirstGlyph(twoSubtablesLookup, [glyphA], 'cv02', 3), { id: 31, substitution: alternates[2] });
+        });
+
+        it('substitutes an alternate that is glyph 0', function() {
+            // AlternateSet::apply substitutes any alternate, .notdef included: feaLib sub a from [.notdef a.alt]; in aalt,
+            // hb-shape --no-glyph-names --features=aalt=1 -u 0061 [0=0+500], --features=aalt=2 [2=0+500]
+            const notdefAlternateLookup = {
+                lookupType: 3,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 1, coverage: createCoverage([glyphA]), alternateSets: [[0, glyphIndexes['a.alt']]] }]
+            };
+            assert.deepStrictEqual(substituteFirstGlyph(notdefAlternateLookup, [glyphA], 'aalt', 1), { id: 31, substitution: 0 });
+            assert.deepStrictEqual(substituteFirstGlyph(notdefAlternateLookup, [glyphA], 'aalt', 2), { id: 31, substitution: glyphIndexes['a.alt'] });
+        });
+
+        it('substitutes in a nested alternate substitution the alternate of the value of the feature of the contextual lookup', function() {
+            // sub a' lookup 1 b;, lookup 1 the alternate substitution of a
+            const chainingLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    backtrackCoverage: [],
+                    inputCoverage: createCoverages([glyphA]),
+                    lookaheadCoverage: createCoverages([glyphB]),
+                    lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 1 }]
+                }]
+            };
+            assert.deepStrictEqual(substituteFirstGlyph(chainingLookup, [glyphA, glyphB], 'ss02', 2),
+                { id: 63, substitution: contextualMatch([nestedSubstitution(0, 31, alternates[1])], 1) });
+            assert.deepStrictEqual(substituteFirstGlyph(chainingLookup, [glyphA, glyphB], 'ss02', 4),
+                { id: 63, substitution: contextualMatch([], 1) });
+        });
+
+        it('substitutes in a nested alternate substitution the alternate of the value of the feature at its glyph', function() {
+            // like the mask of the glyph a nested lookup applies at in HarfBuzz (AlternateSet::apply reads cur().mask), the
+            // glyph of a multiple substitution keeping the mask of the glyph it replaces (output_glyph)
+            const multipleLookup = createMultipleLookup([glyphB], [[glyphB, glyphA]]);
+            // sub b' a' lookup 1;, lookup 1 the alternate substitution of a
+            const alternateRuleLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    backtrackCoverage: [],
+                    inputCoverage: createCoverages([glyphB, glyphA]),
+                    lookaheadCoverage: [],
+                    lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 1 }]
+                }]
+            };
+            // sub b' lookup 2 lookup 1;, lookup 2 the multiple substitution of b into b a: the a at sequence index 1
+            const multipleRuleLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    backtrackCoverage: [],
+                    inputCoverage: createCoverages([glyphB]),
+                    lookaheadCoverage: [],
+                    lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 2 }, { sequenceIndex: 1, lookupListIndex: 1 }]
+                }]
+            };
+            const query = createAlternateQuery([alternateRuleLookup, alternateLookup, multipleLookup, multipleRuleLookup]);
+            const substituteAt = (lookupTable, context, featureValues) => query.lookupSubstitution(
+                lookupTable, new ContextParams(context, 0), 'fina', position => featureValues[position]
+            ).substitution;
+            assert.deepStrictEqual(substituteAt(alternateRuleLookup, [glyphB, glyphA], [2, 3]),
+                contextualMatch([nestedSubstitution(1, 31, alternates[2])], 2));
+            assert.deepStrictEqual(substituteAt(alternateRuleLookup, [glyphB, glyphA], [3, 0]), contextualMatch([], 2));
+            assert.deepStrictEqual(substituteAt(multipleRuleLookup, [glyphB, glyphA], [2, 3]),
+                contextualMatch([nestedSubstitution(0, 21, [glyphB, glyphA]), nestedSubstitution(1, 31, alternates[1])], 2));
+        });
+
+        it('substitutes in a nested alternate substitution after a nested ligature the alternate of the value at the glyph it comes from', function() {
+            // like the fina rule of TestAlternateSubstitution.ttf whose alternate follows a ligature (bidi.spec.mjs, hb-shape
+            // --features=fina=2 gives the alternate of the value at the final tah, not at the medial sad the ligature deletes)
+            const ligatureLookup = createLigatureLookup(glyphA, [glyphB], glyphIndexes.a_b);
+            // sub a' lookup 2 b' a' lookup 1;, lookup 2 the ligature a b by a_b: the second a at the sequence index 1
+            const ligatureRuleLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    backtrackCoverage: [],
+                    inputCoverage: createCoverages([glyphA, glyphB, glyphA]),
+                    lookaheadCoverage: [],
+                    lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 2 }, { sequenceIndex: 1, lookupListIndex: 1 }]
+                }]
+            };
+            const query = createAlternateQuery([ligatureRuleLookup, alternateLookup, ligatureLookup]);
+            const substituteAt = (context, index, featureValues) => query.lookupSubstitution(
+                ligatureRuleLookup, new ContextParams(context, index), 'fina', position => featureValues[position]
+            ).substitution;
+            const ligature = nestedSubstitution(0, 41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] });
+            // the values 1 at the first a, 2 at the b the ligature deletes, 3 at the second a
+            assert.deepStrictEqual(substituteAt([glyphA, glyphB, glyphA], 0, [1, 2, 3]),
+                contextualMatch([ligature, nestedSubstitution(1, 31, alternates[2])], 2));
+            // the rule at the second glyph of the context
+            assert.deepStrictEqual(substituteAt([glyphC, glyphA, glyphB, glyphA], 1, [0, 1, 2, 3]),
+                contextualMatch([ligature, nestedSubstitution(1, 31, alternates[2])], 2));
+        });
+
+        it('gives the random numbers of HarfBuzz from the start of each run', function() {
+            const query = createAlternateQuery([alternateLookup]);
+            const randomNumbers = () => [query.getRandomNumber(), query.getRandomNumber(), query.getRandomNumber(), query.getRandomNumber()];
+            assert.deepStrictEqual(randomNumbers(), [48271, 182605794, 1291390782, 1716587427]);
+            query.startScriptRun(['ltra', 'ltrm']);
+            assert.deepStrictEqual(randomNumbers(), [48271, 182605794, 1291390782, 1716587427]);
+        });
+
+        it('substitutes a random alternate for rand at the value 255, the alternate of the value otherwise', function() {
+            const query = createAlternateQuery([alternateLookup]);
+            // the random numbers 48271, 182605794, 1291390782: the alternates 48271 % 3 + 1 = 2, then 1, then 1
+            const randomAlternates = [1, 2, 3].map(() => query.getAlternate(alternates, 'rand', 255));
+            assert.deepStrictEqual(randomAlternates, [alternates[1], alternates[0], alternates[0]]);
+            assert.strictEqual(query.getAlternate(alternates, 'rand', 3), alternates[2]);
+            assert.strictEqual(query.getAlternate(alternates, 'salt', 255), null);
+            // no random number for a glyph without alternates
+            assert.strictEqual(query.getAlternate([], 'rand', 255), null);
+            assert.strictEqual(query.getRandomNumber(), 1716587427);
+        });
+
+        it('gives the values of the features option, the default value of the feature otherwise', function() {
+            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'aalt', [0], [alternateLookup]) });
+            const query = new FeatureQuery(font, undefined, { aalt: 2, salt: true, liga: false });
+            assert.deepStrictEqual(['aalt', 'salt', 'liga', 'calt', 'rand'].map(tag => query.getFeatureValue(tag)), [2, 1, 0, 1, 255]);
+        });
+
+        it('gives rtlm the value of its mask in a run of a right-to-left script, the value of the option otherwise', function() {
+            // rtlm_mask of HarfBuzz at the glyphs it does not mirror, every glyph of a right-to-left run in the fork: its value
+            // 1 joins the value of the features option (rtlm=2 is 3 there, rtlm=256 is 1), which a left-to-right run keeps
+            const getRtlmValue = (featuresOption, directionTags) => {
+                const query = new FeatureQuery(createLookupFlagsFont(), undefined, featuresOption);
+                query.startScriptRun(directionTags);
+                return query.getFeatureValue('rtlm');
+            };
+            const featuresOptions = [undefined, { rtlm: 2 }, { rtlm: 256 }];
+            assert.deepStrictEqual(featuresOptions.map(option => getRtlmValue(option, ['rtla', 'rtlm'])), [1, 3, 1]);
+            assert.deepStrictEqual(featuresOptions.map(option => getRtlmValue(option, ['ltra', 'ltrm'])), [1, 2, 0]);
         });
     });
 
@@ -1199,6 +1413,38 @@ describe('featureQuery.mjs', function() {
             assert.equal(new FeatureQuery(variationFont, { wght: 650.31 }).getFeatureVariationSubstitutions().size, 0);
             variationFont.variation.set({ wght: 650.32 });
             assert.equal(new FeatureQuery(variationFont, { wght: 400 }).getFeatureVariationSubstitutions().size, 0);
+        });
+
+        it('computes the features of a language system once for the GSUB table and the feature variation record', function() {
+            const getFeatures = variation => new FeatureQuery(variationFont, variation).getScriptFeatures('DFLT');
+            const defaultFeatures = getFeatures();
+            const variationFeatures = getFeatures({ wght: 650.32 });
+            assert.strictEqual(getFeatures(), defaultFeatures);
+            assert.strictEqual(getFeatures({ wght: 650.32 }), variationFeatures);
+            assert.notStrictEqual(variationFeatures, defaultFeatures);
+            // wght 650.31 matches no feature variation record either
+            assert.strictEqual(getFeatures({ wght: 650.31 }), defaultFeatures);
+        });
+
+        it('computes the feature variation record of the variation once for a query', function() {
+            const gsub = variationFont.tables.gsub;
+            const featureVariations = gsub.variations;
+            let variationsReadCount = 0;
+            Object.defineProperty(gsub, 'variations', {
+                get: () => {
+                    variationsReadCount++;
+                    return featureVariations;
+                }
+            });
+            const query = new FeatureQuery(variationFont, { wght: 650.32 });
+            assert.strictEqual(query.getFeatureVariationIndex(), 0);
+            assert.strictEqual(query.getFeatureVariationIndex(), 0);
+            assert.strictEqual(variationsReadCount, 1);
+            // no feature variation record at wght 650.31
+            const noRecordQuery = new FeatureQuery(variationFont, { wght: 650.31 });
+            assert.strictEqual(noRecordQuery.getFeatureVariationIndex(), -1);
+            assert.strictEqual(noRecordQuery.getFeatureVariationIndex(), -1);
+            assert.strictEqual(variationsReadCount, 2);
         });
 
         it('applies rvrn by default, at the variation of the options', function() {

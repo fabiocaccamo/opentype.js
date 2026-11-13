@@ -187,4 +187,24 @@ describe('substitution.mjs', function() {
             assert.deepEqual(font.tables.gsub.scripts[0].script.langSysRecords, [], 'reading creates no language system');
         });
     });
+
+    describe('the text layout after an edit', function() {
+        // the glyph of each letter: a 1, b 2, ... z 26
+        it('applies the substitutions added after a text was laid out, whose lookups are cached', function() {
+            assert.deepStrictEqual(font.stringToGlyphIndexes('abc'), [1, 2, 3]);
+            substitution.add('liga', { sub: [1, 2], by: 26 });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('abc'), [26, 3]);
+            // a ligature added to the lookup the text layout has cached
+            substitution.add('liga', { sub: [2, 3], by: 25 });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('bc'), [25]);
+            // a feature added after a text was laid out with it
+            assert.deepStrictEqual(font.stringToGlyphIndexes('a', { features: { salt: 2 } }), [1]);
+            substitution.add('salt', { sub: 1, by: [24, 23] });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('a', { features: { salt: 2 } }), [23]);
+            // a script added after a text was laid out with its fallback DFLT, whose liga it has not
+            assert.deepStrictEqual(font.stringToGlyphIndexes('abc', { script: 'latn', features: { ss01: true } }), [26, 3]);
+            substitution.addSingle('ss01', { sub: 3, by: 22 }, 'latn');
+            assert.deepStrictEqual(font.stringToGlyphIndexes('abc', { script: 'latn', features: { ss01: true } }), [1, 2, 22]);
+        });
+    });
 });

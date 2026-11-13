@@ -14,7 +14,9 @@ import Layout, {
     matchSequenceContext,
     matchChainedSequenceContext,
     getRequiredFeatureIndex,
+    getCachedLayoutValue,
     getOpenTypeScriptTags,
+    isRightToLeftScript,
     selectScriptTag
 } from '../src/layout.mjs';
 import { glyphIndexes, createLookupFlagsGdef } from './lookup-flags-font.mjs';
@@ -194,6 +196,78 @@ describe('layout.mjs', function() {
         });
     });
 
+    describe('getCachedLayoutValue', function() {
+        // a value computed from the table, counting its computations
+        let computationCount;
+        const computeScriptCount = () => {
+            computationCount++;
+            return font.tables.gsub.scripts.length;
+        };
+
+        beforeEach(function() {
+            computationCount = 0;
+            font.tables.gsub = { version: 1, scripts: [], features: [], lookups: [] };
+        });
+
+        it('computes a value once for a table and a key', function() {
+            const table = font.tables.gsub;
+            assert.equal(getCachedLayoutValue(table, 'scripts', computeScriptCount), 0);
+            assert.equal(getCachedLayoutValue(table, 'scripts', computeScriptCount), 0);
+            assert.equal(getCachedLayoutValue(table, 'other key', computeScriptCount), 0);
+            assert.equal(computationCount, 2);
+            // a table that replaces it
+            font.tables.gsub = { version: 1, scripts: [{ tag: 'latn', script: { defaultLangSys: null, langSysRecords: [] } }], features: [], lookups: [] };
+            assert.equal(getCachedLayoutValue(font.tables.gsub, 'scripts', computeScriptCount), 1);
+            assert.equal(computationCount, 3);
+        });
+
+        it('starts the values of a table again from none before a new key past 1024 values', function() {
+            const table = font.tables.gsub;
+            for (let i = 0; i < 1024; i++) {
+                getCachedLayoutValue(table, `key ${i}`, computeScriptCount);
+            }
+            // a cached value of a full cache
+            getCachedLayoutValue(table, 'key 0', computeScriptCount);
+            assert.equal(computationCount, 1024);
+            // a new key empties the cache, then the earlier keys compute their values again
+            getCachedLayoutValue(table, 'key 1024', computeScriptCount);
+            getCachedLayoutValue(table, 'key 0', computeScriptCount);
+            getCachedLayoutValue(table, 'key 1024', computeScriptCount);
+            assert.equal(computationCount, 1026);
+        });
+
+        it('computes the value at every call without a table', function() {
+            const computeOne = () => {
+                computationCount++;
+                return 1;
+            };
+            assert.equal(getCachedLayoutValue(undefined, 'key', computeOne), 1);
+            assert.equal(getCachedLayoutValue(undefined, 'key', computeOne), 1);
+            assert.equal(computationCount, 2);
+        });
+
+        it('computes the values again after a script, a language system, a feature or a lookup is added to the table', function() {
+            const table = font.tables.gsub;
+            const additions = [
+                () => layout.getScriptTable('latn', true),
+                () => layout.getLangSysTable('latn', 'TRK ', true),
+                () => layout.getFeatureTable('latn', 'TRK ', 'liga', true),
+                () => layout.getLookupTables('latn', 'TRK ', 'liga', 4, true)
+            ];
+            getCachedLayoutValue(table, 'scripts', computeScriptCount);
+            for (const addition of additions) {
+                addition();
+                getCachedLayoutValue(table, 'scripts', computeScriptCount);
+            }
+            assert.equal(computationCount, 1 + additions.length);
+            // reading the table, or an addition that finds what it would add, keeps the values
+            layout.getLookupTables('latn', 'TRK ', 'liga', 4, true);
+            layout.getFeatureTable('latn', 'dflt', 'liga');
+            getCachedLayoutValue(table, 'scripts', computeScriptCount);
+            assert.equal(computationCount, 1 + additions.length);
+        });
+    });
+
     describe('getRequiredFeatureIndex', function() {
         it('gives the ReqFeatureIndex of a language system, undefined without a required feature (0xFFFF)', function() {
             assert.equal(getRequiredFeatureIndex({ reserved: 0, reqFeatureIndex: 0, featureIndexes: [] }), 0);
@@ -230,6 +304,31 @@ describe('layout.mjs', function() {
 
         it('gives DFLT for a text of no script', function() {
             assert.deepStrictEqual(getOpenTypeScriptTags(undefined), ['DFLT']);
+        });
+    });
+
+    describe('isRightToLeftScript', function() {
+        // the direction HarfBuzz gives a buffer of a script: hb-shape --no-glyph-names --script=<script>
+        // TestAlternateSubstitution.ttf -u 0061,0062 gives [6=1+500|2=0+500] for a right-to-left script,
+        // [2=0+500|6=1+500] for a left-to-right one
+        it('tells the right-to-left scripts, like hb_script_get_horizontal_direction of HarfBuzz', function() {
+            const rightToLeftScripts = [
+                'Arab', 'Hebr', 'Syrc', 'Thaa', 'Cprt', 'Khar', 'Phnx', 'Nkoo', 'Lydi', 'Avst', 'Armi', 'Phli', 'Prti', 'Sarb',
+                'Orkh', 'Samr', 'Mand', 'Merc', 'Mero', 'Mani', 'Mend', 'Nbat', 'Narb', 'Palm', 'Phlp', 'Hatr', 'Adlm', 'Rohg',
+                'Sogo', 'Sogd', 'Elym', 'Chrs', 'Yezi', 'Ougr', 'Gara'
+            ];
+            for (const script of rightToLeftScripts) {
+                assert.strictEqual(isRightToLeftScript(getOpenTypeScriptTags(script)), true, script);
+            }
+        });
+
+        it('takes the other scripts and a text of no script as left to right', function() {
+            // Old Hungarian, Old Italic, Runic and Tifinagh have no direction in HarfBuzz, whose buffer is then left to right
+            const leftToRightScripts = ['Latn', 'Thai', 'Deva', 'Mymr', 'Mong', 'Hira', 'Hung', 'Ital', 'Runr', 'Tfng'];
+            for (const script of leftToRightScripts) {
+                assert.strictEqual(isRightToLeftScript(getOpenTypeScriptTags(script)), false, script);
+            }
+            assert.strictEqual(isRightToLeftScript(getOpenTypeScriptTags(undefined)), false);
         });
     });
 

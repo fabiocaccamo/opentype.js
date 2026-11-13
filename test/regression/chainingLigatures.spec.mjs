@@ -539,9 +539,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
         });
 
         // Lookup 1 of aalt is an alternate substitution (GSUB type 3): k to k.end or k.salt, HarfBuzz takes the
-        // first alternate. The fork skips the lookup with a warning: k stays k, or is left to a later lookup.
-        const alternateSubstitutionReason = 'FeatureQuery.prototype.getLookupMethod (src/features/featureQuery.mjs): ' +
-            'no alternate substitution (GSUB lookup type 3), the lookup is skipped with a warning';
+        // alternate of the value of aalt, the first one for true.
         const alternateReferences = [
             {
                 name: 'with liga turned off (kA)',
@@ -550,8 +548,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
                 // hb-shape --no-glyph-names --cluster-level=1 --features=+aalt,-liga TestGSUB-ChainingLigatures-subset.otf -u 006B,0041
                 // [30=0+534|2=1+530]
                 // (k.end A.salt: A.salt comes from the single substitution of aalt, lookup 0)
-                expected: { glyphs: [30, 2], clusters: [0, 1], advances: [534, 530] },
-                forkResult: 'k stays k'
+                expected: { glyphs: [30, 2], clusters: [0, 1], advances: [534, 530] }
             },
             {
                 name: 'inside a word, where liga leaves k plain (ka)',
@@ -560,8 +557,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
                 // hb-shape --no-glyph-names --cluster-level=1 --features=+aalt TestGSUB-ChainingLigatures-subset.otf -u 006B,0061
                 // [30=0+534|6=1+535]
                 // (k.end a.end)
-                expected: { glyphs: [30, 6], clusters: [0, 1], advances: [534, 535] },
-                forkResult: 'k stays k'
+                expected: { glyphs: [30, 6], clusters: [0, 1], advances: [534, 535] }
             },
             {
                 name: 'before the single substitution of salt can take k (ka with aalt and salt)',
@@ -570,8 +566,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
                 // hb-shape --no-glyph-names --cluster-level=1 --features=+aalt,+salt TestGSUB-ChainingLigatures-subset.otf -u 006B,0061
                 // [30=0+534|6=1+535]
                 // (k.end a.end: lookup 1 of aalt comes before lookup 6 of salt, which does not cover k.end)
-                expected: { glyphs: [30, 6], clusters: [0, 1], advances: [534, 535] },
-                forkResult: 'lookup 6 of salt turns k into k.salt'
+                expected: { glyphs: [30, 6], clusters: [0, 1], advances: [534, 535] }
             }
         ];
 
@@ -585,14 +580,29 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
         });
 
         for (const reference of alternateReferences) {
-            itFailsUntilFixed(
-                `substitutes k with its first alternate (alternate substitution, GSUB type 3) ${reference.name}`,
-                `${alternateSubstitutionReason}, ${reference.forkResult}`,
-                function() {
-                    const shape = shapeText(font, reference.text, { features: reference.features });
-                    assertShape(shape, reference.expected);
-                }
-            );
+            it(`substitutes k with its first alternate (alternate substitution, GSUB type 3) ${reference.name}`, function() {
+                const shape = shapeText(font, reference.text, { features: reference.features });
+                assertShape(shape, reference.expected);
+            });
         }
+
+        it('substitutes k with the alternate of the value of aalt, k past its alternates', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 --features=aalt=2,-liga TestGSUB-ChainingLigatures-subset.otf -u 006B,0041
+            // [31=0+518|2=1+530]
+            // (k.salt A.salt)
+            assertShape(shapeText(font, 'kA', { features: { aalt: 2, liga: false } }), {
+                glyphs: [31, 2],
+                clusters: [0, 1],
+                advances: [518, 530]
+            }, 'aalt=2');
+            // hb-shape --no-glyph-names --cluster-level=1 --features=aalt=3 TestGSUB-ChainingLigatures-subset.otf -u 006B,0061
+            // [29=0+518|6=1+535]
+            // (k a.end: k has two alternates)
+            assertShape(shapeText(font, 'ka', { features: { aalt: 3 } }), {
+                glyphs: [29, 6],
+                clusters: [0, 1],
+                advances: [518, 535]
+            }, 'aalt=3');
+        });
     });
 });

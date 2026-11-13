@@ -1056,13 +1056,10 @@ describe('bidi.mjs', function() {
             assert.deepStrictEqual(glyphNames('\u{633}\u{629}'), ['tehmarbuta', 'seen.init']);
         });
 
-        itFailsUntilFixed('applies an arabic form that the features option enables at every glyph, like a user feature of HarfBuzz',
-            'applyArabicFeatures (src/bidi.mjs): updateFeatures merges the features option into the default features, so an enabled ' +
-            'form applies to the letters of its form only, not at every glyph like a global feature that the user of HarfBuzz enables',
-            function() {
-                // --features=+isol -u 0633,0629 [tehmarbuta.isol.fina=1+500|seen.init=0+500]: isol, then fina at the final letter
-                assert.deepStrictEqual(glyphNames('\u{633}\u{629}', { features: { isol: true } }), ['tehmarbuta.isol.fina', 'seen.init']);
-            });
+        it('applies an arabic form that the features option enables at every glyph, like a user feature of HarfBuzz', function() {
+            // --features=+isol -u 0633,0629 [tehmarbuta.isol.fina=1+500|seen.init=0+500]: isol, then fina at the final letter
+            assert.deepStrictEqual(glyphNames('\u{633}\u{629}', { features: { isol: true } }), ['tehmarbuta.isol.fina', 'seen.init']);
+        });
 
         it('applies the required feature of an arabic language system in the first stage, or in its stage when its tag is enabled, like HarfBuzz', function() {
             // arab SND: init SEEN_INIT (sub seen by seen.init;), fina DAL_SEEN_FINA, the required feature ss07 SEEN_REQ (sub seen
@@ -1227,6 +1224,214 @@ describe('bidi.mjs', function() {
         });
     });
 
+    describe('the direction features, rand and the alternate substitutions of a run', function() {
+        // TestAlternateSubstitution.ttf (test/generate-alternate-substitution-font.py): ccmp sub beh by beh.ccmp; (33) before
+        // ltra sub beh by beh.ltra; (34) and rtla sub beh by beh.rtla; (35) in the lookup list, rtlm sub alef by
+        // alef.rtlm; (31); ltra sub hebbet by hebbet.ltra; (37) sub one by one.ltra; (40), rtla sub hebbet by hebbet.rtla;
+        // (38) sub one by one.rtla; (41), GPOS ltra +100 and rtla -100 on the advance of hebbet and one and of their
+        // alternates (500 units wide): hb-shape --no-glyph-names --cluster-level=1 [--features=<features>]
+        // TestAlternateSubstitution.ttf -u <code points>
+        let alternateFont;
+
+        before(function() {
+            alternateFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf');
+        });
+
+        // the glyph and the advance of each character in the order of the text, the order of the clusters of hb-shape: the
+        // fork lays out a Hebrew text, and the characters of no script after an arabic word, in the order of the text
+        function shapeInTextOrder(text, options) {
+            return alternateFont.shape(text, options)
+                .sort((positionA, positionB) => positionA.start - positionB.start)
+                .map(glyphPosition => [glyphPosition.glyph.index, glyphPosition.xAdvance]);
+        }
+
+        it('applies rtla and rtlm to a right-to-left run, in a stage before ccmp, like the Arabic shaper of HarfBuzz', function() {
+            // -u 0628,0627,0628: [35=2+500|31=1+500|35=0+500]; -u 0628,0020,0628: [35=2+500|1=1+500|35=0+500]
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{628}\u{627}\u{628}'), [35, 31, 35]);
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{628} \u{628}'), [35, 1, 35]);
+            // --features=-rtla -u 0628,0627: [31=1+500|33=0+500], ccmp applies; --features=-rtlm: [30=1+500|35=0+500]
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{628}\u{627}', { features: { rtla: false } }), [31, 33]);
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{628}\u{627}', { features: { rtlm: false } }), [30, 35]);
+        });
+
+        it('applies ltra after the forms when the features option turns it on in a right-to-left run, like HarfBuzz', function() {
+            // --features=+ltra -u 0628,0627: [31=1+500|35=0+500], the ltra that the user enables is in the last stage of
+            // HarfBuzz, after rtla
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{628}\u{627}', { features: { ltra: true } }), [31, 35]);
+        });
+
+        it('applies rtla and rtlm to the characters of no script of an arabic run, like HarfBuzz', function() {
+            // -u 0628,0627,0020: [1=2+500|31=1+500|35=0+500]; -u 0628,0627,002E: [0=2+500|31=1+500|35=0+500]
+            assert.deepStrictEqual(shapeInTextOrder('\u{628}\u{627} '), [[35, 500], [31, 500], [1, 500]]);
+            assert.deepStrictEqual(shapeInTextOrder('\u{628}\u{627}.'), [[35, 500], [31, 500], [0, 500]]);
+        });
+
+        it('applies the same direction features in GSUB and in GPOS to a digit of an arabic run, like HarfBuzz', function() {
+            // -u 0628,0020,0031: [41=2+400|1=1+500|35=0+500], one.rtla and the -100 of rtla;
+            // -u 0031,0020,0628: [35=2+500|1=1+500|41=0+400]
+            assert.deepStrictEqual(shapeInTextOrder('\u{628} 1'), [[35, 500], [1, 500], [41, 400]]);
+            assert.deepStrictEqual(shapeInTextOrder('1 \u{628}'), [[41, 400], [1, 500], [35, 500]]);
+            // a digit of a latin run: -u 0068,0031: [26=0+500|40=1+600], one.ltra and the +100 of ltra
+            assert.deepStrictEqual(shapeInTextOrder('h1'), [[26, 500], [40, 600]]);
+        });
+
+        it('applies rtla and rtlm, not ltra and ltrm, to a hebrew run in GSUB and in GPOS, like HarfBuzz', function() {
+            // -u 05D1,05D1,05D1: [38=2+400|38=1+400|38=0+400], hebbet.rtla
+            assert.deepStrictEqual(shapeInTextOrder('\u{5D1}\u{5D1}\u{5D1}'), [[38, 400], [38, 400], [38, 400]]);
+            // without rtla, like a font that has ltra only: --features=-rtla -u 05D1,05D1,05D1 [36=2+500|36=1+500|36=0+500]
+            assert.deepStrictEqual(shapeInTextOrder('\u{5D1}\u{5D1}\u{5D1}', { features: { rtla: false } }), [[36, 500], [36, 500], [36, 500]]);
+            // with a digit: -u 05D1,05D1,0020,0031 [41=3+400|1=2+500|38=1+400|38=0+400]; --features=-rtla
+            // [39=3+500|1=2+500|36=1+500|36=0+500]
+            assert.deepStrictEqual(shapeInTextOrder('\u{5D1}\u{5D1} 1'), [[38, 400], [38, 400], [1, 500], [41, 400]]);
+            assert.deepStrictEqual(shapeInTextOrder('\u{5D1}\u{5D1} 1', { features: { rtla: false } }), [[36, 500], [36, 500], [1, 500], [39, 500]]);
+            // ltra that the features option turns on: --features=-rtla,+ltra [40=3+600|1=2+500|37=1+600|37=0+600]
+            assert.deepStrictEqual(shapeInTextOrder('\u{5D1}\u{5D1} 1', { features: { rtla: false, ltra: true } }), [[37, 600], [37, 600], [1, 500], [40, 600]]);
+        });
+
+        it('applies ltra and ltrm to a thai run, like the Thai shaper of HarfBuzz', function() {
+            // --script=thai -u 0068,0069: [26=0+500|29=1+500], h.ltra and i.ltrm
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('hi', { script: 'thai' }), [26, 29]);
+        });
+
+        it('substitutes the random alternates of HarfBuzz in an arabic run, in the order of the text across its words', function() {
+            // rand sub seen from [seen.rand1 seen.rand2 seen.rand3]; (43, 44, 45): -u 0633,0633,0633,0020,0633,0633,0020,0633
+            // [43=7+500|1=6+500|43=5+500|43=4+500|1=3+500|43=2+500|43=1+500|44=0+500]
+            assert.deepStrictEqual(shapeInTextOrder('\u{633}\u{633}\u{633} \u{633}\u{633} \u{633}').map(([glyph]) => glyph),
+                [44, 43, 43, 1, 43, 43, 1, 43]);
+            // -u 0633,0020,0633,0020,0633,0020,0633,0020,0633 [43=8+500|1=7+500|43=6+500|1=5+500|43=4+500|1=3+500|43=2+500|1=1+500|44=0+500]
+            assert.deepStrictEqual(shapeInTextOrder('\u{633} \u{633} \u{633} \u{633} \u{633}').map(([glyph]) => glyph),
+                [44, 1, 43, 1, 43, 1, 43, 1, 43]);
+        });
+
+        it('sets the bit 1 of the form in the value of a form feature at the letters of the form, like HarfBuzz', function() {
+            // fina sub teh from [teh.fina1 teh.fina2 teh.fina3]; (47, 48, 49), a final teh: -u 0628,062A [47=1+500|35=0+500];
+            // --features=fina=2: [49=1+500|35=0+500], 2 and the 1 of the mask of fina; --features=fina=3 [49=1+500|35=0+500];
+            // --features=fina=4 [46=1+500|35=0+500], 5 is past the alternates of teh
+            const finalTeh = features => alternateFont.stringToGlyphIndexes('\u{628}\u{62A}', { features })[0];
+            assert.deepStrictEqual([undefined, { fina: 2 }, { fina: 3 }, { fina: 4 }].map(finalTeh), [47, 49, 49, 46]);
+        });
+
+        it('applies a form that the features option sets at every glyph with its value, and the value of the mask at the letters of the form, like HarfBuzz', function() {
+            // a feature of the user of HarfBuzz is global: -u 062A,062A,0020,062A [46=3+500|1=2+500|47=1+500|46=0+500],
+            // --features=fina=1 [47=3+500|1=2+500|47=1+500|47=0+500], --features=fina=2 [48=3+500|1=2+500|49=1+500|48=0+500]
+            // (2 at every teh, 3 at the final one), --features=fina=0 [46=3+500|1=2+500|46=1+500|46=0+500]
+            const tehs = features => alternateFont.stringToGlyphIndexes('\u{62A}\u{62A} \u{62A}', { features });
+            assert.deepStrictEqual(tehs(), [46, 1, 47, 46]);
+            assert.deepStrictEqual(tehs({ fina: 1 }), [47, 1, 47, 47]);
+            assert.deepStrictEqual(tehs({ fina: 2 }), [48, 1, 49, 48]);
+            assert.deepStrictEqual(tehs({ fina: 0 }), [46, 1, 46, 46]);
+        });
+
+        it('keeps the mask of a form whose value is a multiple of 256, like HarfBuzz', function() {
+            // --features=fina=256 -u 062A,062A,0020,062A [46=3+500|1=2+500|47=1+500|46=0+500], teh.fina1 at the final teh: the
+            // value 0 at every glyph, and the value 1 of the mask of fina at the final letter
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{62A}\u{62A} \u{62A}', { features: { fina: 256 } }), [46, 1, 47, 46]);
+            // a form is no feature of the Latin shaper: --script=latn --features=fina=256 -u 062A,062A [46=0+500|46=1+500];
+            // --features=fina=2 [48=0+500|48=1+500]
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{62A}\u{62A}', { script: 'latn', features: { fina: 256 } }), [46, 46]);
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{62A}\u{62A}', { script: 'latn', features: { fina: 2 } }), [48, 48]);
+        });
+
+        it('substitutes in a nested alternate substitution of a form the alternate of the value of the form at its glyph, like HarfBuzz', function() {
+            // fina sub lam' theh' lookup THEH_ALTERNATES; sub theh' space' lam' lookup LAM_ALTERNATES; (lam 65, lam.alt1 to
+            // lam.alt3 66 to 68, theh 69, theh.alt1 to theh.alt3 70 to 72), the nested alternate at the mask of its glyph:
+            // -u 0644,062B [69=1+500|65=0+500], --features=fina=1 [70=1+500|65=0+500], --features=fina=2 [72=1+500|65=0+500]
+            // (the rule starts at the initial lam, 2, and its nested lookup applies at the final theh, 3), --features=fina=3
+            // [72=1+500|65=0+500], --features=fina=4 and --features=fina=256 [69=1+500|65=0+500]
+            const lamTheh = features => alternateFont.stringToGlyphIndexes('\u{644}\u{62B}', { features });
+            assert.deepStrictEqual([undefined, { fina: 1 }, { fina: 2 }, { fina: 3 }, { fina: 4 }, { fina: 256 }].map(lamTheh),
+                [[69, 65], [70, 65], [72, 65], [72, 65], [69, 65], [69, 65]]);
+            // beh.rtla 35: -u 0628,062B,0020,0644 [65=3+500|1=2+500|69=1+500|35=0+500] (the rule does not match in HarfBuzz,
+            // whose space and lam have no mask of fina; in the fork its nested lookup applies at a glyph without that mask),
+            // --features=fina=1 [66=3+500|1=2+500|69=1+500|35=0+500], --features=fina=2 [67=3+500|1=2+500|69=1+500|35=0+500]
+            // (the rule starts at the final theh, 3, and its nested lookup applies at the isolated lam, 2), --features=fina=3
+            // [68=3+500|1=2+500|69=1+500|35=0+500], --features=fina=4 and --features=fina=256 [65=3+500|1=2+500|69=1+500|35=0+500]
+            const thehSpaceLam = features => alternateFont.stringToGlyphIndexes('\u{628}\u{62B} \u{644}', { features })[0];
+            assert.deepStrictEqual([undefined, { fina: 1 }, { fina: 2 }, { fina: 3 }, { fina: 4 }, { fina: 256 }].map(thehSpaceLam),
+                [65, 66, 67, 68, 65, 65]);
+        });
+
+        it('substitutes in a nested alternate substitution after a nested ligature the alternate of the value of the form at the glyph it comes from, like HarfBuzz', function() {
+            // fina sub sad' lookup SAD_LIGATURE sad' tah' lookup TAH_ALTERNATES;, the alternate at the sequence index 1 (sad 73,
+            // sad_sad 74, tah 75, tah.alt1 to tah.alt3 76 to 78): -u 0635,0635,0637 [75=2+500|73=1+500|73=0+500],
+            // --features=fina=1 [76=2+500|74=0+500], --features=fina=2 [78=2+500|74=0+500] (3 at the final tah, not the 2 of
+            // the medial sad the ligature deletes), --features=fina=3 [78=2+500|74=0+500], --features=fina=4 [75=2+500|74=0+500]
+            const sadSadTah = features => alternateFont.stringToGlyphIndexes('\u{635}\u{635}\u{637}', { features });
+            assert.deepStrictEqual([undefined, { fina: 1 }, { fina: 2 }, { fina: 3 }, { fina: 4 }].map(sadSadTah),
+                [[75, 73, 73], [76, 74], [78, 74], [78, 74], [75, 74]]);
+            // the rule after the first glyph of the run: -u 0635,0020,0635,0635,0637 [75=4+500|73=3+500|73=2+500|1=1+500|73=0+500],
+            // --features=fina=1 [76=4+500|74=2+500|1=1+500|73=0+500], --features=fina=2 [78=4+500|74=2+500|1=1+500|73=0+500],
+            // --features=fina=3 [78=4+500|74=2+500|1=1+500|73=0+500], --features=fina=4 [75=4+500|74=2+500|1=1+500|73=0+500]
+            const sadSpaceSadSadTah = features => alternateFont.stringToGlyphIndexes('\u{635} \u{635}\u{635}\u{637}', { features });
+            assert.deepStrictEqual([undefined, { fina: 1 }, { fina: 2 }, { fina: 3 }, { fina: 4 }].map(sadSpaceSadSadTah),
+                [[75, 73, 73, 1, 73], [76, 74, 1, 73], [78, 74, 1, 73], [78, 74, 1, 73], [75, 74, 1, 73]]);
+        });
+
+        it('sets the bit 1 of the mask of rtlm in its value in a run of a right-to-left script, like HarfBuzz', function() {
+            // rtlm sub jeem from [jeem.rtlm1 jeem.rtlm2 jeem.rtlm3]; (62, 63, 64): -u 062C [62=0+500], --features=rtlm=2
+            // [64=0+500], --features=rtlm=3 [64=0+500] (3 keeps its bit 1, not 4), --features=rtlm=4 [61=0+500] (5 is past
+            // the alternates); --features=rtlm=256 -u 0627 [31=0+500], alef.rtlm, -u 062C [62=0+500]
+            const jeem = features => alternateFont.stringToGlyphIndexes('\u{62C}', { features });
+            assert.deepStrictEqual([undefined, { rtlm: 2 }, { rtlm: 3 }, { rtlm: 4 }, { rtlm: 256 }].map(jeem),
+                [[62], [64], [64], [61], [62]]);
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{627}', { features: { rtlm: 256 } }), [31]);
+            // rtlm is no direction feature of a run of a left-to-right script: --script=latn -u 062C [61=0+500],
+            // --features=rtlm=2 [63=0+500], --features=rtlm=256 [61=0+500]; --script=latn --features=rtlm=256 -u 0627 [30=0+500]
+            const latinJeem = features => alternateFont.stringToGlyphIndexes('\u{62C}', { script: 'latn', features });
+            assert.deepStrictEqual([undefined, { rtlm: 2 }, { rtlm: 256 }].map(latinJeem), [[61], [63], [61]]);
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{627}', { script: 'latn', features: { rtlm: 256 } }), [30]);
+        });
+
+        it('applies rand to an arabic run in the stage before ccmp, like the Arabic shaper of HarfBuzz', function() {
+            // ccmp sub seen by seen.ccmp; (60) before rand sub seen from [seen.rand1 seen.rand2 seen.rand3]; (43, 44, 45) in
+            // the lookup list: -u 0633 [44=0+500], the random alternate, then ccmp no longer matches; --features=-rand -u 0633
+            // [60=0+500]; --script=latn -u 0633 [60=0+500], ccmp and rand together in lookup list order
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{633}'), [44]);
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{633}', { features: { rand: false } }), [60]);
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('\u{633}', { script: 'latn' }), [60]);
+        });
+
+        describe('a form that is the required feature of the arabic language system too', function() {
+            // TestAlternateSubstitution.ttf with fina as the ReqFeatureIndex of the arab DefaultLangSys, kept in its
+            // FeatureIndex (fontTools), saved as fina-required.ttf: hb-shape --no-glyph-names --cluster-level=1
+            // [--features=<features>] fina-required.ttf -u <code points>
+            let finaRequiredFont;
+
+            beforeEach(function() {
+                finaRequiredFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf');
+                const gsub = finaRequiredFont.tables.gsub;
+                const finaFeatureIndex = gsub.features.findIndex(featureRecord => featureRecord.tag === 'fina');
+                gsub.scripts.find(scriptRecord => scriptRecord.tag === 'arab').script.defaultLangSys.reqFeatureIndex = finaFeatureIndex;
+            });
+
+            it('substitutes the first alternate at every teh with the value 1 of the feature, like the global mask of HarfBuzz', function() {
+                // --features=+fina -u 0628,062A [47=1+500|35=0+500], -u 062A [47=0+500]; the same with --features=-fina
+                for (const features of [{ fina: true }, { fina: false }]) {
+                    assert.deepStrictEqual(finaRequiredFont.stringToGlyphIndexes('\u{628}\u{62A}', { features }), [47, 35], JSON.stringify(features));
+                    assert.deepStrictEqual(finaRequiredFont.stringToGlyphIndexes('\u{62A}', { features }), [47], JSON.stringify(features));
+                }
+            });
+
+            it('applies the shared lookup at every glyph with the value 0 of a form at 256, like HarfBuzz', function() {
+                // --features=fina=256: the lookup starts at every glyph, so its nested ligature applies, and substitutes no
+                // alternate: -u 0635,0635,0637 [75=2+500|74=0+500], -u 0628,062A [46=1+500|35=0+500]
+                const features = { fina: 256 };
+                assert.deepStrictEqual(finaRequiredFont.stringToGlyphIndexes('\u{635}\u{635}\u{637}', { features }), [75, 74]);
+                assert.deepStrictEqual(finaRequiredFont.stringToGlyphIndexes('\u{628}\u{62A}', { features }), [46, 35]);
+            });
+
+            itFailsUntilFixed('substitutes no alternate with the mask of the form, like the joined masks of HarfBuzz',
+                'getLookupFeatureValue (src/features/applySubstitution.mjs): a lookup that the required feature shares with an ' +
+                'enabled form takes the value of the form at every glyph, where HarfBuzz joins the global mask of the required ' +
+                'feature to the mask of the form, an alternate index past the alternates',
+                function() {
+                    // -u 0628,062A [46=1+500|35=0+500], -u 062A [46=0+500], -u 062A,0628 [35=1+500|46=0+500], teh unchanged
+                    const tehTexts = ['\u{628}\u{62A}', '\u{62A}', '\u{62A}\u{628}'];
+                    assert.deepStrictEqual(tehTexts.map(text => finaRequiredFont.stringToGlyphIndexes(text)), [[46, 35], [46], [35, 46]]);
+                });
+        });
+    });
+
     describe('the characters of no script of an arabic run', function() {
         let jomhuriaFont;
 
@@ -1285,6 +1490,19 @@ describe('bidi.mjs', function() {
                 assert.deepStrictEqual(texts.map(text => arabicFont.stringToGlyphIndexes(text)),
                     [[621, 787, 944], [609, 788, 932], [628, 794, 951]]);
             });
+
+        it('applies rtlm to an arabic run of Arabic Supplement and Arabic Extended-A letters: Scheherazade, like HarfBuzz', function() {
+            // rtlm sub radical by radical.rtl;, the glyph of each character in the order of the text (the run is not laid out
+            // from right to left yet, see above): hb-shape --shapers=ot --no-glyph-names --cluster-level=1
+            // Scheherazade-Bold.ttf -u 0750,221A [1152=1+937|385=0+1505]; -u 08A0,221A [1152=1+937|392=0+1505];
+            // --features=-rtlm -u 0750,221A [1151=1+937|385=0+1505]
+            const glyphsInTextOrder = (text, options) => arabicFont.shape(text, options)
+                .sort((positionA, positionB) => positionA.start - positionB.start)
+                .map(glyphPosition => glyphPosition.glyph.index);
+            assert.deepStrictEqual(glyphsInTextOrder('\u{750}\u{221A}'), [385, 1152]);
+            assert.deepStrictEqual(glyphsInTextOrder('\u{8A0}\u{221A}'), [392, 1152]);
+            assert.deepStrictEqual(glyphsInTextOrder('\u{750}\u{221A}', { features: { rtlm: false } }), [385, 1151]);
+        });
 
         it('applies the arabic forms of the GSUB feature variations of the variation option: TestRVRN-CFF2, like HarfBuzz', function() {
             // the second lookup of fina (lookups 4 and 8) and of medi (3 and 7) of the feature variation of opsz 10 sees the

@@ -24,7 +24,7 @@ import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './regressio
  * Lookups (the first ones are only referenced by the contextual rules):
  *   0: single substitution format 1, A B C -> A.alt B.alt C.alt (deltaGlyphId 3)
  *   1: single substitution format 2, B.alt -> B.alt2
- *   2: alternate substitution A -> A.alt (a type that is not applied as a nested lookup)
+ *   2: reverse chaining substitution A -> A.alt (a type that is not applied as a nested lookup)
  *   3: the contextual lookup under test, set by each test
  */
 const glyphNames = ['.notdef', 'A', 'B', 'C', 'A.alt', 'B.alt', 'C.alt', 'B.alt2'];
@@ -41,10 +41,16 @@ const singleFormat2Lookup = {
     subtables: [{ substFormat: 2, coverage: { format: 1, glyphs: [5] }, substitute: [7] }]
 };
 
-const alternateLookup = {
-    lookupType: 3,
+const reverseChainingLookup = {
+    lookupType: 8,
     lookupFlag: 0,
-    subtables: [{ substFormat: 1, coverage: { format: 1, glyphs: [1] }, alternateSets: [[4]] }]
+    subtables: [{
+        substFormat: 1,
+        coverage: { format: 1, glyphs: [1] },
+        backtrackCoverage: [],
+        lookaheadCoverage: [],
+        substitutes: [4]
+    }]
 };
 
 function createFont(contextualLookup) {
@@ -67,7 +73,7 @@ function createFont(contextualLookup) {
             script: { defaultLangSys: { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [0] }, langSysRecords: [] }
         }],
         features: [{ tag: 'liga', feature: { params: 0, lookupListIndexes: [3] } }],
-        lookups: [singleFormat1Lookup, singleFormat2Lookup, alternateLookup, contextualLookup]
+        lookups: [singleFormat1Lookup, singleFormat2Lookup, reverseChainingLookup, contextualLookup]
     };
     return font;
 }
@@ -125,12 +131,12 @@ describe('nested lookups of contextual substitutions', function() {
             } finally {
                 console.warn = originalWarn;
             }
-            // the later record applies; the A that the skipped record keeps is not the HarfBuzz result (see the known
-            // failure of ss50 in 'nested ligature substitutions')
-            assert.deepEqual(glyphs.slice(1), ['B.alt']);
+            // the later record applies; A stays A, like HarfBuzz, whose reverse chaining substitution does not apply as a
+            // nested lookup (ReverseChainSingleSubstFormat1::apply)
+            assert.deepEqual(glyphs, ['A', 'B.alt']);
             // reported once, like an unsupported lookup of a feature
             assert.equal(warnings.length, 1);
-            assert.match(warnings[0], /lookupType: 3 - substFormat: 1 is not yet supported, lookup skipped/);
+            assert.match(warnings[0], /lookupType: 8 - substFormat: 1 is not yet supported, lookup skipped/);
         });
     });
 
@@ -507,15 +513,12 @@ describe('nested lookups of contextual substitutions', function() {
             }
         });
 
-        itFailsUntilFixed('applies a nested alternate substitution, its first alternate',
-            'FeatureQuery.prototype.getLookupMethod (src/features/featureQuery.mjs): no alternate substitution (GSUB lookup type 3), so the lookup ' +
-            'record of ss50 (sub a\' lookup ALTERNATE_A b\' lookup SUB_ACUTE_B;) is skipped with a warning and a stays a',
-            function() {
-                // hb-shape --no-glyph-names --cluster-level=1 --features=-kern,+ss50 LookupFlags.ttf -u 0061,0062
-                // [7=0+500|8=1+500]
-                const shape = shapeText(lookupFlagsFont, 'ab', { kerning: false, features: { ss50: true } });
-                assertShape(shape, { glyphs: [7, 8], clusters: [0, 1], advances: [500, 500] });
-            });
+        it('applies a nested alternate substitution, its first alternate', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-kern,+ss50 LookupFlags.ttf -u 0061,0062
+            // [7=0+500|8=1+500]
+            const shape = shapeText(lookupFlagsFont, 'ab', { kerning: false, features: { ss50: true } });
+            assertShape(shape, { glyphs: [7, 8], clusters: [0, 1], advances: [500, 500] });
+        });
 
         itFailsUntilFixed('applies a nested contextual lookup, the nested ligature of its rule',
             'applyNestedLookupRecords (src/features/featureQuery.mjs): a nested contextual lookup (GSUB types 5 and 6) is ' +

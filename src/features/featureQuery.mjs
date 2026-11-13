@@ -4,31 +4,42 @@
 
 import {
     getLayoutGdefTable, isGlyphIgnoredByLookup, getNotIgnoredGlyphPositions, getRequiredFeatureIndex,
-    matchSequenceContext, matchChainedSequenceContext
+    matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue
 } from '../layout.mjs';
 import { warnOncePerFont } from '../util.mjs';
+import { RANDOM_FEATURE_TAG, MAX_FEATURE_VALUE, getRunFeatureValue } from './featureValues.mjs';
+
+// the random state of a buffer of HarfBuzz when it starts (hb_buffer_t::clear)
+const INITIAL_RANDOM_STATE = 1;
 
 /**
  * Create feature query instance
  * @param {Font} font opentype font instance
  * @param {Object} [variation] variation coordinates of the GSUB feature variations, the current variation of the font if omitted
+ * @param {Object|Array} [featuresOption] the features option (see GlyphRenderOptions.features), whose values are the
+ * alternate indexes of the alternate substitutions of the features (see getFeatureValue in featureValues.mjs); the
+ * defaults when absent (or a features list)
  */
-function FeatureQuery(font, variation) {
+function FeatureQuery(font, variation, featuresOption) {
     this.font = font;
     this.variation = variation;
-    // the features of each language system, by script and language (see getLanguageSystemKey)
-    this.features = {};
+    this.featuresOption = featuresOption;
+    // the GSUB feature variation record of the variation (see getFeatureVariationIndex), once computed
+    this.featureVariationIndex = undefined;
+    // the random state and the direction features of the run being shaped (see startScriptRun)
+    this.randomState = INITIAL_RANDOM_STATE;
+    this.directionTags = [];
 }
 
 /**
- * The key of the features of a language system in FeatureQuery.features
- * @param {string} [scriptTag] script tag, DFLT if omitted
- * @param {string} [languageTag] language tag, the default language system of the script if omitted
- * @returns {string}
+ * The feature a lookup applies for, like the lookup mask of HarfBuzz
+ * @typedef LookupFeature
+ * @type Object
+ * @property {string} tag the feature tag
+ * @property {function(number): number} getValue the value of the feature (see getFeatureValue) at the glyph at a
+ * position of the context of the lookup, like the mask HarfBuzz gives the glyph: the alternate index there of the
+ * alternate substitutions of the lookup and of the lookups its contextual rules apply
  */
-function getLanguageSystemKey(scriptTag, languageTag) {
-    return (scriptTag || 'DFLT') + '|' + (languageTag || 'dflt');
-}
 
 /**
  * @typedef SubstitutionAction
@@ -100,10 +111,26 @@ function singleSubstitutionFormat2(glyphIndex, subtable) {
     return subtable.substitute[substituteIndex];
 }
 
-// nested lookup types (lookupType + substFormat) a contextual rule can apply:
-// single substitution format 1 and 2, multiple substitution format 1, ligature substitution format 1
-const NESTED_SUBSTITUTION_TYPES = ['11', '12', '21', '41'];
-const SINGLE_SUBSTITUTION_IDS = [11, 12];
+/**
+ * Handle alternate substitution - format 1
+ * @param {number} glyphIndex glyph index
+ * @param {any} subtable subtable
+ * @returns {number[]|null} the alternates of the glyph, null if the subtable does not cover it
+ */
+function alternateSubstitutionFormat1(glyphIndex, subtable) {
+    const alternateSetIndex = lookupCoverage(glyphIndex, subtable.coverage);
+    if (alternateSetIndex === -1) {
+        return null;
+    }
+    return subtable.alternateSets[alternateSetIndex];
+}
+
+// nested lookup types (lookupType + substFormat) a contextual rule can apply: single substitution format 1 and 2,
+// multiple substitution format 1, alternate substitution format 1, ligature substitution format 1
+const NESTED_SUBSTITUTION_TYPES = ['11', '12', '21', '31', '41'];
+// the substitutions that replace a glyph with one glyph: the single substitutions, and the alternate substitution,
+// whose substitution is the alternate it chose
+const SINGLE_SUBSTITUTION_IDS = [11, 12, 31];
 const MULTIPLE_SUBSTITUTION_ID = 21;
 const LIGATURE_SUBSTITUTION_ID = 41;
 
@@ -121,7 +148,7 @@ const LIGATURE_SUBSTITUTION_ID = 41;
  * @type Object
  * @property {number} offset the offset from the current glyph of the glyph it applies at, in the glyph sequence that
  * the previous nested substitutions left
- * @property {number} id substitution type: single, multiple or ligature (see NESTED_SUBSTITUTION_TYPES)
+ * @property {number} id substitution type: single, multiple, alternate or ligature (see NESTED_SUBSTITUTION_TYPES)
  * @property {any} substitution substitution value(s)
  */
 
@@ -146,10 +173,10 @@ const LIGATURE_SUBSTITUTION_ID = 41;
  */
 
 /**
- * Get the glyph edits of a single, multiple or ligature substitution, in the order they apply: the glyph becomes the
- * glyph of a single substitution or the glyphs of a multiple substitution; the other components of a ligature are
- * deleted from the last one, so that the offsets of the other ones still point to their glyph, then its first
- * component becomes the ligature glyph
+ * Get the glyph edits of a single, multiple, alternate or ligature substitution, in the order they apply: the glyph
+ * becomes the glyph of a single substitution, the alternate of an alternate substitution or the glyphs of a multiple
+ * substitution; the other components of a ligature are deleted from the last one, so that the offsets of the other
+ * ones still point to their glyph, then its first component becomes the ligature glyph
  * @param {LookupSubstitution|SubstitutionAction} lookupSubstitution
  * @returns {GlyphEdit[]}
  */
@@ -169,7 +196,7 @@ function getSubstitutionGlyphEdits(lookupSubstitution) {
 }
 
 /**
- * The change of the number of glyphs of a nested substitution (single, multiple or ligature)
+ * The change of the number of glyphs of a nested substitution (single, multiple, alternate or ligature)
  * @param {LookupSubstitution} nestedSubstitution
  * @returns {number}
  */
@@ -195,8 +222,23 @@ function substituteGlyphIndexes(glyphIndexes, position, nestedSubstitution) {
 }
 
 /**
- * The context params of a nested lookup at a glyph, with what a single, multiple or ligature substitution reads (the
- * context, the index and the current glyph), without the backtrack and the lookahead copies of a ContextParams
+ * Substitute the context positions of the glyphs of a nested substitution like substituteGlyphIndexes: the glyphs
+ * that replace a glyph come from its position in the context, like the glyphs of HarfBuzz, which keep its mask
+ * @param {number[]} sourcePositions the position in the context of the glyph each glyph comes from
+ * @param {number} position the position of the glyph the substitution applies at
+ * @param {LookupSubstitution} nestedSubstitution
+ */
+function substituteGlyphSourcePositions(sourcePositions, position, nestedSubstitution) {
+    for (const glyphEdit of getSubstitutionGlyphEdits(nestedSubstitution)) {
+        const sourcePosition = sourcePositions[position + glyphEdit.offset];
+        sourcePositions.splice(position + glyphEdit.offset, 1, ...glyphEdit.glyphIndexes.map(() => sourcePosition));
+    }
+}
+
+/**
+ * The context params of a nested lookup at a glyph, with what a single, multiple, alternate or ligature
+ * substitution reads (the context, the index and the current glyph), without the backtrack and the lookahead
+ * copies of a ContextParams
  * @param {number[]} glyphIndexes
  * @param {number} index the index of the glyph the nested lookup applies at
  * @returns {{context: number[], index: number, current: number}}
@@ -257,19 +299,24 @@ function updateInputPositions(inputPositions, sequenceIndex, lengthChange, isDel
  * a later index the same input glyph as in the fork. The two differ when the lookup skips glyphs
  * between the input glyphs (the fork substitutes the next input glyph) and when the deleted glyph
  * is the last input glyph (HarfBuzz substitutes the glyph after the input, the fork skips the record).
+ * Like HarfBuzz, whose nested lookups keep the lookup mask of the contextual lookup and read the mask of the glyph they
+ * apply at, a nested alternate substitution takes the alternate of the value of the feature of the contextual lookup
+ * at that glyph (see getAlternate), the value at the glyph it comes from for a glyph of a previous record.
  * @param {ContextParams} contextParams context params of the rule, its current glyph is the first input glyph
  * @param {number[]} inputPositions positions of the matched input glyphs in the context, the current one first
  * @param {any[]} lookupRecords lookup records of the matched rule
+ * @param {LookupFeature} lookupFeature the feature of the contextual lookup
  * @returns {ContextualMatch}
  */
-function applyNestedLookupRecords(contextParams, inputPositions, lookupRecords) {
+function applyNestedLookupRecords(contextParams, inputPositions, lookupRecords, lookupFeature) {
     const context = contextParams.context;
     const currentPosition = contextParams.index;
     // the glyphs after the substitutions of the previous records, from the position glyphIndexesStart: the context until
     // a substitution that a following record sees, then a copy of its glyphs from the current one, the only ones a
-    // nested lookup reads
+    // nested lookup reads, with the position in the context of the glyph each one comes from
     let glyphIndexes = context;
     let glyphIndexesStart = 0;
+    let glyphSourcePositions = null;
     // the positions of the input glyphs in the context after the substitutions of the previous records
     const sequencePositions = inputPositions.slice();
     let inputEnd = inputPositions[inputPositions.length - 1] + 1;
@@ -286,7 +333,10 @@ function applyNestedLookupRecords(contextParams, inputPositions, lookupRecords) 
         const position = sequencePositions[sequenceIndex];
         const glyphContextParams = glyphIndexes === context && position === currentPosition ?
             contextParams : createNestedContextParams(glyphIndexes, position - glyphIndexesStart);
-        const nestedSubstitution = this.getLookupSubstitution(lookupTable, glyphContextParams, NESTED_SUBSTITUTION_TYPES);
+        const sourcePosition = glyphSourcePositions ? glyphSourcePositions[position - glyphIndexesStart] : position;
+        const nestedSubstitution = this.getLookupSubstitution(
+            lookupTable, glyphContextParams, NESTED_SUBSTITUTION_TYPES, lookupFeature, sourcePosition
+        );
         if (!nestedSubstitution) {
             continue;
         }
@@ -295,7 +345,9 @@ function applyNestedLookupRecords(contextParams, inputPositions, lookupRecords) 
             if (glyphIndexes === context) {
                 glyphIndexes = context.slice(currentPosition);
                 glyphIndexesStart = currentPosition;
+                glyphSourcePositions = glyphIndexes.map((glyphIndex, index) => currentPosition + index);
             }
+            substituteGlyphSourcePositions(glyphSourcePositions, position - glyphIndexesStart, nestedSubstitution);
             substituteGlyphIndexes(glyphIndexes, position - glyphIndexesStart, nestedSubstitution);
         }
         const lengthChange = getSubstitutionLengthChange(nestedSubstitution);
@@ -314,10 +366,11 @@ function applyNestedLookupRecords(contextParams, inputPositions, lookupRecords) 
  * @param {any} subtable subtable
  * @param {any} lookupTable the lookup of the subtable, its lookupFlag tells the glyphs to skip
  * @param {function} matchSubtable matchSequenceContext (lookup type 5) or matchChainedSequenceContext (lookup type 6)
+ * @param {LookupFeature} lookupFeature the feature of the lookup
  * @returns {ContextualMatch|null} the substitutions of the rule that matches (none if it substitutes nothing), null if
  * none matches
  */
-function contextualSubstitution(contextParams, subtable, lookupTable, matchSubtable) {
+function contextualSubstitution(contextParams, subtable, lookupTable, matchSubtable, lookupFeature) {
     const gdef = getLayoutGdefTable(this.font);
     const contextRuleMatch = matchSubtable(
         gdef, lookupTable, subtable, subtable.substFormat, contextParams.context, contextParams.index
@@ -326,7 +379,7 @@ function contextualSubstitution(contextParams, subtable, lookupTable, matchSubta
         return null;
     }
     const { inputPositions, lookupRecords } = contextRuleMatch;
-    return applyNestedLookupRecords.call(this, contextParams, inputPositions, lookupRecords);
+    return applyNestedLookupRecords.call(this, contextParams, inputPositions, lookupRecords, lookupFeature);
 }
 
 /**
@@ -401,36 +454,35 @@ FeatureQuery.prototype.getRequiredFeatureIndex = function(scriptTag, languageTag
 /**
  * Get the features of a language system (see getScriptFeaturesIndexes), with the alternate feature tables of the
  * GSUB feature variations at the variation of the query. Like HarfBuzz, a feature index past the FeatureList is
- * ignored.
+ * ignored. They are computed once for the GSUB table, the language system and the feature variation record of the
+ * variation (see getCachedLayoutValue in layout.mjs).
  * @param {string} [scriptTag] script tag
  * @param {string} [languageTag] language tag
  * @returns {Array<{tag: string, feature: any}>} the features, with a tags property that maps each tag to its feature
  * (the first one of the tag), and a required property, the required feature of the language system (see getRequiredFeature)
  */
 FeatureQuery.prototype.getScriptFeatures = function (scriptTag, languageTag) {
-    const key = getLanguageSystemKey(scriptTag, languageTag);
-    if (Object.prototype.hasOwnProperty.call(this.features, key)) {
-        return this.features[key];
-    }
     const gsub = this.font.tables.gsub;
-    const featureVariations = this.getFeatureVariationSubstitutions();
-    const getFeatureOfIndex = index => {
-        const feature = gsub.features[index];
-        const alternateFeature = feature && featureVariations.get(index);
-        return alternateFeature ? { tag: feature.tag, feature: alternateFeature } : feature;
-    };
-    const features = this.getScriptFeaturesIndexes(scriptTag, languageTag).map(getFeatureOfIndex).filter(Boolean);
-    features.tags = {};
-    // the first feature of a tag, like HarfBuzz (hb_ot_layout_language_find_feature)
-    for (const feature of features) {
-        if (!Object.prototype.hasOwnProperty.call(features.tags, feature.tag)) {
-            features.tags[feature.tag] = feature.feature;
+    const key = JSON.stringify(['features', scriptTag, languageTag, this.getFeatureVariationIndex()]);
+    return getCachedLayoutValue(gsub, key, () => {
+        const featureVariations = this.getFeatureVariationSubstitutions();
+        const getFeatureOfIndex = index => {
+            const feature = gsub.features[index];
+            const alternateFeature = feature && featureVariations.get(index);
+            return alternateFeature ? { tag: feature.tag, feature: alternateFeature } : feature;
+        };
+        const features = this.getScriptFeaturesIndexes(scriptTag, languageTag).map(getFeatureOfIndex).filter(Boolean);
+        features.tags = {};
+        // the first feature of a tag, like HarfBuzz (hb_ot_layout_language_find_feature)
+        for (const feature of features) {
+            if (!Object.prototype.hasOwnProperty.call(features.tags, feature.tag)) {
+                features.tags[feature.tag] = feature.feature;
+            }
         }
-    }
-    const requiredFeatureIndex = this.getRequiredFeatureIndex(scriptTag, languageTag);
-    features.required = requiredFeatureIndex === undefined ? null : getFeatureOfIndex(requiredFeatureIndex) || null;
-    this.features[key] = features;
-    return features;
+        const requiredFeatureIndex = this.getRequiredFeatureIndex(scriptTag, languageTag);
+        features.required = requiredFeatureIndex === undefined ? null : getFeatureOfIndex(requiredFeatureIndex) || null;
+        return features;
+    });
 };
 
 /**
@@ -445,32 +497,100 @@ FeatureQuery.prototype.getRequiredFeature = function (scriptTag, languageTag) {
 };
 
 /**
- * Get the alternate feature tables of the GSUB feature variations at the variation coordinates of the
- * query (the current variation of the font if it has none): the first feature variation record whose
- * conditions are all met applies.
+ * Get the index of the GSUB feature variation record that applies at the variation coordinates of the query (the
+ * current variation of the font if it has none): the first one whose conditions are all met. It is computed once for
+ * the query.
+ * @returns {number} -1 when none applies
+ */
+FeatureQuery.prototype.getFeatureVariationIndex = function () {
+    if (this.featureVariationIndex !== undefined) {
+        return this.featureVariationIndex;
+    }
+    this.featureVariationIndex = -1;
+    const featureVariations = this.font.tables.gsub && this.font.tables.gsub.variations;
+    if (!featureVariations || !featureVariations.length || !this.font.variation) {
+        return this.featureVariationIndex;
+    }
+    // normalized coordinates, in the F2DOT14 precision of the condition values
+    const coordinates = this.font.variation.process.getNormalizedCoords(this.variation);
+    this.featureVariationIndex = featureVariations.findIndex(record => (record.conditions || []).every(condition => {
+        if (condition.format !== 1) {
+            return false;
+        }
+        const coordinate = coordinates[condition.axisIndex] || 0;
+        return coordinate >= condition.filterRangeMinValue && coordinate <= condition.filterRangeMaxValue;
+    }));
+    return this.featureVariationIndex;
+};
+
+/**
+ * Get the alternate feature tables of the GSUB feature variation record that applies (see getFeatureVariationIndex)
  * @returns {Map<number, any>} alternate feature tables by feature index
  */
 FeatureQuery.prototype.getFeatureVariationSubstitutions = function () {
     const substitutions = new Map();
-    const featureVariations = this.font.tables.gsub && this.font.tables.gsub.variations;
-    if (!featureVariations || !featureVariations.length || !this.font.variation) return substitutions;
-    // normalized coordinates, in the F2DOT14 precision of the condition values
-    const coordinates = this.font.variation.process.getNormalizedCoords(this.variation);
-    for (let i = 0; i < featureVariations.length; i++) {
-        const record = featureVariations[i];
-        const conditionsMet = (record.conditions || []).every(condition => {
-            if (condition.format !== 1) return false;
-            const coordinate = coordinates[condition.axisIndex] || 0;
-            return coordinate >= condition.filterRangeMinValue && coordinate <= condition.filterRangeMaxValue;
-        });
-        if (conditionsMet) {
-            for (const substitution of record.substitutions || []) {
-                substitutions.set(substitution.featureIndex, substitution.feature);
-            }
-            break;
-        }
+    const featureVariationIndex = this.getFeatureVariationIndex();
+    if (featureVariationIndex === -1) {
+        return substitutions;
+    }
+    for (const substitution of this.font.tables.gsub.variations[featureVariationIndex].substitutions || []) {
+        substitutions.set(substitution.featureIndex, substitution.feature);
     }
     return substitutions;
+};
+
+/**
+ * The value of a feature at every glyph of the run being shaped, with the features option of the query (see
+ * getRunFeatureValue in featureValues.mjs)
+ * @param {string} tag
+ * @returns {number}
+ */
+FeatureQuery.prototype.getFeatureValue = function (tag) {
+    return getRunFeatureValue(this.featuresOption, tag, this.directionTags);
+};
+
+/**
+ * Start a script run, like a new buffer of HarfBuzz: the initial random state (see getRandomNumber) and the direction
+ * features of the run, which give rtlm the value of its mask in a run of a right-to-left script (see getFeatureValue)
+ * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags in featureValues.mjs)
+ */
+FeatureQuery.prototype.startScriptRun = function (directionTags) {
+    this.randomState = INITIAL_RANDOM_STATE;
+    this.directionTags = directionTags;
+};
+
+/**
+ * The next random number of the run, like HarfBuzz (hb_ot_apply_context_t::random_number): the minimal standard
+ * generator, its product wrapping around 32 bits like the unsigned integers of HarfBuzz
+ * @returns {number}
+ */
+FeatureQuery.prototype.getRandomNumber = function () {
+    this.randomState = (Math.imul(this.randomState, 48271) >>> 0) % 2147483647;
+    return this.randomState;
+};
+
+/**
+ * The alternate that an alternate substitution (lookup type 3) substitutes for a glyph, like HarfBuzz
+ * (AlternateSet::apply): the alternate of the index of the value of the feature of the lookup, 1 for the first one;
+ * none for the value 0 or an index past the alternates of the glyph. At the value 255, the default value of rand, a
+ * lookup of rand takes a random alternate (see getRandomNumber).
+ * @param {number[]} alternates the alternates of the glyph, in the order of its AlternateSet
+ * @param {string} tag the tag of the feature of the lookup
+ * @param {number} featureValue the value of the feature at the glyph (see LookupFeature)
+ * @returns {number|null}
+ */
+FeatureQuery.prototype.getAlternate = function (alternates, tag, featureValue) {
+    if (!alternates.length) {
+        return null;
+    }
+    let alternateIndex = featureValue;
+    if (alternateIndex === MAX_FEATURE_VALUE && tag === RANDOM_FEATURE_TAG) {
+        alternateIndex = this.getRandomNumber() % alternates.length + 1;
+    }
+    if (alternateIndex === 0 || alternateIndex > alternates.length) {
+        return null;
+    }
+    return alternates[alternateIndex - 1];
 };
 
 /**
@@ -500,13 +620,16 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
             return glyphIndex => singleSubstitutionFormat2.apply(
                 this, [glyphIndex, subtable]
             );
+        case '31':
+            return glyphIndex => alternateSubstitutionFormat1(glyphIndex, subtable);
         // the methods that match several glyphs take the lookup whose lookupFlag tells the glyphs to skip
-        // (the lookup of an extension subtable, not the extension subtable)
+        // (the lookup of an extension subtable, not the extension subtable), and the contextual ones the feature of
+        // the lookup, for their nested alternate substitutions
         case '61':
         case '62':
         case '63':
-            return (contextParams, flagsLookupTable) => contextualSubstitution.call(
-                this, contextParams, subtable, flagsLookupTable, matchChainedSequenceContext
+            return (contextParams, flagsLookupTable, lookupFeature) => contextualSubstitution.call(
+                this, contextParams, subtable, flagsLookupTable, matchChainedSequenceContext, lookupFeature
             );
         case '41':
             return (contextParams, flagsLookupTable) => ligatureSubstitutionFormat1.apply(
@@ -519,8 +642,8 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
         case '51':
         case '52':
         case '53':
-            return (contextParams, flagsLookupTable) => contextualSubstitution.call(
-                this, contextParams, subtable, flagsLookupTable, matchSequenceContext
+            return (contextParams, flagsLookupTable, lookupFeature) => contextualSubstitution.call(
+                this, contextParams, subtable, flagsLookupTable, matchSequenceContext, lookupFeature
             );
         default:
             // unsupported lookups are skipped (warned once per type), so the
@@ -551,7 +674,7 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
  */
 
 // top-level lookup types (lookupType + substFormat) applied by lookupSubstitution
-const APPLIED_SUBSTITUTION_TYPES = ['11', '12', '21', '41', '51', '52', '53', '61', '62', '63'];
+const APPLIED_SUBSTITUTION_TYPES = ['11', '12', '21', '31', '41', '51', '52', '53', '61', '62', '63'];
 
 /**
  * Get the substitution of a lookup at the current glyph of a context: the first subtable of the lookup, of the given
@@ -564,9 +687,16 @@ const APPLIED_SUBSTITUTION_TYPES = ['11', '12', '21', '41', '51', '52', '53', '6
  * glyph is the one to substitute; the nested lookups of a contextual rule get its context, index and current glyph only
  * (see createNestedContextParams)
  * @param {string[]} substitutionTypes the types of the subtables that can apply (lookupType + substFormat)
+ * @param {LookupFeature} lookupFeature the feature of the lookup, or of the contextual lookup whose rule applies it,
+ * whose value chooses the alternate of an alternate substitution (see getAlternate)
+ * @param {number} featurePosition the position of the glyph to substitute in the context of lookupFeature, where its
+ * value applies: the current glyph of the context of the lookup, or the glyph that the glyph a nested lookup applies
+ * at comes from (see applyNestedLookupRecords)
  * @returns {LookupSubstitution|null}
  */
-FeatureQuery.prototype.getLookupSubstitution = function (lookupTable, contextParams, substitutionTypes) {
+FeatureQuery.prototype.getLookupSubstitution = function (
+    lookupTable, contextParams, substitutionTypes, lookupFeature, featurePosition
+) {
     for (let subtable of this.getLookupSubtables(lookupTable) || []) {
         let subtableOwner = lookupTable;
         let substitutionType = this.getSubstitutionType(lookupTable, subtable);
@@ -593,8 +723,17 @@ FeatureQuery.prototype.getLookupSubstitution = function (lookupTable, contextPar
             if (Array.isArray(substitution)) {
                 return { id, substitution };
             }
+        } else if (substitutionType === '31') {
+            // alternate substitution: like HarfBuzz, a subtable whose alternate the value of the feature does not
+            // choose leaves the glyph to the next subtable
+            const alternates = lookup(contextParams.current);
+            const substitution = alternates &&
+                this.getAlternate(alternates, lookupFeature.tag, lookupFeature.getValue(featurePosition));
+            if (substitution !== null && substitution !== undefined) {
+                return { id, substitution };
+            }
         } else {
-            const substitution = lookup(contextParams, lookupTable);
+            const substitution = lookup(contextParams, lookupTable, lookupFeature);
             if (substitution) {
                 return { id, substitution };
             }
@@ -609,16 +748,22 @@ FeatureQuery.prototype.getLookupSubstitution = function (lookupTable, contextPar
  * @param {any} lookupTable lookup table
  * @param {ContextParams} contextParams context params, its current glyph is the one to substitute
  * @param {string} tag feature tag set as the state of the substituted tokens
+ * @param {function(number): number} [getFeatureValue] the value of the feature of the lookup at the glyph at a position
+ * of the context (see LookupFeature), the alternate index there of its alternate substitutions and of the ones its
+ * contextual rules apply; 1 at every glyph if omitted
  * @returns {SubstitutionAction|null} the substitution to apply at the current glyph, if any: a contextual rule that
  * matches gives its ContextualMatch even when it substitutes nothing (e.g. an exception rule), the lookup goes on after
  * its input; like HarfBuzz, the input never ends before the glyph a nested lookup applied at, so after a nested
  * ligature that takes glyphs past the input the lookup goes on at the ligature glyph
  */
-FeatureQuery.prototype.lookupSubstitution = function (lookupTable, contextParams, tag) {
+FeatureQuery.prototype.lookupSubstitution = function (lookupTable, contextParams, tag, getFeatureValue = () => 1) {
     if (isGlyphIgnoredByLookup(getLayoutGdefTable(this.font), lookupTable, contextParams.current)) {
         return null;
     }
-    const lookupSubstitution = this.getLookupSubstitution(lookupTable, contextParams, APPLIED_SUBSTITUTION_TYPES);
+    const lookupFeature = { tag, getValue: getFeatureValue };
+    const lookupSubstitution = this.getLookupSubstitution(
+        lookupTable, contextParams, APPLIED_SUBSTITUTION_TYPES, lookupFeature, contextParams.index
+    );
     return lookupSubstitution && new SubstitutionAction({ ...lookupSubstitution, tag });
 };
 

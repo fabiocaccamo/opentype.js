@@ -11,7 +11,8 @@ import { LayerManager } from './layers.mjs';
 import { SVGImageManager } from './svgimages.mjs';
 import { VariationManager } from './variation.mjs';
 import HintingTrueType from './hintingtt.mjs';
-import Bidi, { ARABIC_FORM_TAGS, getScriptRunShaper } from './bidi.mjs';
+import Bidi, { getScriptRunShaper } from './bidi.mjs';
+import { ARABIC_FORM_TAGS, getEnabledFeatureTags, getDirectionFeatureTags } from './features/featureValues.mjs';
 import { getCharTextScript } from './char.mjs';
 import { getOpenTypeScriptTags, getChosenScriptTag, selectScriptTag } from './layout.mjs';
 import { applyPaintType } from './tables/cff.mjs';
@@ -217,8 +218,9 @@ Font.prototype.charToGlyph = function(c) {
 
 /**
  * Update features: the default features of every shaper (see defaultRenderOptions.features) with the features option
- * @param {any} options features options: an object of feature tags enabling (true) or disabling (false) features
- * over the default ones of every shaper (e.g. { liga: false, ss01: true }); the defaults when absent (or a features list)
+ * @param {any} options features options: an object of feature tags enabling (true or a number other than 0) or
+ * disabling (false or 0) features over the default ones of every shaper (e.g. { liga: false, ss01: true, cv01: 2 });
+ * the defaults when absent (or a features list)
  * @return {Array<{script: string, tags: string[]}>}
  */
 Font.prototype.updateFeatures = function (options) {
@@ -259,7 +261,8 @@ Font.prototype._createBidi = function(options) {
     bidi.applyFeatures(this, this.updateFeatures(options.features), {
         script: options.script,
         language: options.language,
-        variation: options.variation
+        variation: options.variation,
+        features: options.features
     });
 
     return bidi;
@@ -497,30 +500,12 @@ function getGlyphRuns(glyphClusters) {
 }
 
 /**
- * The feature tags of a features option (see GlyphRenderOptions.features): the default ones it does not turn off,
- * then the ones it turns on.
- * @param  {string[]} defaultTags
- * @param  {Object|Array|undefined} featuresOption - feature tags enabled (true) or disabled (false); the defaults
- * when absent (or a features list)
- * @return {string[]}
- */
-function getEnabledFeatureTags(defaultTags, featuresOption) {
-    const overrides = featuresOption && !Array.isArray(featuresOption) ? featuresOption : {};
-    const tags = defaultTags.filter(tag => overrides[tag] !== false);
-    for (const tag of Object.keys(overrides)) {
-        if (overrides[tag] && !tags.includes(tag)) {
-            tags.push(tag);
-        }
-    }
-    return tags;
-}
-
-/**
  * The GPOS features of a run, like HarfBuzz, which looks each feature of its map up in GSUB and in GPOS: the default
- * GSUB features of the shaper of the run (see defaultRenderOptions.features) and the GPOS features HarfBuzz enables
- * by default (see DEFAULT_POSITIONING_FEATURES), with the features option, without kern when the kerning option is
- * off. Not the Arabic forms by default: HarfBuzz applies their GPOS lookups at the glyphs of each form only, which
- * is not supported yet.
+ * GSUB features of the shaper of the run (see defaultRenderOptions.features), the direction features of the script of
+ * the run, the same ones as in GSUB (see getDirectionFeatureTags), and the GPOS features HarfBuzz enables by default
+ * (see DEFAULT_POSITIONING_FEATURES), with the features option, without kern when the kerning option is off. Not the
+ * Arabic forms by default: HarfBuzz applies their GPOS lookups at the glyphs of each form only, which is not
+ * supported yet.
  * @param  {Font} font
  * @param  {GlyphRenderOptions} options
  * @param  {string[]} scriptTags - the OpenType script tags of the run (see getScriptRunShaper)
@@ -530,7 +515,8 @@ function getPositioningFeatureTags(font, options, scriptTags) {
     const shaper = getScriptRunShaper(scriptTags);
     const shaperFeature = font.defaultRenderOptions.features.find(feature => feature.script === shaper);
     const shaperTags = shaperFeature ? shaperFeature.tags.filter(tag => !ARABIC_FORM_TAGS.includes(tag)) : [];
-    const featureTags = getEnabledFeatureTags(shaperTags.concat(DEFAULT_POSITIONING_FEATURES), options.features);
+    const defaultTags = shaperTags.concat(getDirectionFeatureTags(scriptTags), DEFAULT_POSITIONING_FEATURES);
+    const featureTags = getEnabledFeatureTags(defaultTags, options.features);
     return options.kerning ? featureTags : featureTags.filter(tag => tag !== 'kern');
 }
 
@@ -585,39 +571,70 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                                      (e.g. A and U+0300) are not composed into the precomposed glyph of the font
  *                                      (Agrave), so the kern table and the GPOS lookups with IgnoreMarks kern the
  *                                      letter across the mark. The other GPOS features apply without kerning too
- * @property {object} [features] - OpenType Layout feature tags (e.g. `{ liga: false, ss01: true }`), enabling or disabling
- *                                 them over the default ones, in every script run, for GSUB and for GPOS. GSUB: rvrn,
- *                                 ccmp, locl, rlig, rclt, calt, liga and clig for the latin and the thai features; rvrn,
- *                                 ccmp, locl, isol, init, medi, fina, rlig, rclt, calt, liga, clig and mset for the arabic
- *                                 features. Like HarfBuzz, the lookups of rvrn apply first, in a stage of their own, with
- *                                 the GSUB feature variations at the variation of the options; the arabic features then
- *                                 apply in the stages of the Arabic shaper of HarfBuzz: ccmp and locl, each form (isol,
- *                                 fina, medi, then init) to the letters of its form (each lookup of the form once over the
- *                                 whole run, in lookup list order), rlig, calt (with the other features when the language
- *                                 system has rclt), then the other features. Like HarfBuzz, the required feature of the
- *                                 language system (its ReqFeatureIndex) applies whatever the features option, at every
- *                                 glyph, with the lookups of the stage of its tag in lookup list order when the tag is
- *                                 enabled, otherwise with rvrn. Not yet the stch of the Arabic shaper of HarfBuzz, nor a
- *                                 form enabled by the features option at every glyph like a feature of HarfBuzz enabled by
- *                                 the user, nor the GSUB lookups of abvm, blwm, curs, dist, kern (with the kerning
- *                                 option), mark and mkmk, which HarfBuzz looks up in GSUB too. GPOS: like HarfBuzz,
- *                                 which looks each feature up in GSUB and in GPOS, the GSUB features of the run but the
- *                                 Arabic forms, and abvm, blwm, curs, dist, kern (with the kerning option), mark and
- *                                 mkmk, and the required feature of the GPOS language system (its ReqFeatureIndex)
- *                                 whatever the features option, their lookups together in lookup list order: the
- *                                 single adjustments (lookup type 1, e.g. of case, cpsp, palt, halt or vpal, which
- *                                 the features option enables, or of kern), the pair adjustments (lookup type 2), the
- *                                 cursive attachments (lookup type 3, e.g. of curs) and the mark attachments (lookup
- *                                 types 4, 5 and 6, e.g. of mark and mkmk), so a mark, of the text or substituted by
- *                                 GSUB, is drawn on its base at their anchors, and like HarfBuzz the advance of a GDEF
- *                                 mark is set to 0 in the runs of its default, Arabic, Hebrew, Thai, USE and Myanmar
- *                                 shapers (see Font.shape), and the contextual positionings (lookup types 7 and 8,
- *                                 e.g. the contextual kerning of kern) with the lookups of their rules (see
- *                                 Font.shape). Not yet the GPOS lookups of the Arabic forms, which HarfBuzz applies at
- *                                 the glyphs of each form only: a form that the features option enables applies at
- *                                 every glyph, like a feature of HarfBuzz enabled by the user. Not yet the GPOS lookups
- *                                 of the direction features (ltra, ltrm, rtla, rtlm) and of rand, nor the GPOS feature
- *                                 variations (see Font.shape).
+ * @property {object} [features] - OpenType Layout feature tags (e.g. `{ liga: false, ss01: true, cv01: 2 }`), enabling
+ *                                 or disabling them over the default ones, in every script run, for GSUB and for GPOS.
+ *                                 Like font-feature-settings and the feature values of HarfBuzz, a value is a boolean
+ *                                 or an integer from 0: 0 or false turns the feature off, any other value turns it on
+ *                                 (true is 1), and it is the alternate index of the alternate substitutions (GSUB
+ *                                 lookup type 3) of the feature, 1 for the first alternate of a glyph (e.g.
+ *                                 `{ aalt: 2 }`); an index past the alternates of a glyph leaves it unchanged, a lookup
+ *                                 record of a contextual rule applies an alternate substitution with the value of the
+ *                                 feature of the contextual lookup at the glyph it applies at, and a value keeps its 8
+ *                                 lowest bits (256 is 0); any other value throws a TypeError. Like a feature of the
+ *                                 user of HarfBuzz, an Arabic form that the option sets applies at every glyph of an
+ *                                 Arabic run with its value, and sets the bit 1 of its form mask in its value (a
+ *                                 bitwise OR) at the letters of the form (fina 2 is 2 at a teh, 3 at a final teh; fina
+ *                                 3 stays 3 at a final teh; fina 256 is 1 at a final teh only, like the default), and
+ *                                 rtlm sets the bit 1 of its mask in its value in a run of a right-to-left script
+ *                                 (rtlm 2 is 3, rtlm 3 stays 3, rtlm 256 is 1), so a value whose 8 lowest bits are 0
+ *                                 turns them off only outside their mask. Not yet like HarfBuzz for a lookup
+ *                                 of several features: it takes the value of the first enabled one, where HarfBuzz
+ *                                 joins the masks of the features (an alternate index past the alternates unless each
+ *                                 feature has the global value 1), e.g. a lookup that two enabled features share, or
+ *                                 that the required feature shares with salt 2 or with an Arabic form the option does
+ *                                 not set. GSUB: rvrn, ccmp, locl, rlig, rclt, calt, liga, clig and rand for the latin
+ *                                 and the thai features; rvrn, ccmp, locl, isol, init, medi, fina, rlig, rclt, calt,
+ *                                 liga, clig, mset and rand for the arabic features; and the direction features of the
+ *                                 script of the run, like HarfBuzz from the horizontal direction of the script whatever
+ *                                 the order the glyphs are laid out in: rtla and rtlm in a run of a right-to-left
+ *                                 script (Arabic, Hebrew, Syriac...), ltra and ltrm in the other runs, which the
+ *                                 features option turns off, or on in every run. Like HarfBuzz, rand has the value 255
+ *                                 by default, at which its alternate substitutions take a random alternate, from the
+ *                                 random numbers of HarfBuzz (from the random state 1 of a buffer at the start of each
+ *                                 script run), and rtlm applies to every glyph of a run of a right-to-left script (no
+ *                                 character is mirrored). Like HarfBuzz, the lookups of rvrn apply first, in a stage of
+ *                                 their own, with the GSUB feature variations at the variation of the options; the
+ *                                 arabic features then apply in the stages of the Arabic shaper of HarfBuzz: the
+ *                                 direction features and rand, ccmp and locl, each form (isol, fina, medi, then init)
+ *                                 to the letters of its form (each lookup of the form once over the whole run, in
+ *                                 lookup list order), rlig, calt (with the other features when the language system has
+ *                                 rclt), then the other features. Like HarfBuzz, the required feature of the language
+ *                                 system (its ReqFeatureIndex) applies whatever the features option, at every glyph,
+ *                                 with the lookups of the stage of its tag in lookup list order when the tag is
+ *                                 enabled, otherwise with rvrn. Not yet the stch of the Arabic shaper of HarfBuzz, nor
+ *                                 the GSUB lookups of abvm, blwm, curs, dist, kern (with the kerning option), mark and
+ *                                 mkmk, which HarfBuzz looks up in GSUB too. GPOS: like HarfBuzz, which looks each
+ *                                 feature up in GSUB and in GPOS, the GSUB features of the run (rand and the direction
+ *                                 features of the script of the run included) but the Arabic forms, and abvm, blwm,
+ *                                 curs, dist, kern (with the kerning option), mark and mkmk, and the required feature
+ *                                 of the GPOS language system (its ReqFeatureIndex) whatever the features option, their
+ *                                 lookups together in lookup list order: the single adjustments (lookup type 1, e.g. of
+ *                                 case, cpsp, palt, halt or vpal, which the features option enables, or of kern), the
+ *                                 pair adjustments (lookup type 2), the cursive attachments (lookup type 3, e.g. of
+ *                                 curs) and the mark attachments (lookup types 4, 5 and 6, e.g. of mark and mkmk), so a
+ *                                 mark, of the text or substituted by GSUB, is drawn on its base at their anchors, and
+ *                                 like HarfBuzz the advance of a GDEF mark is set to 0 in the runs of its default,
+ *                                 Arabic, Hebrew, Thai, USE and Myanmar shapers (see Font.shape), and the contextual
+ *                                 positionings (lookup types 7 and 8, e.g. the contextual kerning of kern) with the
+ *                                 lookups of their rules (see Font.shape). Not yet the GPOS lookups of the Arabic
+ *                                 forms, which HarfBuzz applies at the glyphs of each form only: a form that the
+ *                                 features option enables applies at every glyph, like a feature of HarfBuzz enabled by
+ *                                 the user. Not yet the GPOS feature variations (see Font.shape). The lookups of each
+ *                                 script, language, set of features and GSUB feature variation are computed once for
+ *                                 the GSUB and the GPOS tables (see getCachedLayoutValue in layout.mjs): the methods of
+ *                                 font.substitution and font.position that add a script, a language system, a feature
+ *                                 or a lookup recompute them, not a direct change of the objects of the tables after a
+ *                                 text was laid out.
  *                                 See https://www.microsoft.com/typography/otspec/featuretags.htm
  * @property {Object} [variation] - variation coordinates of the advances, the GPOS values and the GSUB feature variations
  *                                  (not yet the GPOS feature variations, see Font.shape) (e.g. `{ wght: 700 }`), the
@@ -631,15 +648,15 @@ Font.prototype.defaultRenderOptions = {
     kerning: true,
     // the GSUB features of each shaper: arab for the arabic script runs, thai for the thai script runs, latn for the
     // other ones. Like HarfBuzz, rvrn is on by default in a stage of its own, the substitution features browsers enable
-    // by default apply to every script, and the arabic features add the forms and mset (collect_features_arabic). Not
-    // yet the other features HarfBuzz enables by default: the direction features (ltra, ltrm, rtla), rand, the
-    // automatic fractions (numr, dnom and frac around U+2044 FRACTION SLASH), the stch of the Arabic shaper, and the
-    // GSUB lookups of abvm, blwm, curs, dist, kern (with the kerning option), mark and mkmk, which HarfBuzz looks up
-    // in GSUB too
+    // by default and rand apply to every script, and the arabic features add the forms and mset
+    // (collect_features_arabic); each run adds the direction features of its script (see getDirectionFeatureTags).
+    // Not yet the other features HarfBuzz enables by default: the automatic fractions (numr, dnom and frac around
+    // U+2044 FRACTION SLASH), the stch of the Arabic shaper, and the GSUB lookups of abvm, blwm, curs, dist, kern (with
+    // the kerning option), mark and mkmk, which HarfBuzz looks up in GSUB too
     features: [
-        { script: 'arab', tags: ['rvrn', 'ccmp', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'mset'] },
-        { script: 'latn', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig'] },
-        { script: 'thai', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig'] },
+        { script: 'arab', tags: ['rvrn', 'ccmp', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'mset', 'rand'] },
+        { script: 'latn', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] },
+        { script: 'thai', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] },
     ],
     hinting: false,
     usePalette: 0,
@@ -672,33 +689,35 @@ Font.prototype.defaultRenderOptions = {
  * reverse of the visual order in a right-to-left run), together in LookupList order (extension lookups included),
  * each lookup at every glyph its lookupFlag does not ignore. Like HarfBuzz, which looks each feature up in GSUB and
  * in GPOS, the GPOS features of a run are the default GSUB features of its shaper (see GlyphRenderOptions.features)
- * but the Arabic forms, and abvm, blwm, curs, dist, kern, mark and mkmk, with the features option, kern only with the
- * kerning option, and the required feature of the GPOS language system (its ReqFeatureIndex) whatever the features
- * option. The single adjustments (lookup type 1, formats 1 and 2) apply their value record to a glyph, the pair
- * adjustments (lookup type 2) the two value records of a pair (x and y placement, x advance, with the variation
- * deltas of a variable font; the y advance of a value record is for vertical text); the mark attachments (lookup
- * types 4, 5 and 6) move a mark onto the glyph before it at their anchors (with the variation deltas of the anchors
- * of a variable font): mark-to-base and mark-to-ligature onto the glyph before it that is not a GDEF mark, at the
- * anchor of the ligature component the mark follows (see LigatureProperties in layout.mjs), mark-to-mark onto the
- * mark before it of the same glyph; the cursive attachments (lookup type 3) join the exit anchor of a glyph to the
- * entry anchor of the next one; after the lookups, the offsets of an attached glyph follow the glyph it is attached
- * to, over the advances between them, like HarfBuzz (see positionGlyphRun in position.mjs); the contextual
- * positionings (lookup types 7 and 8, formats 1, 2 and 3) apply the lookups of the lookup records of the first rule
- * that matches at a glyph, like HarfBuzz: the rule is matched like the contextual substitutions of GSUB, on the glyphs
- * its lookupFlag does not ignore, each lookup record applies its lookup (of any GPOS type, with its own lookupFlag,
- * even at a glyph that this lookupFlag ignores) at the input glyph of its sequence index (a pair adjustment pairs
- * that glyph with the next glyph its lookup does not ignore, past the input too), the lookups of contextual lookups
- * nested up to 64 levels and at most 1024 nested lookups by glyph of the run (16384 at least, the max_ops of
- * HarfBuzz), and the lookup goes on after the input. When kern is on and GPOS has no kern feature for the script and
- * language, the kern table applies like in HarfBuzz: in visual order, each glyph kerned with the next glyph that is
- * not a GDEF mark, half of the value added to the advance of the first glyph and the rest to the advance and the x
- * offset of the second one; unlike HarfBuzz, which splits the value of a pair in each kern subtable on its own, the
- * values of a pair in several subtables are added up before the split: the positions and the pen are the same, the
- * advances can differ by a few units (up to half the number of subtables with an odd value for the pair). The marks
- * are the ones of the GlyphClassDef of GDEF: without it no glyph is a mark (see GlyphRenderOptions.kerning), but a
- * mark-to-base or mark-to-ligature lookup with IgnoreMarks, a MarkAttachmentType, or UseMarkFilteringSet and a mark
- * glyph set that does not cover the mark, takes every glyph its subtable covers as a mark and does not apply at it
- * (see isGlyphSkippedByLookup in position.mjs), like HarfBuzz for the glyphs of the nonspacing marks of Unicode (Mn),
+ * but the Arabic forms, the direction features of the script of the run, the same ones as in GSUB (rtla and rtlm in a
+ * run of a right-to-left script, ltra and ltrm in the other runs), and abvm, blwm, curs, dist, kern, mark and mkmk,
+ * with the features option, kern only with the kerning option, and the required feature of the GPOS language system
+ * (its ReqFeatureIndex) whatever the features option. The single adjustments (lookup type 1, formats 1 and 2) apply
+ * their value record to a glyph, the pair adjustments (lookup type 2) the two value records of a pair (x and y
+ * placement, x advance, with the variation deltas of a variable font; the y advance of a value record is for
+ * vertical text); the mark attachments (lookup types 4, 5 and 6) move a mark onto the glyph before it at their
+ * anchors (with the variation deltas of the anchors of a variable font): mark-to-base and mark-to-ligature onto the
+ * glyph before it that is not a GDEF mark, at the anchor of the ligature component the mark follows (see
+ * LigatureProperties in layout.mjs), mark-to-mark onto the mark before it of the same glyph; the cursive attachments
+ * (lookup type 3) join the exit anchor of a glyph to the entry anchor of the next one; after the lookups, the
+ * offsets of an attached glyph follow the glyph it is attached to, over the advances between them, like HarfBuzz
+ * (see positionGlyphRun in position.mjs); the contextual positionings (lookup types 7 and 8, formats 1, 2 and 3)
+ * apply the lookups of the lookup records of the first rule that matches at a glyph, like HarfBuzz: the rule is
+ * matched like the contextual substitutions of GSUB, on the glyphs its lookupFlag does not ignore, each lookup
+ * record applies its lookup (of any GPOS type, with its own lookupFlag, even at a glyph that this lookupFlag
+ * ignores) at the input glyph of its sequence index (a pair adjustment pairs that glyph with the next glyph its
+ * lookup does not ignore, past the input too), the lookups of contextual lookups nested up to 64 levels and at most
+ * 1024 nested lookups by glyph of the run (16384 at least, the max_ops of HarfBuzz), and the lookup goes on after
+ * the input. When kern is on and GPOS has no kern feature for the script and language, the kern table applies like
+ * in HarfBuzz: in visual order, each glyph kerned with the next glyph that is not a GDEF mark, half of the value
+ * added to the advance of the first glyph and the rest to the advance and the x offset of the second one; unlike
+ * HarfBuzz, which splits the value of a pair in each kern subtable on its own, the values of a pair in several
+ * subtables are added up before the split: the positions and the pen are the same, the advances can differ by a few
+ * units (up to half the number of subtables with an odd value for the pair). The marks are the ones of the
+ * GlyphClassDef of GDEF: without it no glyph is a mark (see GlyphRenderOptions.kerning), but a mark-to-base or
+ * mark-to-ligature lookup with IgnoreMarks, a MarkAttachmentType, or UseMarkFilteringSet and a mark glyph set that
+ * does not cover the mark, takes every glyph its subtable covers as a mark and does not apply at it (see
+ * isGlyphSkippedByLookup in position.mjs), like HarfBuzz for the glyphs of the nonspacing marks of Unicode (Mn),
  * which it then takes as marks of no mark attachment class (a contextual rule that applies the lookup at the mark
  * attaches it); not yet like HarfBuzz for the glyph of a
  * spacing character that the subtable covers as a mark (e.g. U+00B4 mapped to the glyph of U+0301), a base glyph
@@ -721,9 +740,8 @@ Font.prototype.defaultRenderOptions = {
  * the glyphs of each form only, apply only when the features option enables them, then at every glyph like a feature
  * that the user of HarfBuzz enables; the GPOS feature variations (the FeatureVariations of the GPOS table), which
  * HarfBuzz applies like the GSUB ones, are not applied yet: the lookups of a GPOS feature are the ones of its
- * FeatureList record at every variation; nor the GPOS lookups of the other features HarfBuzz enables by default, the
- * direction features (ltra, ltrm, rtla, rtlm) and rand, nor the GSUB lookups of abvm, blwm, curs, dist, kern (with
- * the kerning option), mark and mkmk, which HarfBuzz looks up in GSUB too.
+ * FeatureList record at every variation; nor the GSUB lookups of abvm, blwm, curs, dist, kern (with the kerning
+ * option), mark and mkmk, which HarfBuzz looks up in GSUB too.
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options] - features, kerning, script, language and variation
  * @return {GlyphPosition[]}

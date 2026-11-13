@@ -12,6 +12,12 @@ import {
     getRequiredFeatureStage,
     REQUIRED_VARIATION_ALTERNATES_TAG
 } from './features/applySubstitution.mjs';
+import {
+    RANDOM_FEATURE_TAG,
+    ARABIC_FORM_TAGS,
+    isDefaultFeatureEnabled,
+    getDirectionFeatureTags
+} from './features/featureValues.mjs';
 import { getScriptRuns } from './char.mjs';
 import { getOpenTypeScriptTags, selectScriptTag } from './layout.mjs';
 import arabicSentenceCheck from './features/arab/contextCheck/arabicSentence.mjs';
@@ -120,6 +126,9 @@ Bidi.prototype.registerFeatures = function (shaper, tags) {
  * of the script if omitted
  * @param {Object} [layoutOptions.variation] the variation coordinates of the GSUB feature variations, the current
  * variation of the font if omitted
+ * @param {Object|Array} [layoutOptions.features] the features option (see GlyphRenderOptions.features): the values
+ * of the features, the alternate indexes of their alternate substitutions, and the direction features it turns off
+ * (see getScriptRunFeatureTags); the defaults when absent (or a features list)
  */
 Bidi.prototype.applyFeatures = function (font, features, layoutOptions) {
     if (!font) throw new Error(
@@ -127,7 +136,7 @@ Bidi.prototype.applyFeatures = function (font, features, layoutOptions) {
     );
     const { script, language, variation } = layoutOptions || {};
     if (!this.query) {
-        this.query = new FeatureQuery(font, variation);
+        this.query = new FeatureQuery(font, variation, layoutOptions && layoutOptions.features);
     }
     this.script = script;
     this.language = language;
@@ -175,11 +184,21 @@ function getTokenScriptRuns() {
     }));
 }
 
-// the stages of the arabic features, like the Arabic shaper of HarfBuzz (collect_features_arabic): rvrn, then ccmp and
-// locl, then each form in a stage of its own, in the order of HarfBuzz, then rlig, then calt (see
-// getArabicStagesAfterForms), then the other features (liga, clig, mset, rclt...)
-const ARABIC_STAGES_BEFORE_FORMS = [[REQUIRED_VARIATION_ALTERNATES_TAG], ['ccmp', 'locl']];
-const ARABIC_FORM_TAGS = ['isol', 'fina', 'medi', 'init'];
+/**
+ * The stages of the arabic features before the forms, like the Arabic shaper of HarfBuzz (hb_ot_shape_collect_features
+ * and collect_features_arabic): rvrn, then the direction features of the run (see getDirectionFeatureTags) and rand
+ * (the stage of the stch of HarfBuzz), then ccmp and locl. Then each form in a stage of its own, in the order of
+ * HarfBuzz, then rlig, then calt (see getArabicStagesAfterForms), then the other features (liga, clig, mset, rclt...)
+ * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags)
+ * @returns {string[][]}
+ */
+function getArabicStagesBeforeForms(directionTags) {
+    return [
+        [REQUIRED_VARIATION_ALTERNATES_TAG],
+        directionTags.concat([RANDOM_FEATURE_TAG]),
+        ['ccmp', 'locl']
+    ];
+}
 
 /**
  * The stages of the arabic features after the forms, like collect_features_arabic of HarfBuzz: rlig, then calt in a
@@ -199,21 +218,24 @@ function getArabicStagesAfterForms(query, script, language) {
 
 /**
  * Apply the enabled arabic features to an arabic script run, in the stages of the Arabic shaper of HarfBuzz: rvrn,
- * then ccmp and locl, then each presentation form of the letters of the run, then rlig, then calt, then the other
- * features (see getArabicStagesAfterForms), the lookups of the required feature of the language system in its stage
- * (see getRequiredFeatureStage), at every glyph of the run, merged with the lookups of the stage in lookup list order
+ * then the direction features and rand, then ccmp and locl, then each presentation form of the letters of the run,
+ * then rlig, then calt, then the other features (see getArabicStagesBeforeForms and getArabicStagesAfterForms), the
+ * lookups of the required feature of the language system in its stage (see getRequiredFeatureStage), at every glyph
+ * of the run, merged with the lookups of the stage in lookup list order
  * @param {Token[]} tokens the tokens of the run
  * @param {string} script the script tag of the run in the GSUB table
+ * @param {string[]} tags the enabled feature tags of the run (see getScriptRunFeatureTags)
+ * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags)
  */
-function applyArabicFeatures(tokens, script) {
-    const tags = this.featuresTags.arab;
+function applyArabicFeatures(tokens, script, tags, directionTags) {
+    const stagesBeforeForms = getArabicStagesBeforeForms(directionTags);
     const formStages = ARABIC_FORM_TAGS.map(tag => [tag]);
-    const shaperStages = ARABIC_STAGES_BEFORE_FORMS.concat(formStages, getArabicStagesAfterForms(this.query, script, this.language));
+    const shaperStages = stagesBeforeForms.concat(formStages, getArabicStagesAfterForms(this.query, script, this.language));
     const stagedTags = shaperStages.flat();
     const stages = shaperStages
         .map(stageTags => tags.filter(tag => stageTags.includes(tag)))
         .concat([tags.filter(tag => !stagedTags.includes(tag))]);
-    const firstFormStage = ARABIC_STAGES_BEFORE_FORMS.length;
+    const firstFormStage = stagesBeforeForms.length;
     const requiredFeatureStage = getRequiredFeatureStage(stages, this.query.getRequiredFeature(script, this.language));
     for (let i = 0; i < stages.length; i++) {
         const isFormStage = i >= firstFormStage && i < firstFormStage + formStages.length;
@@ -246,8 +268,26 @@ function getScriptRunShaper(scriptTags) {
 }
 
 /**
- * Apply the enabled features of its shaper to a script run, with the script tag of the run that the GSUB table has
- * (see selectScriptTag) and the language of the features
+ * The enabled features of a script run: the features of its shaper, then the direction features of the run that
+ * HarfBuzz enables by default, unless the features option turns them off (see isDefaultFeatureEnabled)
+ * @param {string} shaper see getScriptRunShaper
+ * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags)
+ * @returns {string[]}
+ */
+function getScriptRunFeatureTags(shaper, directionTags) {
+    const tags = this.featuresTags[shaper];
+    const enabledDirectionTags = directionTags.filter(
+        tag => !tags.includes(tag) && isDefaultFeatureEnabled(this.query.featuresOption, tag)
+    );
+    return tags.concat(enabledDirectionTags);
+}
+
+/**
+ * Apply the enabled features of its shaper and of its direction to a script run (see getScriptRunFeatureTags), with
+ * the script tag of the run that the GSUB table has (see selectScriptTag) and the language of the features. Like the
+ * direction of a buffer of HarfBuzz, the direction features of a run are the ones of the direction of its script (see
+ * getDirectionFeatureTags), and like a buffer of HarfBuzz, it starts with the initial random state (see
+ * FeatureQuery.startScriptRun).
  * @param {{tokens: Token[], scriptTags: string[]}} run
  */
 function applyScriptRunFeatures(run) {
@@ -258,15 +298,18 @@ function applyScriptRunFeatures(run) {
     }
     checkGlyphIndexStatus.call(this);
     const script = selectScriptTag(this.query.font.substitution, run.scriptTags);
+    const directionTags = getDirectionFeatureTags(run.scriptTags);
+    const tags = getScriptRunFeatureTags.call(this, shaper, directionTags);
+    this.query.startScriptRun(directionTags);
     switch (shaper) {
         case 'arab':
-            applyArabicFeatures.call(this, run.tokens, script);
+            applyArabicFeatures.call(this, run.tokens, script, tags, directionTags);
             break;
         case 'thai':
-            thaiFeatures.call(this, run.tokens, script);
+            thaiFeatures.call(this, run.tokens, script, tags);
             break;
         default:
-            latinFeatures.call(this, run.tokens, script);
+            latinFeatures.call(this, run.tokens, script, tags);
     }
 }
 
@@ -393,4 +436,4 @@ Bidi.prototype.getTextGlyphClusters = function (text) {
 };
 
 export default Bidi;
-export { ARABIC_FORM_TAGS, getScriptRunShaper };
+export { getScriptRunShaper };
