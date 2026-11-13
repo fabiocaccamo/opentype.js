@@ -244,16 +244,20 @@ const layoutCaches = new WeakMap();
 const MAX_CACHED_LAYOUT_VALUES = 1024;
 
 /**
- * A value computed from a GSUB or GPOS table (e.g. the lookups of a set of features), computed once for the table and
- * a key: the methods of Layout that add a script, a language system, a feature or a lookup to the table clear its
- * values (see clearLayoutCache), a table that replaces it has values of its own.
- * @param {object|undefined} table - the GSUB or GPOS table, the value is computed at every call without one
+ * A value computed from the GSUB or GPOS table of a font (e.g. the lookups of a set of features), computed once for
+ * the table and a key: the methods of Layout that add a script, a language system, a feature or a lookup to the table
+ * clear its values (see clearLayoutCache), a table that replaces it has values of its own. The value is computed at
+ * every call for a font without the table or whose layout cache is off (font.isLayoutCacheEnabled, see the
+ * layoutCache option of parse in opentype.mjs).
+ * @param {Font} font
+ * @param {string} tableName - 'gsub' or 'gpos'
  * @param {string} key - what the value depends on besides the table
  * @param {function(): any} computeValue
  * @returns {any}
  */
-function getCachedLayoutValue(table, key, computeValue) {
-    if (!table) {
+function getCachedLayoutValue(font, tableName, key, computeValue) {
+    const table = font.tables[tableName];
+    if (!table || !font.isLayoutCacheEnabled) {
         return computeValue();
     }
     let cache = layoutCaches.get(table);

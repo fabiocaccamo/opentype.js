@@ -127,6 +127,24 @@ function uncompressTable(data, tableEntry) {
     }
 }
 
+/**
+ * Whether the layout of a parsed font caches the lookups of its GSUB and GPOS tables, from the layoutCache option of
+ * parse: on unless the option is false
+ * @param {boolean|undefined} layoutCacheOption
+ * @returns {boolean}
+ */
+function isLayoutCacheEnabledByOption(layoutCacheOption) {
+    if (layoutCacheOption === undefined) {
+        return true;
+    }
+    if (typeof layoutCacheOption === 'boolean') {
+        return layoutCacheOption;
+    }
+    throw new TypeError(
+        `The layoutCache option must be a boolean, not ${typeof layoutCacheOption} ${String(layoutCacheOption)}`
+    );
+}
+
 // Public API ///////////////////////////////////////////////////////////
 
 /**
@@ -134,6 +152,10 @@ function uncompressTable(data, tableEntry) {
  * Throws an error if the font could not be parsed.
  * @param  {ArrayBuffer}
  * @param  {Object} opt - options for parsing
+ * @param  {boolean} [opt.layoutCache=true] - whether the layout caches the lookups of the GSUB and GPOS tables of the
+ *                                            font (font.isLayoutCacheEnabled): with false a change made directly to
+ *                                            the objects of these tables applies at the next layout; any value other
+ *                                            than a boolean or undefined throws a TypeError
  * @return {opentype.Font}
  */
 function parseBuffer(buffer, opt={}) {
@@ -143,6 +165,7 @@ function parseBuffer(buffer, opt={}) {
     // Since the constructor can also be called to create new fonts from scratch, we indicate this
     // should be an empty font that we'll fill with our own data.
     const font = new Font({empty: true});
+    font.isLayoutCacheEnabled = isLayoutCacheEnabledByOption(opt.layoutCache);
 
     if (buffer.constructor !== ArrayBuffer) { // convert node Buffer
         buffer = new Uint8Array(buffer).buffer;

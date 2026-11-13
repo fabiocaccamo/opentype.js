@@ -492,7 +492,7 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureVal
  */
 function getFeaturesLookups(query, tags, script, language, withRequiredFeature = false) {
     const key = JSON.stringify(['lookups', tags, script, language, withRequiredFeature, query.getFeatureVariationIndex()]);
-    return getCachedLayoutValue(query.font.tables.gsub, key, () => {
+    return getCachedLayoutValue(query.font, 'gsub', key, () => {
         const features = tags.map(tag => ({ tag, feature: query.getFeature({ tag, script, language }), isRequired: false }));
         const requiredFeature = withRequiredFeature && query.getRequiredFeature(script, language);
         if (requiredFeature) {

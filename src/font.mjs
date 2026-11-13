@@ -147,6 +147,9 @@ function Font(options) {
     this.kerningPairs = {};
     // whether the layout ignores the GDEF table, one of the broken GDEF tables HarfBuzz ignores, set by parse
     this.isGdefIgnoredByLayout = false;
+    // whether the layout caches the lookups of the GSUB and GPOS tables (see getCachedLayoutValue in layout.mjs),
+    // set by parse with its layoutCache option
+    this.isLayoutCacheEnabled = true;
     this.tables = this.tables || {};
 
     this.tables = new Proxy(this.tables, {
@@ -636,7 +639,8 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                                 the GSUB and the GPOS tables (see getCachedLayoutValue in layout.mjs): the methods of
  *                                 font.substitution and font.position that add a script, a language system, a feature
  *                                 or a lookup recompute them, not a direct change of the objects of the tables after a
- *                                 text was laid out.
+ *                                 text was laid out, unless the font was parsed with the layoutCache option false
+ *                                 (see parse in opentype.mjs), which computes them at every layout.
  *                                 See https://www.microsoft.com/typography/otspec/featuretags.htm
  * @property {Object} [variation] - variation coordinates of the advances, the GPOS values, the GSUB feature variations
  *                                  (not yet the GPOS feature variations, see Font.shape) and the outlines drawn by

@@ -150,6 +150,172 @@ describe('opentype.mjs', function() {
             }
         });
     });
+
+    describe('the layoutCache option', function() {
+        // the fonts edited with fontTools like the tests edit the parsed tables, saved as <edited font>, then
+        // hb-shape --no-glyph-names --cluster-level=1 [--features=aalt] <font> -u <code points>:
+        // - TestAlternateSubstitution.ttf, aalt with the lookup 1 (sub a from [...]) only, without the lookup 0
+        //   (sub g by g.alt), as aalt-edited.ttf: --features=aalt -u 0067 [24=0+500], edited [23=0+500]
+        // - TestPairPositioning.ttf, kern without the lookup 1 (pos b c -30), as kern-edited.ttf: -u 0062,0063
+        //   [6=0+470|7=1+500], edited [6=0+500|7=1+500]
+        // - TestAlternateSubstitution.ttf, the FeatureTag of aalt renamed ss20, as aalt-renamed.ttf, and the feature
+        //   index of aalt (0) removed from every language system, as aalt-unlisted.ttf: --features=aalt -u 0067
+        //   [23=0+500] for both
+        // - TestPairPositioning.ttf, the feature index of kern (5) removed from every language system, as
+        //   kern-unlisted.ttf: -u 0062,0063 [6=0+500|7=1+500]
+        const removeAaltSingleSubstitution = font => {
+            const aaltFeature = font.tables.gsub.features.find(featureRecord => featureRecord.tag === 'aalt').feature;
+            aaltFeature.lookupListIndexes = [1];
+        };
+        const removeKernPairOfBc = font => {
+            const kernFeature = font.tables.gpos.features.find(featureRecord => featureRecord.tag === 'kern').feature;
+            kernFeature.lookupListIndexes = kernFeature.lookupListIndexes.filter(lookupIndex => lookupIndex !== 1);
+        };
+        const removeFeatureFromLanguageSystems = (table, tag) => {
+            const featureIndex = table.features.findIndex(featureRecord => featureRecord.tag === tag);
+            for (const scriptRecord of table.scripts) {
+                const languageSystems = [scriptRecord.script.defaultLangSys]
+                    .concat(scriptRecord.script.langSysRecords.map(langSysRecord => langSysRecord.langSys))
+                    .filter(Boolean);
+                for (const languageSystem of languageSystems) {
+                    languageSystem.featureIndexes = languageSystem.featureIndexes.filter(index => index !== featureIndex);
+                }
+            }
+        };
+        const getAaltGlyphIndexes = font => font.stringToGlyphIndexes('g', { features: { aalt: true } });
+        const getAdvances = (font, text) => font.shape(text).map(glyphPosition => glyphPosition.xAdvance);
+
+        it('caches the lookups of the GSUB and GPOS tables by default and with true', function() {
+            for (const parseOptions of [undefined, {}, { layoutCache: true }]) {
+                const alternateFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf', parseOptions);
+                const pairFont = loadSync('./test/fonts/TestPairPositioning.ttf', parseOptions);
+                assert.strictEqual(alternateFont.isLayoutCacheEnabled, true);
+                assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [24]);
+                assert.deepStrictEqual(getAdvances(pairFont, 'bc'), [470, 500]);
+                // a direct change of the tables after the layout is not seen
+                removeAaltSingleSubstitution(alternateFont);
+                removeKernPairOfBc(pairFont);
+                assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [24]);
+                assert.deepStrictEqual(getAdvances(pairFont, 'bc'), [470, 500]);
+            }
+        });
+
+        it('applies a direct change of the lookups of the GSUB table at the next layout with false', function() {
+            const alternateFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf', { layoutCache: false });
+            assert.strictEqual(alternateFont.isLayoutCacheEnabled, false);
+            assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [24]);
+            removeAaltSingleSubstitution(alternateFont);
+            assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [23]);
+        });
+
+        it('applies a direct change of the lookups of the GPOS table at the next layout with false', function() {
+            const pairFont = loadSync('./test/fonts/TestPairPositioning.ttf', { layoutCache: false });
+            assert.deepStrictEqual(getAdvances(pairFont, 'bc'), [470, 500]);
+            removeKernPairOfBc(pairFont);
+            assert.deepStrictEqual(getAdvances(pairFont, 'bc'), [500, 500]);
+        });
+
+        it('applies a direct change of a feature tag of the GSUB table at the next layout with false', function() {
+            const alternateFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf', { layoutCache: false });
+            assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [24]);
+            alternateFont.tables.gsub.features.find(featureRecord => featureRecord.tag === 'aalt').tag = 'ss20';
+            assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [23]);
+        });
+
+        it('applies a direct change of the features of the language systems at the next layout with false', function() {
+            const alternateFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf', { layoutCache: false });
+            const pairFont = loadSync('./test/fonts/TestPairPositioning.ttf', { layoutCache: false });
+            assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [24]);
+            assert.deepStrictEqual(getAdvances(pairFont, 'bc'), [470, 500]);
+            removeFeatureFromLanguageSystems(alternateFont.tables.gsub, 'aalt');
+            removeFeatureFromLanguageSystems(pairFont.tables.gpos, 'kern');
+            assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [23]);
+            assert.deepStrictEqual(getAdvances(pairFont, 'bc'), [500, 500]);
+        });
+
+        it('applies a direct change of the GSUB and GPOS tables assigned after the parse with false', function() {
+            const alternateFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf', { layoutCache: false });
+            const pairFont = loadSync('./test/fonts/TestPairPositioning.ttf', { layoutCache: false });
+            alternateFont.tables.gsub = Object.assign({}, alternateFont.tables.gsub);
+            pairFont.tables.gpos = Object.assign({}, pairFont.tables.gpos);
+            assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [24]);
+            assert.deepStrictEqual(getAdvances(pairFont, 'bc'), [470, 500]);
+            removeAaltSingleSubstitution(alternateFont);
+            removeKernPairOfBc(pairFont);
+            assert.deepStrictEqual(getAaltGlyphIndexes(alternateFont), [23]);
+            assert.deepStrictEqual(getAdvances(pairFont, 'bc'), [500, 500]);
+        });
+
+        describe('the GSUB and GPOS tables that font.substitution and font.position create', function() {
+            // a font of the glyphs .notdef, f, i and f_i, with no GSUB and GPOS tables, saved then parsed
+            const parseFontWithoutLayoutTables = parseOptions => {
+                const glyphs = [
+                    new Glyph({ name: '.notdef', path: new Path(), advanceWidth: 1 }),
+                    new Glyph({ name: 'f', unicode: 102, path: new Path(), advanceWidth: 1 }),
+                    new Glyph({ name: 'i', unicode: 105, path: new Path(), advanceWidth: 1 }),
+                    new Glyph({ name: 'f_i', unicode: 0xfb01, path: new Path(), advanceWidth: 1 })
+                ];
+                const createdFont = new Font({
+                    familyName: 'MyFont',
+                    styleName: 'Medium',
+                    unitsPerEm: 1000,
+                    ascender: 800,
+                    descender: 0,
+                    glyphs
+                });
+                return parse(createdFont.toArrayBuffer(), parseOptions);
+            };
+            // the ligature f i of the GSUB table that font.substitution creates, then the lookups of liga removed
+            // directly from the table: without a lookup the text keeps the glyphs of its characters
+            const getLigatureGlyphIndexesBeforeAndAfterRemoval = ligatureFont => {
+                ligatureFont.substitution.add('liga', { sub: [1, 2], by: 3 });
+                const glyphIndexesBefore = ligatureFont.stringToGlyphIndexes('fi');
+                ligatureFont.tables.gsub.features.find(featureRecord => featureRecord.tag === 'liga').feature.lookupListIndexes = [];
+                return [glyphIndexesBefore, ligatureFont.stringToGlyphIndexes('fi')];
+            };
+            // the pair f i of the GPOS table that font.position creates, -30 on the advance of f (a pair adjustment
+            // of format 1 with the value format 4, XAdvance, for the first glyph), then the lookups of kern removed
+            // directly from the table: without a lookup the advances are the ones of the glyphs, 1 each
+            const getKernedAdvanceWidthsBeforeAndAfterRemoval = kernedFont => {
+                const [pairLookup] = kernedFont.position.getLookupTables('DFLT', 'dflt', 'kern', 2, true);
+                pairLookup.subtables.push({
+                    posFormat: 1,
+                    coverage: { format: 1, glyphs: [1] },
+                    valueFormat1: 4,
+                    valueFormat2: 0,
+                    pairSets: [[{ secondGlyph: 2, value1: { xAdvance: -30 }, value2: undefined }]]
+                });
+                const advanceWidthBefore = kernedFont.getAdvanceWidth('fi', kernedFont.unitsPerEm);
+                kernedFont.tables.gpos.features.find(featureRecord => featureRecord.tag === 'kern').feature.lookupListIndexes = [];
+                return [advanceWidthBefore, kernedFont.getAdvanceWidth('fi', kernedFont.unitsPerEm)];
+            };
+
+            it('caches their lookups by default and with true', function() {
+                for (const parseOptions of [undefined, { layoutCache: true }]) {
+                    const ligatureFont = parseFontWithoutLayoutTables(parseOptions);
+                    assert.strictEqual(ligatureFont.tables.gsub, undefined);
+                    assert.deepStrictEqual(getLigatureGlyphIndexesBeforeAndAfterRemoval(ligatureFont), [[3], [3]]);
+                    const kernedFont = parseFontWithoutLayoutTables(parseOptions);
+                    assert.strictEqual(kernedFont.tables.gpos, undefined);
+                    assert.deepStrictEqual(getKernedAdvanceWidthsBeforeAndAfterRemoval(kernedFont), [2 - 30, 2 - 30]);
+                }
+            });
+
+            it('applies a direct change of them at the next layout with false', function() {
+                const ligatureFont = parseFontWithoutLayoutTables({ layoutCache: false });
+                assert.deepStrictEqual(getLigatureGlyphIndexesBeforeAndAfterRemoval(ligatureFont), [[3], [1, 2]]);
+                const kernedFont = parseFontWithoutLayoutTables({ layoutCache: false });
+                assert.deepStrictEqual(getKernedAdvanceWidthsBeforeAndAfterRemoval(kernedFont), [2 - 30, 2]);
+            });
+        });
+
+        it('throws a TypeError for a value that is not a boolean', function() {
+            const buffer = readFileSync('./test/fonts/TestPairPositioning.ttf');
+            for (const layoutCache of ['false', 0, 1, null]) {
+                assert.throws(() => parse(buffer, { layoutCache }), TypeError, String(layoutCache));
+            }
+        });
+    });
 });
 
 describe('opentype.js on low memory mode', function() {

@@ -455,7 +455,7 @@ FeatureQuery.prototype.getRequiredFeatureIndex = function(scriptTag, languageTag
 FeatureQuery.prototype.getScriptFeatures = function (scriptTag, languageTag) {
     const gsub = this.font.tables.gsub;
     const key = JSON.stringify(['features', scriptTag, languageTag, this.getFeatureVariationIndex()]);
-    return getCachedLayoutValue(gsub, key, () => {
+    return getCachedLayoutValue(this.font, 'gsub', key, () => {
         const featureVariations = this.getFeatureVariationSubstitutions();
         const getFeatureOfIndex = index => {
             const feature = gsub.features[index];

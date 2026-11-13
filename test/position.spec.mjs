@@ -676,6 +676,28 @@ describe('position.mjs', function() {
             assert.strictEqual(langSysReadCount, firstRunReadCount);
         });
 
+        it('computes the lookups of the features of a run at every run with layoutCache false, after a direct change too', function() {
+            // TestPairPositioning.ttf with kern without its lookup 1 (pos b c -30), with fontTools as kern-edited.ttf:
+            // hb-shape --no-glyph-names --cluster-level=1 -u 0062,0063 [6=0+470|7=1+500], edited [6=0+500|7=1+500]
+            const uncachedFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'), { layoutCache: false });
+            const getLangSysTable = uncachedFont.position.getLangSysTable;
+            let langSysReadCount = 0;
+            uncachedFont.position.getLangSysTable = function(...langSysArguments) {
+                langSysReadCount++;
+                return getLangSysTable.apply(this, langSysArguments);
+            };
+            // --features=ss01 -u 0064,006F: [8=0+420|9=1+500], the language system read again at the second run
+            assert.strictEqual(positionText('do', { featureTags: ['ss01'] }, uncachedFont), '8+420|9+500');
+            const firstRunReadCount = langSysReadCount;
+            assert.ok(firstRunReadCount > 0);
+            assert.strictEqual(positionText('do', { featureTags: ['ss01'] }, uncachedFont), '8+420|9+500');
+            assert.strictEqual(langSysReadCount, 2 * firstRunReadCount);
+            assert.strictEqual(positionText('bc', {}, uncachedFont), '6+470|7+500');
+            const kernFeature = uncachedFont.tables.gpos.features.find(featureRecord => featureRecord.tag === 'kern').feature;
+            kernFeature.lookupListIndexes = kernFeature.lookupListIndexes.filter(lookupIndex => lookupIndex !== 1);
+            assert.strictEqual(positionText('bc', {}, uncachedFont), '6+500|7+500');
+        });
+
         it('applies a lookup added to a feature through the Layout methods after a run was positioned', function() {
             // the lookups of the features of a run are cached for the GPOS table: getLookupTables with create clears them
             const editedFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
