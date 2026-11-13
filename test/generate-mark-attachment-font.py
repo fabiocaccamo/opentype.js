@@ -4,7 +4,8 @@ Font.shape.
 Axis: wght 100..100..900 (the default is the minimum), a gvar table without glyph variations: only the anchors of b
 and of the entry of y in CURSIVE_VARIABLE vary, through the item variation store of GDEF. Glyphs of 500 units but space
 (250), f (300), i (250), the ligatures f_i (550) and a_f_i (1000, GDEF ligatures), the marks acutecomb, gravecomb and
-fatha (0) and dotbelowcomb (100, a mark with an advance). Language systems DFLT, latn and arab, with the same features.
+fatha (0) and dotbelowcomb (100, a mark with an advance), and the Cyrillic ocyr (U+043E) last. Language systems DFLT,
+latn and arab, with the same features.
 
 GSUB lookups:
 - LIGA_F_I (liga, IgnoreMarks): sub f i i by f_i; sub f i by f_i;
@@ -19,7 +20,7 @@ GPOS lookups, in the order of the lookup list (mark classes @TOP: acutecomb and 
 dotbelowcomb at 50 -50, @ARABIC_TOP: fatha at 0 450):
 - 0 MARK_TO_BASE (mark): a 250 520 for @TOP and 250 -20 for @BOTTOM, b with variable anchors (260 700 at wght 100, 300
   760 at wght 900) for @TOP only, i with a contour point (format 2, 125 600 contourpoint 2) for @TOP, beh 260 480 for
-  @ARABIC_TOP;
+  @ARABIC_TOP, ocyr 250 -20 for @BOTTOM (the dot below of a Cyrillic base, whose Script_Extensions lack Cyrl);
 - 1 MARK_TO_LIGATURE (mark): f_i 150 700 for @TOP and 150 -20 for @BOTTOM on its first component, 420 700 for @TOP on its
   second one; a_f_i 250 700, 600 700 and 850 700 for @TOP on its three components;
 - 2 MARK_TO_MARK (mkmk): acutecomb 0 750 for @TOP;
@@ -74,6 +75,7 @@ GLYPHS = [
     ("beh", 0x0628, 500, [[(20, 0), (20, 100), (480, 100), (480, 0)]]),
     ("fatha", 0x064E, 0, [[(-150, 550), (-50, 600), (-50, 570), (-150, 520)]]),
     ("a_f_i", None, 1000, [[(50, 0), (50, 700), (950, 700), (950, 0)]]),
+    ("ocyr", 0x043E, 500, [[(50, 0), (50, 500), (450, 500), (450, 0)]]),
 ]
 
 FEATURES = """
@@ -82,7 +84,7 @@ languagesystem latn dflt;
 languagesystem arab dflt;
 
 table GDEF {
-    GlyphClassDef [a b f i x y z beh], [f_i a_f_i], [acutecomb gravecomb dotbelowcomb fatha], ;
+    GlyphClassDef [a b f i x y z beh ocyr], [f_i a_f_i], [acutecomb gravecomb dotbelowcomb fatha], ;
 } GDEF;
 
 lookup LIGA_F_I {
@@ -155,6 +157,7 @@ lookup MARK_TO_BASE {
     pos base b <anchor (wght=100:260 wght=900:300) (wght=100:700 wght=900:760)> mark @TOP;
     pos base i <anchor 125 600 contourpoint 2> mark @TOP;
     pos base beh <anchor 260 480> mark @ARABIC_TOP;
+    pos base ocyr <anchor 250 -20> mark @BOTTOM;
 } MARK_TO_BASE;
 
 lookup MARK_TO_LIGATURE {
@@ -399,9 +402,10 @@ def verify_font(output_path):
     assert [mark_set.glyphs for mark_set in definitions.MarkGlyphSetsDef.Coverage] == [["acutecomb"]]
     base_anchors = lookups[0].SubTable[0].BaseArray.BaseRecord
     anchor_formats = [[anchor.Format if anchor else None for anchor in record.BaseAnchor] for record in base_anchors]
-    # a, b, i and beh in coverage order, the variable anchor of b of format 3, the contour point of i of format 2
-    assert lookups[0].SubTable[0].BaseCoverage.glyphs == ["a", "b", "i", "beh"], lookups[0].SubTable[0].BaseCoverage.glyphs
-    assert anchor_formats == [[1, 1, None], [3, None, None], [2, None, None], [None, None, 1]], anchor_formats
+    # a, b, i, beh and ocyr in coverage order, the variable anchor of b of format 3, the contour point of i of format 2
+    base_glyphs = lookups[0].SubTable[0].BaseCoverage.glyphs
+    assert base_glyphs == ["a", "b", "i", "beh", "ocyr"], base_glyphs
+    assert anchor_formats == [[1, 1, None], [3, None, None], [2, None, None], [None, None, 1], [None, 1, None]], anchor_formats
     assert base_anchors[1].BaseAnchor[0].XDeviceTable.DeltaFormat == 0x8000
     z_entry = lookups[6].SubTable[0].EntryExitRecord[2].EntryAnchor
     assert z_entry.Format == 3 and z_entry.XDeviceTable.DeltaFormat == 1, z_entry.Format

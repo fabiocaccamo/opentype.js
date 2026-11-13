@@ -210,6 +210,8 @@ function getCoverageIndex(coverageTable, glyphIndex) {
             const range = searchRange(coverageTable.ranges, glyphIndex);
             return range ? range.index + glyphIndex - range.start : -1;
         }
+        default:
+            return -1;
     }
 }
 
@@ -1001,6 +1003,7 @@ Layout.prototype = {
 
 export default Layout;
 export {
+    getCoverageIndex,
     getLayoutGdefTable,
     getGdefGlyphClass,
     isMarkGlyph,

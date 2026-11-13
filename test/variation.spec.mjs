@@ -2,6 +2,7 @@ import assert from 'assert';
 import { parse } from '../src/opentype.mjs';
 import { readFileSync } from 'fs';
 import exp from 'constants';
+import { shapeText, assertShape } from './regression/helpers.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
 describe('variation.mjs', function() {
@@ -248,6 +249,21 @@ describe('variation.mjs', function() {
             assert.equal(glyph.getAdvanceWidth(font, { wght: 1000 }), 584);
             assert.equal(font.variation.getTransform(glyph, { wght: 1000 }).advanceWidth, 584);
             assert.equal(glyph.getAdvanceWidth(font), defaultAdvanceWidth);
+        });
+
+        // the item of A and B with the delta -900 instead of 400 at wght max, like negative-hvar.ttf:
+        // python -c "from fontTools.ttLib import TTFont; font = TTFont('TestHVARTwo.ttf');
+        // font['HVAR'].table.VarStore.VarData[0].Item[1] = [-900, 0, 0, 0, 0]; font.save('negative-hvar.ttf')"
+        // hb-shape --no-glyph-names --variations=wght=1000 negative-hvar.ttf -u 0041,0042 [2=0+0|1=1+0]; at wght 500
+        // [2=0+262|1=1+262]
+        it('gives a varied advance width of 0 where HVAR would make it negative, like HarfBuzz', function() {
+            const font = loadSync('./test/fonts/TestHVARTwo.ttf');
+            font.tables.hvar.itemVariationStore.itemVariationSubtables[0].deltaSets[1] = [-900, 0, 0, 0, 0];
+            const glyphA = font.charToGlyph('A');
+            assert.equal(font.variation.getAdvanceWidth(glyphA, { wght: 1000 }), 0);
+            assert.equal(font.variation.getAdvanceWidth(glyphA, { wght: 500 }), 262);
+            assert.equal(font.variation.getTransform(glyphA, { wght: 1000 }).advanceWidth, 0);
+            assertShape(shapeText(font, 'AB', { variation: { wght: 1000 } }), { glyphs: [2, 1], clusters: [0, 1], advances: [0, 0] });
         });
 
         it('varies the advance width through the gvar phantom points when there is no HVAR', function() {
@@ -555,6 +571,19 @@ describe('variation.mjs', function() {
         it('gives a glyph without points the same varied advance width in getTransform and getAdvanceWidth', function() {
             assert.equal(font.variation.getTransform(glyphIndexes.space, { wght: 900 }).advanceWidth, 350);
             assert.equal(font.variation.getAdvanceWidth(glyphIndexes.space, { wght: 900 }), 350);
+        });
+
+        // the tuple of space at wght max with its right phantom point moved by -400 instead of 100, like negative-advance.ttf:
+        // python -c "from fontTools.ttLib import TTFont; font = TTFont('TestVariationPrecision.ttf');
+        // font['gvar'].variations['space'][0].coordinates[1] = (-400, 0); font.save('negative-advance.ttf')"
+        // hb-shape --no-glyph-names --variations=wght=900 negative-advance.ttf -u 0020,0048 [2=0+0|3=1+640]
+        // (instantiateVariableFont(font, {'wght': 900, 'wdth': 100})['hmtx']['space'] is (0, 0)); at wght 650
+        // [2=0+50|3=1+620]
+        it('gives a varied advance width of 0 where the phantom points would make it negative, like HarfBuzz', function() {
+            font.tables.gvar.glyphVariations[glyphIndexes.space] = { headers: [{ peakTuple: [1, 0], deltas: [0, -400, 0, 0] }], sharedPoints: [] };
+            assert.equal(font.variation.getAdvanceWidth(glyphIndexes.space, { wght: 900 }), 0);
+            assert.equal(font.variation.getAdvanceWidth(glyphIndexes.space, { wght: 650 }), 50);
+            assertShape(shapeText(font, ' H', { variation: { wght: 900 } }), { glyphs: [2, 3], clusters: [0, 1], advances: [0, 640] });
         });
 
         it('draws the glyph of U+0000 named NULL', function() {

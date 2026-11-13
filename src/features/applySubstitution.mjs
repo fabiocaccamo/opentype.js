@@ -33,6 +33,8 @@ function getTokenLigatureProperties(token) {
  * @property {number[]} glyphIndexes glyph indexes, in the order of the tokens
  * @property {Token[]} glyphTokens the token of each glyph
  * @property {Object|undefined} gdef the GDEF table of the layout, whose glyph classes the ligature substitutions read
+ * @property {Map<Token, Object>} savedTokenStates the state of each token the substitutions changed, as it was before
+ * the first change (see saveTokenState and restoreTokenStates)
  */
 
 /**
@@ -42,7 +44,7 @@ function getTokenLigatureProperties(token) {
  * @returns {GlyphSequence}
  */
 function getGlyphSequence(tokens, gdef) {
-    const glyphSequence = { glyphIndexes: [], glyphTokens: [], gdef };
+    const glyphSequence = { glyphIndexes: [], glyphTokens: [], gdef, savedTokenStates: new Map() };
     for (const token of tokens) {
         if (token.state.deleted) {
             continue;
@@ -53,6 +55,34 @@ function getGlyphSequence(tokens, gdef) {
         }
     }
     return glyphSequence;
+}
+
+/**
+ * Save the state of a token of a glyph sequence before a substitution changes it, once: its glyphs (see
+ * getTokenGlyphIndexes), its ligature properties and its cluster
+ * @param {GlyphSequence} glyphSequence
+ * @param {Token} token
+ */
+function saveTokenState(glyphSequence, token) {
+    if (glyphSequence.savedTokenStates.has(token)) {
+        return;
+    }
+    glyphSequence.savedTokenStates.set(token, {
+        state: Object.assign({}, token.state),
+        activeState: token.activeState,
+        ligatureProperties: token.ligatureProperties && token.ligatureProperties.slice(),
+        cluster: token.cluster
+    });
+}
+
+/**
+ * Give the tokens of a glyph sequence back the state they had before the substitutions (see saveTokenState)
+ * @param {GlyphSequence} glyphSequence
+ */
+function restoreTokenStates(glyphSequence) {
+    for (const [token, savedState] of glyphSequence.savedTokenStates) {
+        Object.assign(token, savedState);
+    }
 }
 
 /**
@@ -88,6 +118,7 @@ function getGlyphLigatureProperties(glyphSequence, position) {
  */
 function setGlyphLigatureProperties(glyphSequence, position, ligatureProperties) {
     const token = glyphSequence.glyphTokens[position];
+    saveTokenState(glyphSequence, token);
     if (!token.ligatureProperties) {
         token.ligatureProperties = getTokenGlyphIndexes(token).map(() => undefined);
     }
@@ -125,6 +156,7 @@ function getReplacementLigatureProperties(ligatureProperties, glyphCount) {
  */
 function replaceGlyph(glyphSequence, position, glyphIndexes, tag) {
     const token = glyphSequence.glyphTokens[position];
+    saveTokenState(glyphSequence, token);
     const positionInToken = getPositionInToken(glyphSequence, position);
     const tokenGlyphIndexes = getTokenGlyphIndexes(token).slice();
     tokenGlyphIndexes.splice(positionInToken, 1, ...glyphIndexes);
@@ -219,6 +251,7 @@ function mergeClusters(glyphSequence, startPosition, endPosition) {
         lastPosition++;
     }
     for (let position = startPosition; position < lastPosition; position++) {
+        saveTokenState(glyphSequence, glyphTokens[position]);
         glyphTokens[position].cluster = mergedCluster;
     }
 }
@@ -379,14 +412,17 @@ function getLookupFirstGlyphCoverages(lookupTable) {
 }
 
 /**
- * Apply a lookup (see FeatureQuery.lookupSubstitution) at each glyph of a list of tokens, from the first one: the glyphs
- * deleted by a ligature are not part of the context any more, each glyph of a multiple substitution is a glyph of its
- * own, and like HarfBuzz the lookup goes on after the glyphs that replaced a glyph, or after the input glyphs of a
- * contextual rule that matched (see applySubstitution)
+ * Apply a lookup (see FeatureQuery.lookupSubstitution) at each glyph of the tokens of a script run, from the first one:
+ * the glyphs deleted by a ligature are not part of the context any more, each glyph of a multiple substitution is a
+ * glyph of its own, and like HarfBuzz the lookup goes on after the glyphs that replaced a glyph, or after the input
+ * glyphs of a contextual rule that matched (see applySubstitution). Like a buffer of HarfBuzz that cannot grow past its
+ * max_len, a lookup that grows the glyphs of the script run past their maximum (see FeatureQuery.startScriptRun) stops
+ * there, the tokens get back the glyphs, the ligature properties and the clusters they had before it, and no lookup
+ * applies to the run after it
  * @param {FeatureQuery} query
  * @param {any} lookupTable
  * @param {string} tag the tag of the feature of the lookup, set as the state of the substituted tokens
- * @param {Token[]} tokens
+ * @param {Token[]} tokens the tokens of the whole script run, whose glyphs count for its maximum
  * @param {function(Token): (number|null)} [getTokenFeatureValue] the value of the feature of the lookup at the glyphs of
  * a token, like the mask HarfBuzz gives a glyph (see getLookupFeatureValue): the alternate index there of its alternate
  * substitutions and of the ones that its contextual rules apply at the glyph, null where a rule or a ligature of the
@@ -395,6 +431,9 @@ function getLookupFirstGlyphCoverages(lookupTable) {
  * of HarfBuzz, the later input glyphs of a rule and the components of a ligature are matched whatever their token
  */
 function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureValue = () => 1) {
+    if (query.isMaxGlyphCountExceeded) {
+        return;
+    }
     const layout = query.font.substitution;
     const coverages = getLookupFirstGlyphCoverages(lookupTable);
     // a glyph no subtable covers cannot start a substitution: skip it without building its context
@@ -415,8 +454,14 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureVal
         }
         contextParams.setCurrentIndex(position);
         const action = query.lookupSubstitution(lookupTable, contextParams, tag, getGlyphFeatureValue);
-        if (action) {
-            position += applySubstitution(action, glyphSequence, position) - 1;
+        if (!action) {
+            continue;
+        }
+        position += applySubstitution(action, glyphSequence, position) - 1;
+        if (glyphSequence.glyphIndexes.length > query.maxGlyphCount) {
+            restoreTokenStates(glyphSequence);
+            query.isMaxGlyphCountExceeded = true;
+            return;
         }
     }
 }

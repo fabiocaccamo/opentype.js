@@ -3,7 +3,7 @@
  */
 
 import {
-    getLayoutGdefTable, isGlyphIgnoredByLookup, getNotIgnoredGlyphPositions, getRequiredFeatureIndex,
+    getCoverageIndex, getLayoutGdefTable, isGlyphIgnoredByLookup, getNotIgnoredGlyphPositions, getRequiredFeatureIndex,
     matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue
 } from '../layout.mjs';
 import { warnOncePerFont } from '../util.mjs';
@@ -11,6 +11,11 @@ import { RANDOM_FEATURE_TAG, MAX_FEATURE_VALUE, getRunFeatureValue } from './fea
 
 // the random state of a buffer of HarfBuzz when it starts (hb_buffer_t::clear)
 const INITIAL_RANDOM_STATE = 1;
+
+// the most glyphs a buffer of HarfBuzz can grow to, per character and at least (HB_BUFFER_MAX_LEN_FACTOR and
+// HB_BUFFER_MAX_LEN_MIN, the max_len of hb_buffer_t::enter)
+const MAX_GLYPH_COUNT_FACTOR = 64;
+const MIN_MAX_GLYPH_COUNT = 16384;
 
 /**
  * Create feature query instance
@@ -26,9 +31,9 @@ function FeatureQuery(font, variation, featuresOption) {
     this.featuresOption = featuresOption;
     // the GSUB feature variation record of the variation (see getFeatureVariationIndex), once computed
     this.featureVariationIndex = undefined;
-    // the random state and the direction features of the run being shaped (see startScriptRun)
-    this.randomState = INITIAL_RANDOM_STATE;
-    this.directionTags = [];
+    // the random state, the direction features, the maximum number of glyphs and whether a lookup went past it, of the
+    // run being shaped (see startScriptRun)
+    this.startScriptRun([], 0);
 }
 
 /**
@@ -60,39 +65,24 @@ function SubstitutionAction(action) {
 }
 
 /**
- * Lookup a coverage table: like HarfBuzz, the glyph 0 (.notdef) is covered like any other glyph
+ * Lookup a coverage table with the binary search of the GSUB and GPOS lookups and of HarfBuzz (see getCoverageIndex in
+ * layout.mjs): like HarfBuzz, the glyph 0 (.notdef) is covered like any other glyph
  * @param {number|null} glyphIndex glyph index, null for a character with no glyph in a font without cmap (see
  * DefaultEncoding.charToGlyphIndex), which no coverage table covers
  * @param {CoverageTable} coverage coverage table
+ * @returns {number} -1 if not found
  */
 function lookupCoverage(glyphIndex, coverage) {
     if (typeof glyphIndex !== 'number') {
         return -1;
     }
-    switch (coverage.format) {
-        case 1:
-            return coverage.glyphs.indexOf(glyphIndex);
-
-        case 2: {
-            let ranges = coverage.ranges;
-            for (let i = 0; i < ranges.length; i++) {
-                const range = ranges[i];
-                if (glyphIndex >= range.start && glyphIndex <= range.end) {
-                    let offset = glyphIndex - range.start;
-                    return range.index + offset;
-                }
-            }
-            break;
-        }
-        default:
-            return -1; // not found
-    }
-    return -1;
+    return getCoverageIndex(coverage, glyphIndex);
 }
 
 /**
  * Handle a single substitution - format 1
- * @param {ContextParams} contextParams context params to lookup
+ * @param {number} glyphIndex glyph index
+ * @param {any} subtable subtable
  */
 function singleSubstitutionFormat1(glyphIndex, subtable) {
     let substituteIndex = lookupCoverage(glyphIndex, subtable.coverage);
@@ -103,7 +93,8 @@ function singleSubstitutionFormat1(glyphIndex, subtable) {
 
 /**
  * Handle a single substitution - format 2
- * @param {ContextParams} contextParams context params to lookup
+ * @param {number} glyphIndex glyph index
+ * @param {any} subtable subtable
  */
 function singleSubstitutionFormat2(glyphIndex, subtable) {
     let substituteIndex = lookupCoverage(glyphIndex, subtable.coverage);
@@ -550,13 +541,19 @@ FeatureQuery.prototype.getFeatureValue = function (tag) {
 };
 
 /**
- * Start a script run, like a new buffer of HarfBuzz: the initial random state (see getRandomNumber) and the direction
- * features of the run, which give rtlm the value of its mask in a run of a right-to-left script (see getFeatureValue)
+ * Start a script run, like a new buffer of HarfBuzz: the initial random state (see getRandomNumber), the direction
+ * features of the run, which give rtlm the value of its mask in a run of a right-to-left script (see getFeatureValue),
+ * and like the max_len of the buffer, the maximum number of its glyphs: 64 times its number of characters, at least
+ * 16384; a GSUB lookup that would grow them past it leaves them as they were and stops the GSUB lookups of the run (see
+ * applyLookupToTokens in applySubstitution.mjs)
  * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags in featureValues.mjs)
+ * @param {number} charCount the number of characters of the run, which gives the maximum number of its glyphs
  */
-FeatureQuery.prototype.startScriptRun = function (directionTags) {
+FeatureQuery.prototype.startScriptRun = function (directionTags, charCount) {
     this.randomState = INITIAL_RANDOM_STATE;
     this.directionTags = directionTags;
+    this.maxGlyphCount = Math.max(charCount * MAX_GLYPH_COUNT_FACTOR, MIN_MAX_GLYPH_COUNT);
+    this.isMaxGlyphCountExceeded = false;
 };
 
 /**
@@ -706,7 +703,7 @@ FeatureQuery.prototype.getLookupSubstitution = function (
             subtable = subtable.extension;
             substitutionType = this.getSubstitutionType(subtableOwner, subtable);
         }
-        // getLookupMethod handles the lookups of unsupported types (it throws, or reports and skips them)
+        // getLookupMethod reports the lookups of unsupported types once per font and skips them
         const lookup = this.getLookupMethod(subtableOwner, subtable);
         if (!lookup || !substitutionTypes.includes(substitutionType)) {
             continue;

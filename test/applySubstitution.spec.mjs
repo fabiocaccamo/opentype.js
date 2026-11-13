@@ -64,6 +64,10 @@ describe('applySubstitution.mjs', function() {
     // a substitution of a nested lookup of a contextual rule (see ContextualMatch in featureQuery.mjs)
     const nestedSubstitution = (offset, id, substitution) => ({ offset, id, substitution });
 
+    const IGNORE_BASE_GLYPHS = 0x0002;
+    const IGNORE_LIGATURES = 0x0004;
+    const IGNORE_MARKS = 0x0008;
+
     // the glyphs of each token, a deleted token has none, and its cluster
     const describeTokens = tokens => tokens.map(token => [token.state.deleted ? [] : getTokenGlyphIndexes(token), token.cluster]);
 
@@ -73,7 +77,8 @@ describe('applySubstitution.mjs', function() {
             tokens[0].setState('calt', [glyphA, acute]);
             tokens[1].setState('deleted', true);
             assert.deepStrictEqual(getGlyphSequence(tokens), {
-                glyphIndexes: [glyphA, acute, glyphC], glyphTokens: [tokens[0], tokens[0], tokens[2]], gdef: undefined
+                glyphIndexes: [glyphA, acute, glyphC], glyphTokens: [tokens[0], tokens[0], tokens[2]], gdef: undefined,
+                savedTokenStates: new Map()
             });
         });
 
@@ -394,9 +399,6 @@ describe('applySubstitution.mjs', function() {
             assert.deepStrictEqual(getGlyphSequence(tokens).glyphIndexes, [glyphA, glyphB]);
         });
 
-        const IGNORE_BASE_GLYPHS = 0x0002;
-        const IGNORE_LIGATURES = 0x0004;
-        const IGNORE_MARKS = 0x0008;
         const aAlternate = glyphIndexes['a.alt'];
         const dalAlternate = glyphIndexes['dal.alt'];
         const lamInitial = glyphIndexes['lam.init'];
@@ -726,6 +728,143 @@ describe('applySubstitution.mjs', function() {
             applyLookupToTokens(query, multipleLookup, 'ccmp', tokens);
             applyLookupToTokens(query, finaLookup, 'fina', tokens, token => (token === tokens[1] ? 1 : null));
             assert.deepStrictEqual(getGlyphSequence(tokens).glyphIndexes, [lam, dalAlternate, glyphIndexes['acute.alt']]);
+        });
+    });
+
+    // the max_len of a buffer of HarfBuzz: 64 glyphs per character, at least 16384. The reference font, built with
+    // fontBuilder and feaLib: the glyphs .notdef a b, lookup DOUBLE0 { sub a by a a; } DOUBLE0; to DOUBLE15, lookup
+    // SINGLE_B { sub a by b; } SINGLE_B;, all of them in liga
+    describe('the maximum number of glyphs of a script run', function() {
+        // the reference font takes about half a second, a glyph sequence of 16384 glyphs in one token
+        this.timeout(20000);
+
+        const createDoublingLookups = count => Array.from({ length: count }, () => createMultipleLookup([glyphA], [[glyphA, glyphA]]));
+        const getLookupIndexes = (start, end) => Array.from({ length: end - start }, (unused, index) => start + index);
+
+        function createDoublingFont() {
+            const lookups = createDoublingLookups(16).concat([createSingleLookup([glyphA], [glyphB])]);
+            return createLookupFlagsFont({ gsub: createLayoutTable('latn', 'liga', getLookupIndexes(0, lookups.length), lookups) });
+        }
+
+        it('leaves the glyphs as they were before a lookup that grows them past 16384, and applies no lookup after it, like HarfBuzz', function() {
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 doubling.ttf -u 0061: 16384 glyphs 1=0+500, the 15th
+            // doubling would give 32768
+            const glyphs = createDoublingFont().stringToGlyphIndexes('a');
+            assert.strictEqual(glyphs.length, 16384);
+            assert.ok(glyphs.every(glyph => glyph === glyphA));
+        });
+
+        it('leaves every token as it was before the lookup that grows the glyphs past the maximum, like HarfBuzz', function() {
+            // -u 0061,0061,0061: 12288 glyphs 1, 4096 in each cluster (the 13th doubling would give 24576);
+            // -u 0061,0061,0061,0061,0061: 10240 glyphs 1, 2048 in each cluster
+            const font = createDoublingFont();
+            for (const [text, glyphsPerCharacter] of [['aaa', 4096], ['aaaaa', 2048]]) {
+                const clusters = font.stringToGlyphClusters(text);
+                assert.strictEqual(clusters.length, text.length * glyphsPerCharacter, text);
+                assert.ok(clusters.every(cluster => cluster.glyph.index === glyphA), text);
+                for (let i = 0; i < text.length; i++) {
+                    assert.strictEqual(clusters.filter(cluster => cluster.start === i).length, glyphsPerCharacter, text);
+                }
+            }
+        });
+
+        it('lets the glyphs grow to 64 times the characters of the run, like HarfBuzz', function() {
+            // --text of 300 a: 19200 glyphs 1, 64 in each cluster (the 7th doubling would give 38400)
+            const text = 'a'.repeat(300);
+            const clusters = createDoublingFont().stringToGlyphClusters(text);
+            assert.strictEqual(clusters.length, 19200);
+            assert.ok(clusters.every(cluster => cluster.glyph.index === glyphA));
+            for (let i = 0; i < text.length; i++) {
+                assert.strictEqual(clusters.filter(cluster => cluster.start === i).length, 64);
+            }
+        });
+
+        it('gives each script run a maximum of its own, like the buffer of each run of a browser', function() {
+            // the reference font: lookup SINGLE_B { sub b by b.alt; } SINGLE_B; after DOUBLE15 in the liga of latn, lookup
+            // KOKAI { sub kokai by khokhai; } KOKAI; in the liga of thai; each run shaped with its script:
+            // hb-shape --shapers=ot --cluster-level=1 runs.ttf --script=latn -u 0061: 16384 glyphs a=0+500;
+            // --script=thai -u 0E01: [khokhai=0+500]; --script=latn -u 0062: [b.alt=0+500]
+            const lookups = createDoublingLookups(16).concat([
+                createSingleLookup([glyphB], [glyphIndexes['b.alt']]),
+                createSingleLookup([glyphIndexes.kokai], [glyphIndexes.khokhai])
+            ]);
+            const gsub = createScriptsLayoutTable({ latn: [['liga', getLookupIndexes(0, 17)]], thai: [['liga', [17]]] }, lookups);
+            const glyphs = createLookupFlagsFont({ gsub }).stringToGlyphIndexes('a\u{E01}b');
+            assert.strictEqual(glyphs.length, 16386);
+            assert.ok(glyphs.slice(0, 16384).every(glyph => glyph === glyphA));
+            assert.deepStrictEqual(glyphs.slice(16384), [glyphIndexes.khokhai, glyphIndexes['b.alt']]);
+        });
+
+        it('gives the tokens back the clusters and the ligature properties they had before the lookup', function() {
+            // a contextual rule applies a ligature across a mark, then a multiple substitution past the maximum: lookup
+            // DOUBLE0 { sub a by a a; } DOUBLE0; to DOUBLE12, then lookup CONTEXT { lookupflag IgnoreMarks; sub b' lookup
+            // LIGATURE c'; sub a' lookup QUADRUPLE; } CONTEXT;, with lookup LIGATURE { lookupflag IgnoreMarks; sub b c by
+            // ff; } LIGATURE; and lookup QUADRUPLE { sub a by a a a a; } QUADRUPLE;. The glyphs, the clusters and the
+            // ligature properties of the text as they were before CONTEXT are the contract of the fork, not the output of
+            // HarfBuzz, which keeps the ligature it made in place: hb-shape --shapers=ot --cluster-level=1 restore.ttf
+            // -u 0062,0301,0063,0061 gives ff=0, acute=0 and 8193 a=3
+            const lookups = createDoublingLookups(13).concat([
+                createLigatureLookup(glyphB, [glyphC], ff, IGNORE_MARKS),
+                createMultipleLookup([glyphA], [[glyphA, glyphA, glyphA, glyphA]])
+            ]);
+            const contextLookup = {
+                lookupType: 6,
+                lookupFlag: IGNORE_MARKS,
+                subtables: [
+                    { substFormat: 3, backtrackCoverage: [], inputCoverage: createCoverages([glyphB, glyphC]), lookaheadCoverage: [], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 13 }] },
+                    { substFormat: 3, backtrackCoverage: [], inputCoverage: createCoverages([glyphA]), lookaheadCoverage: [], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 14 }] }
+                ]
+            };
+            lookups.push(contextLookup);
+            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'liga', getLookupIndexes(0, 13).concat([15]), lookups) });
+            // the tokens of the text, one script run, after the lookups
+            const applyLookups = appliedLookups => {
+                const query = new FeatureQuery(font);
+                const tokens = tokenize('b\u{301}ca');
+                query.startScriptRun(['ltra', 'ltrm'], tokens.length);
+                for (const lookupTable of appliedLookups) {
+                    applyLookupToTokens(query, lookupTable, 'liga', tokens);
+                }
+                return { query, tokens };
+            };
+            const { query, tokens } = applyLookups(lookups.slice(0, 13).concat([contextLookup]));
+            const { tokens: tokensBeforeContext } = applyLookups(lookups.slice(0, 13));
+            assert.ok(query.isMaxGlyphCountExceeded);
+            assert.deepStrictEqual(describeTokens(tokens.slice(0, 3)), [[[glyphB], 0], [[acute], 1], [[glyphC], 2]]);
+            assert.strictEqual(getTokenGlyphIndexes(tokens[3]).length, 8192);
+            assert.deepStrictEqual(describeTokens(tokens), describeTokens(tokensBeforeContext));
+            assert.deepStrictEqual(tokens.map(getTokenLigatureProperties), tokensBeforeContext.map(getTokenLigatureProperties));
+            assert.deepStrictEqual(tokens.slice(0, 3).map(getTokenLigatureProperties), [[], [], []]);
+        });
+
+        it('gives a token back the ligature properties it had before a ligature of one component of the lookup', function() {
+            // a contextual rule applies a ligature of ff alone (a GDEF ligature glyph, given a ligature id, with no cluster
+            // to merge), then a multiple substitution past the maximum: DOUBLE0 to DOUBLE12 as above, then lookup CONTEXT {
+            // sub ff' lookup LIGATURE; sub a' lookup QUADRUPLE; } CONTEXT;, with lookup LIGATURE { sub ff by a_b; }
+            // LIGATURE;. The ligature properties as they were before CONTEXT are the contract of the fork, not HarfBuzz
+            const lookups = createDoublingLookups(13).concat([
+                createLigatureLookup(ff, [], glyphIndexes.a_b),
+                createMultipleLookup([glyphA], [[glyphA, glyphA, glyphA, glyphA]])
+            ]);
+            const contextLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [
+                    { substFormat: 3, backtrackCoverage: [], inputCoverage: createCoverages([ff]), lookaheadCoverage: [], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 13 }] },
+                    { substFormat: 3, backtrackCoverage: [], inputCoverage: createCoverages([glyphA]), lookaheadCoverage: [], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 14 }] }
+                ]
+            };
+            lookups.push(contextLookup);
+            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'liga', getLookupIndexes(0, 13).concat([15]), lookups) });
+            const query = new FeatureQuery(font);
+            const tokens = tokenize('\u{FB00}a');
+            query.startScriptRun(['ltra', 'ltrm'], tokens.length);
+            for (const lookupTable of lookups.slice(0, 13).concat([contextLookup])) {
+                applyLookupToTokens(query, lookupTable, 'liga', tokens);
+            }
+            assert.ok(query.isMaxGlyphCountExceeded);
+            assert.deepStrictEqual(getTokenGlyphIndexes(tokens[0]), [ff]);
+            assert.deepStrictEqual(getTokenLigatureProperties(tokens[0]), []);
         });
     });
 

@@ -112,6 +112,113 @@ describe('bidi.mjs', function() {
                     assert.deepStrictEqual(jomhuriaFont.stringToGlyphIndexes('\u{627}\u{FD3E}\u{FD3F}\u{628}'), [434, 865, 864, 433]);
                 });
         });
+
+        // a nonspacing mark takes the direction of the char before it (UAX #9 W1), and stays in the script run of its base
+        // (see getScriptRuns)
+        describe('a nonspacing mark at the boundary of an arabic sentence', function() {
+            const describeGlyphs = text => arabicFont.shape(text)
+                .map(position => [position.glyph.index, position.start, position.xOffset, position.yOffset, position.xAdvance]);
+            // the index of the char of each glyph, in visual order
+            const describeStarts = text => arabicFont.shape(text).map(position => position.start);
+
+            // the sentences of arabicSentence.mjs are not the levels of the Unicode Bidirectional Algorithm: a tashkeel char
+            // starts or continues a right-to-left sentence whatever its base, a mark that is not a tashkeel char ends it
+            const markDirectionReason = 'arabicSentenceStartCheck and arabicSentenceEndCheck ' +
+                '(src/features/arab/contextCheck/arabicSentence.mjs): no rule W1 of the Unicode Bidirectional Algorithm, a ' +
+                'nonspacing mark does not take the direction of its base, so a haraka after a Latin letter or a whitespace ' +
+                'goes into the right-to-left sentence after it and a Latin mark after an Arabic letter ends its sentence';
+
+            itFailsUntilFixed('lays a haraka after a latin letter out from left to right with it, before the arabic sentence, like HarfBuzz',
+                markDirectionReason,
+                function() {
+                    // the Latin run of a and the fatha, then the Arabic run: hb-shape --shapers=ot --no-glyph-names
+                    // --cluster-level=1 --script=latn Scheherazade-Bold.ttf -u 0061,064E [70=0+766|1075=1+0], --script=arab
+                    // -u 0633,062F [549=1+845|972=0+1074]
+                    assert.deepStrictEqual(describeGlyphs('a\u{64E}\u{633}\u{62F}'),
+                        [[70, 0, 0, 0, 766], [1075, 1, 0, 0, 0], [549, 3, 0, 0, 845], [972, 2, 0, 0, 1074]]);
+                });
+
+            itFailsUntilFixed('lays a latin mark after an arabic letter out from right to left with it, in the arabic sentence, like HarfBuzz',
+                markDirectionReason,
+                function() {
+                    // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 Scheherazade-Bold.ttf -u 0633,062F,0301
+                    // [0=2+1135|549=1+845|972=0+1074]; -u 0633,0301,0633 [649=2+1550|0=1+1135|972=0+1074]
+                    assert.deepStrictEqual(describeGlyphs('\u{633}\u{62F}\u{301}'),
+                        [[0, 2, 0, 0, 1135], [549, 1, 0, 0, 845], [972, 0, 0, 0, 1074]]);
+                    assert.deepStrictEqual(describeGlyphs('\u{633}\u{301}\u{633}'),
+                        [[649, 2, 0, 0, 1550], [0, 1, 0, 0, 1135], [972, 0, 0, 0, 1074]]);
+                });
+
+            it('starts the arabic sentence at a right-to-left char of the tashkeel chars after a latin letter', function() {
+                // U+061B ARABIC SEMICOLON is of the bidi class AL and U+0600 ARABIC NUMBER SIGN of the class AN, which is
+                // laid out after the AL char after it (fribidi --ltr --levels: 0 1 1 1 and 0 2 1); the Arabic runs:
+                // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --script=arab Scheherazade-Bold.ttf
+                // -u 061B,0633,062F [549=2+845|972=1+1074|1175=0+681], -u 0600,0633 [413=1+1530|1145=0+1046]
+                assert.deepStrictEqual(describeGlyphs('a\u{61B}\u{633}\u{62F}'),
+                    [[70, 0, 0, 0, 766], [549, 3, 0, 0, 845], [972, 2, 0, 0, 1074], [1175, 1, 0, 0, 681]]);
+                assert.deepStrictEqual(describeGlyphs('a\u{600}\u{633}'),
+                    [[70, 0, 0, 0, 766], [413, 2, 0, 0, 1530], [1145, 1, 0, 0, 1046]]);
+            });
+
+            it('ends the arabic sentence before a left-to-right mark after an arabic letter', function() {
+                // U+0CC6 and U+0CBF are nonspacing marks of the bidi class L: fribidi --ltr --levels gives 1 1 0 0 0
+                // and 1 0 0 0
+                assert.deepStrictEqual(describeStarts('\u{633}\u{62F}\u{CC6}ab'), [1, 0, 2, 3, 4]);
+                assert.deepStrictEqual(describeStarts('\u{633}\u{CBF} a'), [0, 1, 2, 3]);
+            });
+
+            itFailsUntilFixed('keeps a latin mark after an arabic char of a weak or neutral bidi class between arabic letters in their sentence',
+                markDirectionReason,
+                function() {
+                    // U+066A ARABIC PERCENT SIGN (ET) and U+060C ARABIC COMMA (CS), whose marks take their class: between
+                    // two arabic letters fribidi --ltr --levels gives 1 1 1 1 1 and 1 1 1 1 0
+                    assert.deepStrictEqual(describeStarts('\u{633}\u{62F}\u{66A}\u{301}\u{633}'), [4, 3, 2, 1, 0]);
+                    assert.deepStrictEqual(describeStarts('\u{633}\u{60C}\u{301}\u{633}a'), [3, 2, 1, 0, 4]);
+                });
+
+            it('attaches a fatha to an arabic comma at the end of an arabic sentence, like HarfBuzz', function() {
+                // the glyphs in the order of the text, since the visual order of the comma before a Latin word is the
+                // known failure of the weak and neutral bidi classes below: hb-shape --shapers=ot --no-glyph-names
+                // --cluster-level=1 Scheherazade-Bold.ttf -u 0633,060C,064E [1075=2@171,-360+0|1159=1+683|413=0+1530];
+                // -u 0633,060C,064E,0061,0062 [71=4+856|70=3+766|1075=2@171,-360+0|1159=1+683|413=0+1530]
+                const describeGlyphsInTextOrder = text => describeGlyphs(text).sort((glyphA, glyphB) => glyphA[1] - glyphB[1]);
+                const sentenceGlyphs = [[413, 0, 0, 0, 1530], [1159, 1, 0, 0, 683], [1075, 2, 171, -360, 0]];
+                assert.deepStrictEqual(describeGlyphsInTextOrder('\u{633}\u{60C}\u{64E}'), sentenceGlyphs);
+                assert.deepStrictEqual(describeGlyphsInTextOrder('\u{633}\u{60C}\u{64E}ab'),
+                    [...sentenceGlyphs, [70, 3, 0, 0, 766], [71, 4, 0, 0, 856]]);
+            });
+
+            itFailsUntilFixed('ends the arabic sentence before a whitespace followed by a haraka and a latin letter',
+                markDirectionReason,
+                function() {
+                    // the haraka takes the class of the whitespace, its base: fribidi --ltr --levels gives 1 1 0 0 0 0 and
+                    // 1 1 0 0; the fatha is attached to the space at x 512 - 376 = 136, where hb-shape --shapers=ot
+                    // --no-glyph-names --cluster-level=1 --script=arab --direction=ltr Scheherazade-Bold.ttf -u 0020,064E
+                    // draws it ([1075=0@136,-336+0|3=0+512])
+                    assert.deepStrictEqual(describeGlyphs('\u{633}\u{62F} \u{64E}ab'), [
+                        [549, 1, 0, 0, 845], [972, 0, 0, 0, 1074], [3, 2, 0, 0, 512], [1075, 3, -376, -336, 0],
+                        [70, 4, 0, 0, 766], [71, 5, 0, 0, 856]
+                    ]);
+                    assert.deepStrictEqual(describeStarts('\u{633}\u{62F} \u{64E}'), [1, 0, 2, 3]);
+                });
+
+            itFailsUntilFixed('lays an arabic char of a weak or neutral bidi class out from left to right in a latin text and after arabic letters',
+                'arabicSentenceStartCheck and arabicSentenceEndCheck (src/features/arab/contextCheck/arabicSentence.mjs): no ' +
+                'resolution of the weak and neutral bidi classes, so an Arabic char of the class AN, ET, CS or ON is laid out ' +
+                'like a right-to-left char, with its marks: it starts a right-to-left sentence, which goes on to the Arabic ' +
+                'chars after it, and after Arabic letters it stays at the end of their sentence',
+                function() {
+                    // U+066A ARABIC PERCENT SIGN (ET), U+060C ARABIC COMMA (CS): fribidi --ltr --levels gives
+                    // 0 0 0 0, 0 0 0 0 0, 0 0 0 0, 0 0 0 0 0, 0 0 0 0, 1 1 0 0 and 1 1 0 0 0 0 0
+                    assert.deepStrictEqual(describeStarts('\u{66A}\u{60C}ab'), [0, 1, 2, 3]);
+                    assert.deepStrictEqual(describeStarts('ab \u{66A}\u{66A}'), [0, 1, 2, 3, 4]);
+                    assert.deepStrictEqual(describeStarts('\u{66A}\u{301}ab'), [0, 1, 2, 3]);
+                    assert.deepStrictEqual(describeStarts('ab \u{66A}\u{301}'), [0, 1, 2, 3, 4]);
+                    assert.deepStrictEqual(describeStarts('\u{66A}\u{64E}ab'), [0, 1, 2, 3]);
+                    assert.deepStrictEqual(describeStarts('\u{633}\u{62F}\u{66A}\u{64E}'), [1, 0, 2, 3]);
+                    assert.deepStrictEqual(describeStarts('\u{633}\u{62F}\u{60C}\u{64E} ab'), [1, 0, 2, 3, 4, 5, 6]);
+                });
+        });
     });
     describe('getBidiText', function() {
         it('should adjust then render layout direction of bidi text', function() {
@@ -923,6 +1030,27 @@ describe('bidi.mjs', function() {
         });
     });
 
+    describe('a font without a GSUB table', function() {
+        it('looks no GSUB feature up in its script runs, until a substitution added through the Layout methods creates the table', function() {
+            const font = createLookupFlagsFont();
+            const glyphNames = text => font.stringToGlyphs(text).map(glyph => glyph.name);
+            const getFeature = FeatureQuery.prototype.getFeature;
+            let getFeatureCalls = 0;
+            FeatureQuery.prototype.getFeature = function(...parameters) {
+                getFeatureCalls++;
+                return getFeature.apply(this, parameters);
+            };
+            try {
+                assert.deepStrictEqual(glyphNames('ab \u{644}\u{627} \u{E01}'), ['a', 'b', '.notdef', 'alef', 'lam', '.notdef', 'kokai']);
+            } finally {
+                FeatureQuery.prototype.getFeature = getFeature;
+            }
+            assert.strictEqual(getFeatureCalls, 0);
+            font.substitution.addSingle('liga', { sub: glyphIndexes.a, by: glyphIndexes['a.alt'] });
+            assert.deepStrictEqual(glyphNames('ab'), ['a.alt', 'b']);
+        });
+    });
+
     describe('script runs', function() {
         // TestScriptLanguage.ttf, generated by test/generate-script-language-font.py (see its docstring for its lookups):
         // ccmp of arab sub beh by beh.ccmp; (not in the language system URD), locl of arab URD sub fourarabic by
@@ -979,13 +1107,29 @@ describe('bidi.mjs', function() {
             assert.deepStrictEqual(glyphNames('a \u{640}\u{633}'), ['a', 'space', 'seen.fina', 'tatweel.init']);
         });
 
-        it('puts an Arabic haraka between a Latin letter and an Arabic letter in the run of the Arabic letter, like Chromium', function() {
+        it('keeps an Arabic haraka after a Latin letter in the run of its base, and after a tatweel in the Arabic run, like the browsers', function() {
             bidi.applyFeatures(font, font.defaultRenderOptions.features);
             bidi.getTextGlyphs('a\u{64E}\u{633}\u{62F}');
-            assert.deepStrictEqual(runTexts(), ['a', '\u{64E}\u{633}\u{62F}']);
-            // after a tatweel too, which joins the seen: the Arabic run --script=arab -u 0640,064E,0633
+            assert.deepStrictEqual(runTexts(), ['a\u{64E}', '\u{633}\u{62F}']);
+            // after a tatweel, which joins the seen: the Arabic run --script=arab -u 0640,064E,0633
             // [seen.fina=2+500|.notdef=1+500|tatweel.init=0+500]
             assert.deepStrictEqual(glyphNames('a\u{640}\u{64E}\u{633}'), ['a', 'seen.fina', '.notdef', 'tatweel.init']);
+        });
+
+        it('shapes a combining mark with its Greek or Cyrillic base before a Latin word, its case form and its attachment, like HarfBuzz', function() {
+            // the caron after a Greek capital takes the case form of the ccmp of Fira Sans: hb-shape --no-glyph-names
+            // --cluster-level=1 FiraSansOT-Medium.otf -u 03A0,030C,0020,0057 [385=0+672|1134=1+0|3=2+250|58=3+840]
+            const fira = loadSync('./test/fonts/FiraSansOT-Medium.otf');
+            assertShape(shapeText(fira, '\u{3A0}\u{30C} W'), {
+                glyphs: [385, 1134, 3, 58], clusters: [0, 1, 2, 3], advances: [672, 0, 250, 840]
+            });
+            // the dot below attaches to the Cyrillic o: hb-shape --no-glyph-names --cluster-level=1 TestMarkAttachment.ttf
+            // -u 043E,0323,0020,0061 [16=0+500|12=1@-300,30+0|1=2+250|2=3+500]
+            const markFont = loadSync('./test/fonts/TestMarkAttachment.ttf');
+            assertShape(shapeText(markFont, '\u{43E}\u{323} a'), {
+                glyphs: [16, 12, 1, 2], clusters: [0, 1, 2, 3], advances: [500, 0, 250, 500],
+                offsets: [[0, 0], [-300, 30], [0, 0], [0, 0]]
+            });
         });
 
         it('applies no arabic form to a character of the script run before the arabic run, like HarfBuzz', function() {
@@ -1449,9 +1593,28 @@ describe('bidi.mjs', function() {
 
     describe('the default arabic features of real fonts', function() {
         let rvrnFont;
+        const glyphsInTextOrder = (text, options) => arabicFont.shape(text, options)
+            .sort((positionA, positionB) => positionA.start - positionB.start)
+            .map(glyphPosition => glyphPosition.glyph.index);
 
         beforeEach(function() {
             rvrnFont = loadSync('./test/fonts/TestRVRN-CFF2.otf');
+        });
+
+        it('joins two arabic letters across a transparent format character or mark that ArabicShaping.txt does not list: Scheherazade, like HarfBuzz', function() {
+            // the beh before and after the character, in the order of the text (the run is not laid out from right to left
+            // around the format characters yet, see the zero width non-joiner above): hb-shape --shapers=ot --no-glyph-names
+            // --cluster-level=1 Scheherazade-Bold.ttf -u 0628,00AD,0628 [609=2+1498|3=1+0|932=0+439] (the same with 200F,
+            // 2060 and 034F)
+            const behForms = text => {
+                const glyphs = glyphsInTextOrder(text);
+                return [glyphs[0], glyphs[glyphs.length - 1]];
+            };
+            for (const char of ['\u{AD}', '\u{200F}', '\u{2060}', '\u{34F}']) {
+                assert.deepStrictEqual(behForms('\u{628}' + char + '\u{628}'), [932, 609], char.codePointAt(0).toString(16));
+            }
+            // the Arabic number sign is non-joining: -u 0628,0600,0628 [373=2+1505|1145=1+1046|373=0+1505]
+            assert.deepStrictEqual(behForms('\u{628}\u{600}\u{628}'), [373, 373]);
         });
 
         it('joins the arabic letters across a transparent Quranic mark outside the ranges of isArabicChar, like HarfBuzz', function() {
@@ -1496,9 +1659,6 @@ describe('bidi.mjs', function() {
             // from right to left yet, see above): hb-shape --shapers=ot --no-glyph-names --cluster-level=1
             // Scheherazade-Bold.ttf -u 0750,221A [1152=1+937|385=0+1505]; -u 08A0,221A [1152=1+937|392=0+1505];
             // --features=-rtlm -u 0750,221A [1151=1+937|385=0+1505]
-            const glyphsInTextOrder = (text, options) => arabicFont.shape(text, options)
-                .sort((positionA, positionB) => positionA.start - positionB.start)
-                .map(glyphPosition => glyphPosition.glyph.index);
             assert.deepStrictEqual(glyphsInTextOrder('\u{750}\u{221A}'), [385, 1152]);
             assert.deepStrictEqual(glyphsInTextOrder('\u{8A0}\u{221A}'), [392, 1152]);
             assert.deepStrictEqual(glyphsInTextOrder('\u{750}\u{221A}', { features: { rtlm: false } }), [385, 1151]);

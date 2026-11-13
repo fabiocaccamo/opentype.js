@@ -158,6 +158,22 @@ describe('char.mjs', function() {
             // the small waw, the Extended Arabic-Indic digits, the sindhi ampersand, a Latin letter, the zero width non-joiner
             assertJoiningType(['\u{600}', '\u{60C}', '\u{621}', '\u{660}', '\u{674}', '\u{6D4}', '\u{6DD}', '\u{6E5}', '\u{6F0}', '\u{6FD}', 'a', '\u{200C}'], 'U');
         });
+
+        it('gives T for the nonspacing marks, enclosing marks and format chars that ArabicShaping.txt does not list', function() {
+            // the soft hyphen, the left-to-right and right-to-left marks, the word joiner, the combining grapheme joiner,
+            // the combining grave, an enclosing circle, a musical combining mark outside the BMP (Mn)
+            assertJoiningType(['\u{AD}', '\u{200E}', '\u{200F}', '\u{2060}', '\u{34F}', '\u{300}', '\u{20DD}', '\u{1D167}'], 'T');
+        });
+
+        it('gives U for the format chars that ArabicShaping.txt lists as non-joining', function() {
+            // the Arabic number signs, the end of ayah, the pound mark above, the disputed end of ayah, the Mongolian vowel
+            // separator, the zero width non-joiner, the bidi isolates, the Kaithi number signs; each one between two behs:
+            // hb-shape --shapers=ot --no-positions Scheherazade-Bold.ttf -u 0628,<code point>,0628 gives isolated behs 373
+            assertJoiningType([
+                '\u{600}', '\u{601}', '\u{602}', '\u{603}', '\u{604}', '\u{605}', '\u{6DD}', '\u{890}', '\u{891}', '\u{8E2}',
+                '\u{180E}', '\u{200C}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{110BD}', '\u{110CD}'
+            ], 'U');
+        });
     });
 
     describe('getScriptRuns', function() {
@@ -183,13 +199,13 @@ describe('char.mjs', function() {
             assert.deepStrictEqual(runsOf(''), []);
         });
 
-        it('puts a char of no script in the run after it when its Script_Extensions have the script of that run and not the one before', function() {
-            // a tatweel and an Arabic haraka between a Latin word and an Arabic letter, like the ScriptRunIterator of Chromium
+        it('puts a char of the Common script in the run after it when its Script_Extensions have the script of that run and not the one before', function() {
+            // a tatweel and an Arabic comma between a Latin word and an Arabic letter, like the ScriptRunIterator of Chromium
             assert.deepStrictEqual(runsOf('a \u{640}\u{647}'), [[0, 2, 'Latn'], [2, 4, 'Arab']]);
-            assert.deepStrictEqual(runsOf('a\u{64E}\u{633}'), [[0, 1, 'Latn'], [1, 3, 'Arab']]);
+            assert.deepStrictEqual(runsOf('a\u{60C}\u{633}'), [[0, 1, 'Latn'], [1, 3, 'Arab']]);
             // the script of the next char of a script, not of a later one
             assert.deepStrictEqual(runsOf('a \u{640}\u{633} b'), [[0, 2, 'Latn'], [2, 5, 'Arab'], [5, 6, 'Latn']]);
-            assert.deepStrictEqual(runsOf('a\u{64E}\u{633} b'), [[0, 1, 'Latn'], [1, 4, 'Arab'], [4, 5, 'Latn']]);
+            assert.deepStrictEqual(runsOf('a\u{60C}\u{633} b'), [[0, 1, 'Latn'], [1, 4, 'Arab'], [4, 5, 'Latn']]);
             // the script of the next char of a script after other chars of no script
             assert.deepStrictEqual(runsOf('a\u{640}\u{64E}\u{633}'), [[0, 1, 'Latn'], [1, 4, 'Arab']]);
             assert.deepStrictEqual(runsOf('a\u{640}\u{640}\u{633}'), [[0, 1, 'Latn'], [1, 4, 'Arab']]);
@@ -200,6 +216,17 @@ describe('char.mjs', function() {
             assert.deepStrictEqual(runsOf('a\u{60C}'), [[0, 2, 'Latn']]);
             // a tatweel at the start of the text, in the run of the first char of a script
             assert.deepStrictEqual(runsOf('\u{640}\u{633}a'), [[0, 2, 'Arab'], [2, 3, 'Latn']]);
+        });
+
+        it('keeps a combining mark of the Inherited script in the run of its base, whatever its Script_Extensions, like the browsers', function() {
+            // an Arabic haraka (Script_Extensions Arab Syrc) after a Latin letter, before an Arabic letter
+            assert.deepStrictEqual(runsOf('a\u{64E}\u{633}'), [[0, 2, 'Latn'], [2, 3, 'Arab']]);
+            assert.deepStrictEqual(runsOf('a\u{64E}\u{633} b'), [[0, 2, 'Latn'], [2, 4, 'Arab'], [4, 5, 'Latn']]);
+            // a caron (Script_Extensions Cher Latn Tale) and a dot below (Cher Dupl Kana Latn Syrc) after a Greek and a Cyrillic
+            // letter, before a Latin word
+            assert.deepStrictEqual(runsOf('\u{3A0}\u{30C} W'), [[0, 3, 'Grek'], [3, 4, 'Latn']]);
+            assert.deepStrictEqual(runsOf('\u{3A0}\u{30C}W'), [[0, 2, 'Grek'], [2, 3, 'Latn']]);
+            assert.deepStrictEqual(runsOf('\u{43E}\u{323} a'), [[0, 3, 'Cyrl'], [3, 4, 'Latn']]);
         });
 
         it('splits a Latin pair around a Thai mark, which is of the Thai script', function() {
