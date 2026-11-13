@@ -130,8 +130,9 @@ describe('contextSubstitutionFormat3', function () {
         const substitutions = lookup(contextParams, featureLookups[0]);
 
         // Should produce [A'(3), B'(4)], NOT [3, 4, 3, 4] (old bug)
-        // the input A B, whose last glyph is at the offset 1
-        assert.deepEqual(substitutions, { substitutions: [3, 4], lastInputOffset: 1 });
+        // the single substitutions of format 2 (12) at the offsets 0 and 1, the input A B of two glyphs
+        const nestedSubstitutions = [{ offset: 0, id: 12, substitution: 3 }, { offset: 1, id: 12, substitution: 4 }];
+        assert.deepEqual(substitutions, { substitutions: nestedSubstitutions, inputLength: 2 });
     });
 
     it('should return null when context is too short', function () {
@@ -175,6 +176,6 @@ describe('contextSubstitutionFormat3', function () {
         const substitutions = lookup(contextParams, featureLookups[0]);
 
         // Only position 0 substituted: [A'(3)], position 1 untouched
-        assert.deepEqual(substitutions, { substitutions: [3], lastInputOffset: 1 });
+        assert.deepEqual(substitutions, { substitutions: [{ offset: 0, id: 12, substitution: 3 }], inputLength: 2 });
     });
 });

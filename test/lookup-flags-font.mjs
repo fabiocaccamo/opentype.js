@@ -174,6 +174,22 @@ function createMultipleLookup(glyphs, sequences) {
     return { lookupType: 2, lookupFlag: 0, subtables: [{ substFormat: 1, coverage: createCoverage(glyphs), sequences }] };
 }
 
+/**
+ * A lookup of one ligature substitution (format 1)
+ * @param {number} firstGlyph - the first component
+ * @param {number[]} components - the other components, in the order of the text
+ * @param {number} ligatureGlyph - the glyph that replaces the components
+ * @param {number} [lookupFlag=0]
+ * @returns {Object}
+ */
+function createLigatureLookup(firstGlyph, components, ligatureGlyph, lookupFlag = 0) {
+    return {
+        lookupType: 4,
+        lookupFlag,
+        subtables: [{ substFormat: 1, coverage: createCoverage([firstGlyph]), ligatureSets: [[{ ligGlyph: ligatureGlyph, components }]] }]
+    };
+}
+
 // MULTIPLE_C of LookupFlags.ttf: sub c by a acute;
 const multipleCLookup = createMultipleLookup([glyphIndexes.c], [[glyphIndexes.a, glyphIndexes.acute]]);
 
@@ -190,6 +206,7 @@ export {
     createCoverages,
     createSingleLookup,
     createMultipleLookup,
+    createLigatureLookup,
     multipleCLookup,
     subAcuteBLookup
 };

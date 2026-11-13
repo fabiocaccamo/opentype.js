@@ -1186,15 +1186,13 @@ describe('bidi.mjs', function() {
             assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{645}\u{650}\u{646}\u{6E1}\u{647}\u{64F}'), [1076, 744, 1135, 893, 1079, 1046]);
         });
 
-        itFailsUntilFixed('applies the nested ligature of a calt rule to an alef madda with a fatha: Scheherazade, like HarfBuzz',
-            'applyNestedLookupRecords (src/features/featureQuery.mjs): a nested lookup of type 4 is skipped (NESTED_SUBSTITUTION_TYPES), ' +
-            'so of the calt rule that adds a madda after the fatha (lookup 48, a multiple substitution) and removes the first one ' +
-            '(lookup 49, a ligature) only the first lookup applies, and the alef has two maddas',
-            function() {
-                // ccmp decomposes U+0622 into alef and madda: hb-shape --shapers=ot --no-glyph-names Scheherazade-Bold.ttf
-                // -u 0622,064E [1086=0@6,337+0|1075=0@32,80+0|273=0+357]
-                assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{622}\u{64E}'), [1086, 1075, 273]);
-            });
+        it('applies the nested ligature of a calt rule to an alef madda with a fatha: Scheherazade, like HarfBuzz', function() {
+            // of the calt rules, one adds a madda after the fatha (lookup 48, a multiple substitution) and one removes the first
+            // madda (lookup 49, a ligature of the madda and the fatha into the fatha), so the alef has one madda; ccmp decomposes
+            // U+0622 into alef and madda: hb-shape --shapers=ot --no-glyph-names Scheherazade-Bold.ttf
+            // -u 0622,064E [1086=0@6,337+0|1075=0@32,80+0|273=0+357]
+            assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{622}\u{64E}'), [1086, 1075, 273]);
+        });
 
         itFailsUntilFixed('lays out an arabic word with the letter ae from right to left: Scheherazade, like HarfBuzz',
             'arabicSentenceStartCheck (src/features/arab/contextCheck/arabicSentence.mjs): isArabicChar leaves U+06D3-06F9 out, ' +

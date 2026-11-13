@@ -1,5 +1,5 @@
 import { ContextParams } from '../tokenizer.mjs';
-import { SubstitutionAction } from './featureQuery.mjs';
+import { SubstitutionAction, getSubstitutionGlyphEdits } from './featureQuery.mjs';
 
 /**
  * The glyph indexes of a token that is not deleted: its glyph, or the glyphs of the multiple substitutions that replaced it
@@ -65,6 +65,18 @@ function replaceGlyph(glyphSequence, position, glyphIndexes, tag) {
 }
 
 /**
+ * Replace the glyphs of a single, multiple or ligature substitution (see getSubstitutionGlyphEdits)
+ * @param {SubstitutionAction} action
+ * @param {GlyphSequence} glyphSequence
+ * @param {number} position
+ */
+function replaceSubstitutedGlyphs(action, glyphSequence, position) {
+    for (const glyphEdit of getSubstitutionGlyphEdits(action)) {
+        replaceGlyph(glyphSequence, position + glyphEdit.offset, glyphEdit.glyphIndexes, action.tag);
+    }
+}
+
+/**
  * Apply single substitution format 1 and 2
  * @param {SubstitutionAction} action
  * @param {GlyphSequence} glyphSequence
@@ -72,33 +84,26 @@ function replaceGlyph(glyphSequence, position, glyphIndexes, tag) {
  * @returns {number} the number of glyphs that replaced the glyph at the position
  */
 function singleSubstitution(action, glyphSequence, position) {
-    replaceGlyph(glyphSequence, position, [action.substitution], action.tag);
+    replaceSubstitutedGlyphs(action, glyphSequence, position);
     return 1;
 }
 
 /**
- * Apply contextual substitutions (context and chaining context, all formats), whose substitutions are
- * indexed by the offset of the input glyphs from the current one, each one the glyph or the glyphs
- * (a multiple substitution, none deletes it) that replace the input glyph
+ * Apply contextual substitutions (context and chaining context, all formats): the substitutions of their nested
+ * lookups (single, multiple, ligature), in order, each one at its glyph and like the substitution of its type at the
+ * top level, with the feature tag of the contextual lookup
  * @param {SubstitutionAction} action its substitution is a ContextualMatch (see FeatureQuery)
  * @param {GlyphSequence} glyphSequence
  * @param {number} position
  * @returns {number} the number of glyphs from the glyph at the position to the last input glyph, after the
- * substitutions: like HarfBuzz, the lookup goes on after the input of the rule
+ * substitutions: like HarfBuzz, the lookup goes on after the input of the rule, which never ends before the glyph a
+ * nested lookup applied at, so after a nested ligature that takes glyphs past the input it goes on at the ligature glyph
  */
 function contextualSubstitution(action, glyphSequence, position) {
-    const { substitutions, lastInputOffset } = action.substitution;
-    let inputLength = lastInputOffset + 1;
-    // from the last input glyph, so that the offsets of the other ones still point to their glyph
-    for (let i = substitutions.length - 1; i >= 0; i--) {
-        // a hole in the substitutions keeps the glyph at this offset
-        if (substitutions[i] !== undefined) {
-            const glyphIndexes = Array.isArray(substitutions[i]) ? substitutions[i] : [substitutions[i]];
-            replaceGlyph(glyphSequence, position + i, glyphIndexes, action.tag);
-            inputLength += glyphIndexes.length - 1;
-        }
+    for (const { offset, id, substitution } of action.substitution.substitutions) {
+        applySubstitution(new SubstitutionAction({ id, tag: action.tag, substitution }), glyphSequence, position + offset);
     }
-    return inputLength;
+    return action.substitution.inputLength;
 }
 
 /**
@@ -110,7 +115,7 @@ function contextualSubstitution(action, glyphSequence, position) {
  * @returns {number} the number of glyphs that replaced the glyph at the position
  */
 function multipleSubstitutionFormat1(action, glyphSequence, position) {
-    replaceGlyph(glyphSequence, position, action.substitution, action.tag);
+    replaceSubstitutedGlyphs(action, glyphSequence, position);
     return action.substitution.length;
 }
 
@@ -151,11 +156,7 @@ function ligatureSubstitutionFormat1(action, glyphSequence, position) {
     if (componentOffsets.length) {
         mergeClusters(glyphSequence, position, position + componentOffsets[componentOffsets.length - 1] + 1);
     }
-    // from the last component, so that the offsets of the other ones still point to their glyph
-    for (let i = componentOffsets.length - 1; i >= 0; i--) {
-        replaceGlyph(glyphSequence, position + componentOffsets[i], [], action.tag);
-    }
-    replaceGlyph(glyphSequence, position, [action.substitution.ligGlyph], action.tag);
+    replaceSubstitutedGlyphs(action, glyphSequence, position);
     return 1;
 }
 
@@ -181,7 +182,8 @@ const SUBSTITUTIONS = {
  * @param {GlyphSequence} glyphSequence
  * @param {number} position the position of the current glyph of the substitution
  * @returns {number} the number of glyphs a lookup goes on after, from the current one: the glyphs that replaced
- * it (0 when deleted, 1 when nothing is substituted), or for a contextual rule the glyphs to its last input glyph
+ * it (0 when deleted, 1 when nothing is substituted), or for a contextual rule its inputLength (see ContextualMatch
+ * in featureQuery.mjs)
  */
 function applySubstitution(action, glyphSequence, position) {
     if (action instanceof SubstitutionAction && SUBSTITUTIONS[action.id]) {

@@ -14,8 +14,9 @@ The variants of LookupFlags.ttf:
 - LookupFlagsKernTable.ttf: without the GPOS table, with a kern table (format 0) of the pairs a acute -15
   and a b -60;
 - LookupFlagsNoGDEF.ttf: without the GDEF table;
-- LookupFlagsExtension.ttf: the lookups LOOKAHEAD_IGNORE_MARKS (ss03) and KERN_IGNORE_MARKS (kern) in
-  extension lookups (useExtension);
+- LookupFlagsExtension.ttf: the lookups LOOKAHEAD_IGNORE_MARKS (ss03), KERN_IGNORE_MARKS (kern), and
+  NESTED_LIGATURE_SKIPPED_MARK (ss37) with its nested ligature LIGATURE_AT_MULTIPLE_IGNORE_MARKS in extension
+  lookups (useExtension);
 - LookupFlagsEmptyContextInput.ttf: the ContextSubst format 3 of ss01 (INPUT_IGNORE_MARKS) with a
   GlyphCount of 0;
 - LookupFlagsEmptyChainInput.ttf: the ChainContextSubst format 3 of ss02 (BACKTRACK_IGNORE_MARKS) with an
@@ -30,6 +31,12 @@ The variants of LookupFlags.ttf:
   input after the nested multiple substitution;
 - LookupFlagsNestedSequenceIndexPastEndThenValid.ttf: LookupFlagsNestedSequenceIndexPastEnd.ttf with a third lookup record of
   ss23, SUB_ACUTE_B at the sequence index 2;
+- LookupFlagsNestedLigatureSequenceIndex.ttf: the second lookup record of ss45
+  (NESTED_LIGATURE_THREE_COMPONENTS_THEN_SINGLE) at the sequence index 1, the acute after the ligature;
+- LookupFlagsNestedLigatureRecordOrder.ttf: the lookup records of ss46 (NESTED_SINGLE_THEN_LIGATURE) in the reverse order,
+  the ligature at the sequence index 1 first;
+- LookupFlagsNestedMultipleThreeSequenceIndex.ttf: the second lookup record of ss54 (NESTED_MULTIPLE_THREE_GLYPHS_THEN_SINGLE)
+  at the sequence index 2, the third glyph of the nested multiple substitution;
 - LookupFlagsNestedDeletion.ttf: MULTIPLE_C into no glyph (sub c by NULL;), the second lookup record of ss23 at the sequence
   index 0;
 - LookupFlagsNestedDeletionSkippedMark.ttf: MULTIPLE_C into no glyph (sub c by NULL;), the second lookup record of ss24
@@ -425,6 +432,145 @@ lookup NESTED_MULTIPLE_C_B_A_THEN_SUB_A {
 
 feature ss34 { lookup NESTED_MULTIPLE_B_A_B; } ss34;
 feature ss35 { lookup NESTED_MULTIPLE_C_B_A_THEN_SUB_A; } ss35;
+
+# a ligature nested in a contextual rule matches its components from the glyph of its lookup record with its own lookupFlag,
+# past the input of the rule too, and the later lookup records point into an input that lost as many input glyphs after
+# the ligature glyph as the components it removed, whichever glyphs these components were
+lookup LIGATURE_A_ACUTE {
+    sub a acute by a.alt;
+} LIGATURE_A_ACUTE;
+
+lookup NESTED_LIGATURE_INPUT {
+    sub a' lookup LIGATURE_NO_FLAG b' c;
+} NESTED_LIGATURE_INPUT;
+
+lookup NESTED_LIGATURE_SKIPPED_MARK {
+    sub a' lookup LIGATURE_AT_MULTIPLE_IGNORE_MARKS acute' b';
+} NESTED_LIGATURE_SKIPPED_MARK;
+
+lookup NESTED_LIGATURE_PAST_INPUT {
+    sub a' lookup LIGATURE_NO_FLAG b;
+} NESTED_LIGATURE_PAST_INPUT;
+
+lookup NESTED_LIGATURE_THEN_SINGLE {
+    sub a' lookup LIGATURE_NO_FLAG b' lookup SUB_ACUTE_B acute';
+} NESTED_LIGATURE_THEN_SINGLE;
+
+lookup NESTED_LIGATURE_THEN_PAST_END {
+    sub a' lookup LIGATURE_NO_FLAG b' acute' lookup SUB_ACUTE_B;
+} NESTED_LIGATURE_THEN_PAST_END;
+
+lookup NESTED_LIGATURE_RULE_IGNORE_MARKS {
+    lookupflag IgnoreMarks;
+    sub a' lookup LIGATURE_NO_FLAG b';
+} NESTED_LIGATURE_RULE_IGNORE_MARKS;
+
+lookup NESTED_LIGATURE_SKIPPED_BY_RULE {
+    lookupflag IgnoreMarks;
+    sub a' lookup LIGATURE_A_ACUTE b' lookup SUB_ACUTE_B;
+} NESTED_LIGATURE_SKIPPED_BY_RULE;
+
+feature ss36 { lookup NESTED_LIGATURE_INPUT; } ss36;
+feature ss37 { lookup NESTED_LIGATURE_SKIPPED_MARK; } ss37;
+feature ss38 { lookup NESTED_LIGATURE_PAST_INPUT; } ss38;
+feature ss39 { lookup NESTED_LIGATURE_THEN_SINGLE; } ss39;
+feature ss40 { lookup NESTED_LIGATURE_THEN_PAST_END; } ss40;
+feature ss41 { lookup NESTED_LIGATURE_RULE_IGNORE_MARKS; } ss41;
+feature ss42 { lookup NESTED_LIGATURE_SKIPPED_BY_RULE; } ss42;
+
+# like HarfBuzz, the input of a rule never ends before the glyph a nested lookup applied at: after a nested ligature that
+# takes glyphs past the input the lookup goes on at the ligature glyph, which the rule of ss43 matches again, and the
+# second rule of ss44 does not go back to the b before it
+lookup LIGATURE_A_B_TO_A {
+    sub a b by a;
+} LIGATURE_A_B_TO_A;
+
+lookup LIGATURE_A_B_C {
+    sub a b c by a_b_c;
+} LIGATURE_A_B_C;
+
+lookup NESTED_LIGATURE_REMATCH {
+    sub a' lookup LIGATURE_A_B_TO_A b;
+} NESTED_LIGATURE_REMATCH;
+
+lookup NESTED_LIGATURE_PAST_INPUT_STEP_BACK {
+    sub b' lookup SUB_B a_b_c;
+    sub a' lookup LIGATURE_A_B_C b c;
+} NESTED_LIGATURE_PAST_INPUT_STEP_BACK;
+
+# a nested ligature of three components removes the two input glyphs after it (the second lookup record at the sequence
+# index 1 in LookupFlagsNestedLigatureSequenceIndex.ttf), and a ligature at the sequence index 1 keeps the input glyph
+# before it (the lookup records in the reverse order in LookupFlagsNestedLigatureRecordOrder.ttf)
+lookup NESTED_LIGATURE_THREE_COMPONENTS_THEN_SINGLE {
+    sub a' lookup LIGATURE_A_B_C b' c' acute' lookup SUB_ACUTE_B;
+} NESTED_LIGATURE_THREE_COMPONENTS_THEN_SINGLE;
+
+lookup NESTED_SINGLE_THEN_LIGATURE {
+    sub b' lookup SUB_ACUTE_B a' lookup LIGATURE_NO_FLAG b';
+} NESTED_SINGLE_THEN_LIGATURE;
+
+# a nested ligature of the glyphs of two tokens, the a of the glyphs of c and the b after it (ss47), of the glyphs of a
+# nested multiple substitution (ss48), and at a glyph its lookupFlag ignores (ss49)
+lookup NESTED_MULTIPLE_THEN_LIGATURE {
+    sub c' lookup MULTIPLE_C_A_B lookup LIGATURE_NO_FLAG;
+} NESTED_MULTIPLE_THEN_LIGATURE;
+
+lookup LIGATURE_ACUTE_B_IGNORE_MARKS {
+    lookupflag IgnoreMarks;
+    sub acute b by acute.alt;
+} LIGATURE_ACUTE_B_IGNORE_MARKS;
+
+lookup NESTED_LIGATURE_AT_IGNORED_GLYPH {
+    sub acute' lookup LIGATURE_ACUTE_B_IGNORE_MARKS b;
+} NESTED_LIGATURE_AT_IGNORED_GLYPH;
+
+# nested lookups the fork does not apply yet: an alternate substitution (ss50) and a contextual lookup (ss51)
+lookup ALTERNATE_A {
+    sub a from [a.alt];
+} ALTERNATE_A;
+
+lookup NESTED_ALTERNATE {
+    sub a' lookup ALTERNATE_A b' lookup SUB_ACUTE_B;
+} NESTED_ALTERNATE;
+
+lookup NESTED_CONTEXTUAL {
+    sub a' lookup NESTED_LIGATURE_PAST_INPUT b;
+} NESTED_CONTEXTUAL;
+
+feature ss43 { lookup NESTED_LIGATURE_REMATCH; } ss43;
+feature ss44 { lookup NESTED_LIGATURE_PAST_INPUT_STEP_BACK; } ss44;
+feature ss45 { lookup NESTED_LIGATURE_THREE_COMPONENTS_THEN_SINGLE; } ss45;
+feature ss46 { lookup NESTED_SINGLE_THEN_LIGATURE; } ss46;
+feature ss47 { lookup MULTIPLE_C_B_A; lookup NESTED_LIGATURE_PAST_INPUT; } ss47;
+feature ss48 { lookup NESTED_MULTIPLE_THEN_LIGATURE; } ss48;
+feature ss49 { lookup NESTED_LIGATURE_AT_IGNORED_GLYPH; } ss49;
+feature ss50 { lookup NESTED_ALTERNATE; } ss50;
+feature ss51 { lookup NESTED_CONTEXTUAL; } ss51;
+
+# a nested ligature at the sequence index 1 that takes glyphs past the input: the input ends at the ligature glyph, not at
+# the current glyph, so the first rule of ss52 does not go back to the b before a_b_c; a later lookup record at the mark
+# that a nested ligature skips (ss53); a nested multiple substitution into three glyphs, the second lookup record at the
+# sequence index 2 in LookupFlagsNestedMultipleThreeSequenceIndex.ttf (ss54)
+lookup NESTED_LIGATURE_PAST_INPUT_AT_LATER_RECORD {
+    sub b' lookup SUB_B a_b_c;
+    sub b' a' lookup LIGATURE_A_B_C b c;
+} NESTED_LIGATURE_PAST_INPUT_AT_LATER_RECORD;
+
+lookup NESTED_LIGATURE_SKIPPED_MARK_THEN_SINGLE {
+    sub a' lookup LIGATURE_AT_MULTIPLE_IGNORE_MARKS acute' lookup SUB_ACUTE_B b';
+} NESTED_LIGATURE_SKIPPED_MARK_THEN_SINGLE;
+
+lookup MULTIPLE_C_A_ACUTE_B {
+    sub c by a acute b;
+} MULTIPLE_C_A_ACUTE_B;
+
+lookup NESTED_MULTIPLE_THREE_GLYPHS_THEN_SINGLE {
+    sub c' lookup MULTIPLE_C_A_ACUTE_B lookup SUB_ACUTE_B;
+} NESTED_MULTIPLE_THREE_GLYPHS_THEN_SINGLE;
+
+feature ss52 { lookup NESTED_LIGATURE_PAST_INPUT_AT_LATER_RECORD; } ss52;
+feature ss53 { lookup NESTED_LIGATURE_SKIPPED_MARK_THEN_SINGLE; } ss53;
+feature ss54 { lookup NESTED_MULTIPLE_THREE_GLYPHS_THEN_SINGLE; } ss54;
 
 lookup KERN_IGNORE_MARKS {
     lookupflag IgnoreMarks;
@@ -865,7 +1011,12 @@ feature ccmp { lookup MULTIPLE_KOKAI; } ccmp;
 KERN_TABLE_PAIRS = {("a", "acute"): -15, ("a", "b"): -60}
 
 # the lookups of LookupFlagsExtension.ttf in extension lookups
-EXTENSION_LOOKUP_NAMES = ["LOOKAHEAD_IGNORE_MARKS", "KERN_IGNORE_MARKS"]
+EXTENSION_LOOKUP_NAMES = [
+    "LOOKAHEAD_IGNORE_MARKS",
+    "KERN_IGNORE_MARKS",
+    "LIGATURE_AT_MULTIPLE_IGNORE_MARKS",
+    "NESTED_LIGATURE_SKIPPED_MARK",
+]
 
 
 def draw_rectangle():
@@ -971,10 +1122,24 @@ def one_component_ligature(font):
     ligature.Component = []
 
 
+def get_rule_lookup_records(subtable):
+    """The lookup records of the one rule of a contextual subtable of format 3, or of a context subtable of format 1."""
+    if subtable.Format == 3:
+        return subtable.SubstLookupRecord
+    assert subtable.Format == 1 and len(subtable.SubRuleSet) == 1 and len(subtable.SubRuleSet[0].SubRule) == 1
+    return subtable.SubRuleSet[0].SubRule[0].SubstLookupRecord
+
+
 def set_nested_sequence_index(font, feature_tag, sequence_index):
     lookup_type, subtable = get_feature_subtable(font, feature_tag)
-    assert lookup_type in (5, 6) and subtable.Format == 3
-    subtable.SubstLookupRecord[1].SequenceIndex = sequence_index
+    assert lookup_type in (5, 6)
+    get_rule_lookup_records(subtable)[1].SequenceIndex = sequence_index
+
+
+def reverse_nested_lookup_records(font, feature_tag):
+    lookup_type, subtable = get_feature_subtable(font, feature_tag)
+    assert lookup_type in (5, 6)
+    get_rule_lookup_records(subtable).reverse()
 
 
 def append_nested_lookup_record(font, feature_tag, sequence_index):
@@ -1081,6 +1246,12 @@ def main():
     fonts["LookupFlagsNestedSequenceIndexPastEndThenValid.ttf"] = build_font()
     set_nested_sequence_index(fonts["LookupFlagsNestedSequenceIndexPastEndThenValid.ttf"], "ss23", 3)
     append_nested_lookup_record(fonts["LookupFlagsNestedSequenceIndexPastEndThenValid.ttf"], "ss23", 2)
+    fonts["LookupFlagsNestedLigatureSequenceIndex.ttf"] = build_font()
+    set_nested_sequence_index(fonts["LookupFlagsNestedLigatureSequenceIndex.ttf"], "ss45", 1)
+    fonts["LookupFlagsNestedLigatureRecordOrder.ttf"] = build_font()
+    reverse_nested_lookup_records(fonts["LookupFlagsNestedLigatureRecordOrder.ttf"], "ss46")
+    fonts["LookupFlagsNestedMultipleThreeSequenceIndex.ttf"] = build_font()
+    set_nested_sequence_index(fonts["LookupFlagsNestedMultipleThreeSequenceIndex.ttf"], "ss54", 2)
     fonts["LookupFlagsNestedDeletion.ttf"] = build_font()
     nested_deletion(fonts["LookupFlagsNestedDeletion.ttf"], "ss23")
     fonts["LookupFlagsNestedDeletionSkippedMark.ttf"] = build_font()
