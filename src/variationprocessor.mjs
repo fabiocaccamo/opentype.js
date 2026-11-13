@@ -581,7 +581,7 @@ export class VariationProcessor {
 
     /**
      * Returns the advance width of a glyph at the given variation coordinates,
-     * without modifying the glyph.
+     * without modifying the glyph: a varied advance width is never below 0, like HarfBuzz and the instancer of fontTools.
      * @param {Glyph|number} glyph - Glyph or glyph index.
      * @param {Object} [coords] - Variation coordinates, the current variation if omitted.
      * @returns {number} Advance width in font units.
@@ -590,15 +590,17 @@ export class VariationProcessor {
         if(Number.isInteger(glyph)) {
             glyph = this.font.glyphs.get(glyph);
         }
+        let variedAdvanceWidth;
         if(this.font.tables.hvar) {
-            return Math.round(glyph.advanceWidth + this.getVariableAdjustment(glyph.index, 'hvar', 'advanceWidth', coords));
-        }
-        if(this.gvar()) {
+            variedAdvanceWidth = glyph.advanceWidth + this.getVariableAdjustment(glyph.index, 'hvar', 'advanceWidth', coords);
+        } else if(this.gvar()) {
             // without HVAR the advance width varies through the gvar phantom points
             const phantomDeltas = this.getPhantomPointDeltas(glyph, coords);
-            return Math.round(glyph.advanceWidth + phantomDeltas.right - phantomDeltas.left);
+            variedAdvanceWidth = glyph.advanceWidth + phantomDeltas.right - phantomDeltas.left;
+        } else {
+            return glyph.advanceWidth;
         }
-        return glyph.advanceWidth;
+        return Math.max(0, Math.round(variedAdvanceWidth));
     }
 
     /**

@@ -640,12 +640,6 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
     const cffTable = font.tables.cff2 || font.tables.cff;
     coords = coords || font.variation && font.variation.get();
 
-    if (!glyph.getBlendPath) {
-        glyph.getBlendPath = function(variationCoords) {
-            return parseCFFCharstring(font, glyph, code, version, variationCoords);
-        };
-    }
-
     if (font.isCIDFont || version > 1) {
         const fdIndex = cffTable.topDict._fdSelect ? cffTable.topDict._fdSelect[glyph.index] : 0;
         const fdDict = cffTable.topDict._fdArray[fdIndex];

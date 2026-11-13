@@ -16,11 +16,15 @@ export function isArabicChar(c) {
 }
 
 /**
- * The Unicode Joining_Type of a char of the Arabic block (ArabicShaping.txt, Unicode 16.0.0), like the Arabic shaper of
- * HarfBuzz, which joins the join causing chars (the tatweel and the zero width joiner U+200D) as dual-joining letters:
- * D for the dual-joining letters and the join causing chars, R for the right-joining letters, T for the transparent
- * chars (most marks), U for the non-joining chars (e.g. the hamza, the digits, the zero width non-joiner) and the other
- * chars outside the Arabic block
+ * The Unicode Joining_Type of a char, like the Arabic shaper of HarfBuzz, which joins the join causing chars (the
+ * tatweel and the zero width joiner U+200D) as dual-joining letters: D for the dual-joining letters of the Arabic block
+ * and the join causing chars, R for the right-joining letters of the Arabic block, T for the transparent chars, the
+ * nonspacing and enclosing marks and the format chars (e.g. the harakat, U+0300, U+00AD SOFT HYPHEN, U+200F
+ * RIGHT-TO-LEFT MARK, U+2060 WORD JOINER) but the ones ArabicShaping.txt lists as non-joining, U for the other chars,
+ * the non-joining ones (e.g. the hamza, the digits, U+0600 ARABIC NUMBER SIGN, the zero width non-joiner U+200C). The
+ * D, R and non-joining lists are the ones of ArabicShaping.txt, Unicode 16.0.0; the nonspacing and enclosing marks and
+ * the format chars are the ones of the Unicode version of the JavaScript engine (its \p{Mn}, \p{Me} and \p{Cf}), so a
+ * mark newer than that version is U there
  * @param {string} char a single char
  * @return {string}
  */
@@ -31,11 +35,11 @@ export function getArabicJoiningType(char) {
     if (/[\u0622-\u0625\u0627\u0629\u062F-\u0632\u0648\u0671-\u0673\u0675-\u0677\u0688-\u0699\u06C0\u06C3-\u06CB\u06CD\u06CF\u06D2\u06D3\u06D5\u06EE\u06EF]/.test(char)) {
         return 'R';
     }
-    // eslint-disable-next-line no-misleading-character-class
-    if (/[\u0610-\u061A\u061C\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/.test(char)) {
-        return 'T';
+    // the format chars that ArabicShaping.txt lists as non-joining
+    if (/[\u0600-\u0605\u06DD\u0890\u0891\u08E2\u180E\u200C\u2066-\u2069\u{110BD}\u{110CD}]/u.test(char)) {
+        return 'U';
     }
-    return 'U';
+    return /[\p{Mn}\p{Me}\p{Cf}]/u.test(char) ? 'T' : 'U';
 }
 
 /**
@@ -193,15 +197,16 @@ function getNextScripts(scripts) {
 /**
  * Check if a char of no script starts the run of the text after it rather than continuing the run before it, like the
  * ScriptRunIterator of Chromium: when its Script_Extensions (see getCharScriptExtensions) have the script of the next
- * char of a script and not the script of the run before it (e.g. a tatweel or an Arabic haraka after a Latin word,
- * before an Arabic letter)
+ * char of a script and not the script of the run before it (e.g. a tatweel or an Arabic comma after a Latin word,
+ * before an Arabic letter). A char of the Inherited script (a combining mark) never does: it stays with the char
+ * before it, its base, like the browsers
  * @param {string} char - a char of no script (see getCharTextScript)
  * @param {string|undefined} runScript - the script of the run before the char, undefined at the start of the text
  * @param {string|undefined} nextScript - the script of the first char of a script after the char
  * @return {boolean}
  */
 function startsNextScriptRun(char, runScript, nextScript) {
-    if (runScript === undefined || nextScript === undefined) {
+    if (runScript === undefined || nextScript === undefined || getCharScript(char) === 'Zinh') {
         return false;
     }
     const extensions = getCharScriptExtensions(char);
@@ -210,11 +215,12 @@ function startsNextScriptRun(char, runScript, nextScript) {
 
 /**
  * Split a text into its script runs, the runs of chars that HarfBuzz shapes with one script: the chars of a run have
- * the same script (see getCharTextScript), the chars of no script are in the run of the char before them, unless their
- * Script_Extensions take them to the run after them (see startsNextScriptRun), or at the start of the text in the run
- * of the first char of a script after them (the script that hb_buffer_guess_segment_properties gives a text), like the
- * itemization of the browsers. Not yet the paired brackets of the browsers (Unicode Standard Annex #24): a closing
- * bracket is in the run of the char before it, not in the run of its opening bracket
+ * the same script (see getCharTextScript), the chars of no script are in the run of the char before them, unless the
+ * Script_Extensions of a char of the Common script take it to the run after it (see startsNextScriptRun), or at the
+ * start of the text in the run of the first char of a script after them (the script that
+ * hb_buffer_guess_segment_properties gives a text), like the itemization of the browsers. Not yet the paired brackets
+ * of the browsers (Unicode Standard Annex #24): a closing bracket is in the run of the char before it, not in the run
+ * of its opening bracket
  * @param {string[]} chars - the chars of the text, a code point each
  * @return {Array<{start: number, end: number, script: string|undefined}>} the [start, end) indexes of the chars of
  * each run in the text, and the ISO 15924 code of its script, undefined for a text of chars of no script only

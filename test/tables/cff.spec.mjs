@@ -321,6 +321,22 @@ describe('tables/cff.mjs', function () {
         );
     });
 
+    it('varies the outline of a CFF2 glyph whose outline was never read, in getTransform and toPathData', function() {
+        const hintedVariableFont = './test/fonts/regression/TestCFF2-HintedVariable-subset.otf';
+        // the bounds of A at wght 900: hb-shape --glyphs --no-glyph-names --show-extents --variations=wght=900
+        // TestCFF2-HintedVariable-subset.otf '[2]' [2=0+680<10,652,655,-652>] (at the default: <5,675,648,-675>)
+        const boundingBox = loadSync(hintedVariableFont).variation.getTransform(2, { wght: 900 }).path.getBoundingBox();
+        assert.deepStrictEqual([boundingBox.x1, boundingBox.y1, boundingBox.x2, boundingBox.y2], [10, 0, 665, 652]);
+        // its first contour: python -c "from fontTools.ttLib import TTFont; from fontTools.pens.recordingPen import
+        // RecordingPen; font = TTFont('TestCFF2-HintedVariable-subset.otf'); pen = RecordingPen();
+        // font.getGlyphSet(location={'wght': 900})['A'].draw(pen); print(pen.value[:8])"
+        // [('moveTo', ((10.0, 0),)), ('lineTo', ((220.0, 0),)), ('lineTo', ((220.0, 59.0),)), ('lineTo', ((131.0, 74.0),)),
+        // ('lineTo', ((114.0, 74.0),)), ('lineTo', ((10.0, 59.0),)), ('lineTo', ((10.0, 0.0),)), ('closePath', ())]
+        const font = loadSync(hintedVariableFont);
+        const pathData = font.glyphs.get(2).toPathData({ variation: { wght: 900 }, decimalPlaces: 0, optimize: false, flipY: false }, font);
+        assert.strictEqual(pathData.split('Z')[0], 'M10 0L220 0L220 59L131 74L114 74L10 59L10 0');
+    });
+
     describe('advance widths', function() {
         // TestCFF1-WidthMismatch.otf (test/generate-cff-width-fonts.py --hmtx-mismatch): each glyph gives
         // its charstring width with another operator (rmoveto, endchar, hmoveto, vmoveto, hstem, hstemhm

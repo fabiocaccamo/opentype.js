@@ -534,10 +534,12 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                               Unicode Script property of its characters, the characters of no script (Common,
  *                               Inherited, Unknown: digits, punctuation, spaces, most combining marks) and the variation
  *                               selectors in the run of the character before them (of the first character of a script at
- *                               the start of the text), or in the run after them when their Unicode Script_Extensions have
- *                               its script and not the one of the run before them (e.g. a tatweel or an Arabic haraka
- *                               between a Latin word and an Arabic letter), not yet the paired brackets of the browsers
- *                               (a closing bracket is in the run of the character before it), and each run takes the
+ *                               the start of the text), the characters of the Common script in the run after them when
+ *                               their Unicode Script_Extensions have its script and not the one of the run before them
+ *                               (e.g. a tatweel or an Arabic comma between a Latin word and an Arabic letter), the
+ *                               combining marks of the Inherited script never (they stay with their base), not yet the
+ *                               paired brackets of the browsers (a closing bracket is in the run of the character before
+ *                               it), and each run takes the
  *                               OpenType tag of its script: latn, cyrl, grek, armn, cham... (kana for Hiragana and Katakana; dev3, dev2, then
  *                               deva for Devanagari and the other Indic scripts; DFLT for a text of no script). Each
  *                               script run is shaped on
@@ -636,9 +638,10 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                                 or a lookup recompute them, not a direct change of the objects of the tables after a
  *                                 text was laid out.
  *                                 See https://www.microsoft.com/typography/otspec/featuretags.htm
- * @property {Object} [variation] - variation coordinates of the advances, the GPOS values and the GSUB feature variations
- *                                  (not yet the GPOS feature variations, see Font.shape) (e.g. `{ wght: 700 }`), the
- *                                  current variation of the font if omitted
+ * @property {Object} [variation] - variation coordinates of the advances, the GPOS values, the GSUB feature variations
+ *                                  (not yet the GPOS feature variations, see Font.shape) and the outlines drawn by
+ *                                  getPath, getPaths, draw and drawPoints (e.g. `{ wght: 700 }`), the current variation
+ *                                  of the font if omitted
  * @property {boolean} [hinting=false] - whether to apply font hinting to the outlines
  * @property {integer} [usePalette=0] For COLR/CPAL fonts, the zero-based index of the color palette to use. (Use `Font.palettes.get()` to get the available palettes)
  * @property {boolean} [drawLayers=true] For COLR/CPAL fonts, this can be turned to false in order to draw the fallback glyphs instead

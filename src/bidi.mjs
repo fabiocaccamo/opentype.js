@@ -286,21 +286,22 @@ function getScriptRunFeatureTags(shaper, directionTags) {
  * Apply the enabled features of its shaper and of its direction to a script run (see getScriptRunFeatureTags), with
  * the script tag of the run that the GSUB table has (see selectScriptTag) and the language of the features. Like the
  * direction of a buffer of HarfBuzz, the direction features of a run are the ones of the direction of its script (see
- * getDirectionFeatureTags), and like a buffer of HarfBuzz, it starts with the initial random state (see
- * FeatureQuery.startScriptRun).
+ * getDirectionFeatureTags), and like a buffer of HarfBuzz, it starts with the initial random state and has a maximum
+ * number of glyphs of its own (see FeatureQuery.startScriptRun).
  * @param {{tokens: Token[], scriptTags: string[]}} run
  */
 function applyScriptRunFeatures(run) {
     const shaper = getScriptRunShaper(run.scriptTags);
-    // a shaper with no registered features is skipped, an empty list of features still applies the required feature
-    if (!this.featuresTags[shaper]) {
+    // a shaper with no registered features is skipped, an empty list of features still applies the required feature;
+    // a font without a GSUB table has no lookup to apply (the Layout methods create the table when a lookup is added)
+    if (!this.featuresTags[shaper] || !this.query.font.tables.gsub) {
         return;
     }
     checkGlyphIndexStatus.call(this);
     const script = selectScriptTag(this.query.font.substitution, run.scriptTags);
     const directionTags = getDirectionFeatureTags(run.scriptTags);
     const tags = getScriptRunFeatureTags.call(this, shaper, directionTags);
-    this.query.startScriptRun(directionTags);
+    this.query.startScriptRun(directionTags, run.tokens.length);
     switch (shaper) {
         case 'arab':
             applyArabicFeatures.call(this, run.tokens, script, tags, directionTags);

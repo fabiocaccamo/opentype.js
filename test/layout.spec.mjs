@@ -463,6 +463,11 @@ describe('layout.mjs', function() {
             assert.equal(layout.getCoverageIndex(cov2, 55), -1);
             assert.equal(layout.getCoverageIndex(cov2, 70), -1);
         });
+
+        it('finds no glyph in a coverage table of no valid format', function() {
+            assert.strictEqual(layout.getCoverageIndex({ glyphs: [0x4f] }, 0x4f), -1);
+            assert.strictEqual(layout.getCoverageIndex({ format: 3, glyphs: [0x4f] }, 0x4f), -1);
+        });
     });
 
     describe('getGdefGlyphClass and isMarkGlyph', function() {

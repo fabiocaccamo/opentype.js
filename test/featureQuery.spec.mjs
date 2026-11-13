@@ -6,6 +6,7 @@ import {
     glyphIndexes,
     createLookupFlagsFont,
     createLayoutTable,
+    createScriptsLayoutTable,
     createCoverage,
     createCoverages,
     createSingleLookup,
@@ -481,8 +482,18 @@ describe('featureQuery.mjs', function() {
             const query = createAlternateQuery([alternateLookup]);
             const randomNumbers = () => [query.getRandomNumber(), query.getRandomNumber(), query.getRandomNumber(), query.getRandomNumber()];
             assert.deepStrictEqual(randomNumbers(), [48271, 182605794, 1291390782, 1716587427]);
-            query.startScriptRun(['ltra', 'ltrm']);
+            query.startScriptRun(['ltra', 'ltrm'], 1);
             assert.deepStrictEqual(randomNumbers(), [48271, 182605794, 1291390782, 1716587427]);
+        });
+
+        it('gives each run a maximum of 64 glyphs per character, at least 16384, like the max_len of a buffer of HarfBuzz', function() {
+            // HB_BUFFER_MAX_LEN_FACTOR and HB_BUFFER_MAX_LEN_MIN (hb_buffer_t::enter)
+            const query = createAlternateQuery([alternateLookup]);
+            query.isMaxGlyphCountExceeded = true;
+            query.startScriptRun(['ltra', 'ltrm'], 300);
+            assert.deepStrictEqual([query.maxGlyphCount, query.isMaxGlyphCountExceeded], [19200, false]);
+            query.startScriptRun(['rtla', 'rtlm'], 3);
+            assert.deepStrictEqual([query.maxGlyphCount, query.isMaxGlyphCountExceeded], [16384, false]);
         });
 
         it('substitutes a random alternate for rand at the value 255, the alternate of the value otherwise', function() {
@@ -508,7 +519,7 @@ describe('featureQuery.mjs', function() {
             // 1 joins the value of the features option (rtlm=2 is 3 there, rtlm=256 is 1), which a left-to-right run keeps
             const getRtlmValue = (featuresOption, directionTags) => {
                 const query = new FeatureQuery(createLookupFlagsFont(), undefined, featuresOption);
-                query.startScriptRun(directionTags);
+                query.startScriptRun(directionTags, 1);
                 return query.getFeatureValue('rtlm');
             };
             const featuresOptions = [undefined, { rtlm: 2 }, { rtlm: 256 }];
@@ -1379,6 +1390,48 @@ describe('featureQuery.mjs', function() {
         it('does not match a character with no glyph index in the backtrack of a rule', function() {
             // a coverage table lists glyph IDs (OpenType, Common Table Formats), and Z has none
             assert.deepStrictEqual(createNotdefBacktrackFont().stringToGlyphIndexes('Za'), [null, glyphA]);
+        });
+    });
+
+    // a malformed coverage table of format 1 whose glyphs are not in glyph index order, which HarfBuzz looks up with a
+    // binary search, at the top level and in a nested lookup alike. The reference font, built with fontBuilder and feaLib
+    // (the glyphs of LookupFlags.ttf up to b.alt, lookup SINGLE { sub c by a.alt; sub b by b.alt; } SINGLE; feature liga
+    // { lookup SINGLE; } liga; feature calt { sub b' lookup SINGLE; } calt;), its coverage [b c] patched to [c b]
+    describe('a coverage table whose glyphs are not sorted', function() {
+        const { b: glyphB, c: glyphC } = glyphIndexes;
+
+        function createUnsortedCoverageFont() {
+            const singleLookup = {
+                lookupType: 1,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 2, coverage: createCoverage([glyphC, glyphB]), substitute: [glyphIndexes['b.alt'], glyphIndexes['a.alt']] }]
+            };
+            const chainingLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    backtrackCoverage: [],
+                    inputCoverage: [createCoverage([glyphB])],
+                    lookaheadCoverage: [],
+                    lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }]
+                }]
+            };
+            return createLookupFlagsFont({ gsub: createScriptsLayoutTable({ latn: [['liga', [0]], ['calt', [1]]] }, [singleLookup, chainingLookup]) });
+        }
+
+        it('looks a glyph up with a binary search at the top level, like HarfBuzz', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 --features=calt=0 unsorted.ttf -u 0062 [2=0+500]; -u 0063 [8=0+500]
+            const font = createUnsortedCoverageFont();
+            assert.deepStrictEqual(font.stringToGlyphIndexes('b', { features: { calt: false } }), [glyphB]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('c', { features: { calt: false } }), [glyphIndexes['b.alt']]);
+        });
+
+        it('looks a glyph up with a binary search in a nested lookup, like HarfBuzz', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 --features=liga=0 unsorted.ttf -u 0062 [2=0+500]; -u 0063 [3=0+500]
+            const font = createUnsortedCoverageFont();
+            assert.deepStrictEqual(font.stringToGlyphIndexes('b', { features: { liga: false } }), [glyphB]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('c', { features: { liga: false } }), [glyphC]);
         });
     });
 

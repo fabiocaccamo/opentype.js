@@ -167,6 +167,10 @@ function cffGlyphLoader(font, index, parseCFFCharstring, charstring, version) {
             path.unitsPerEm = font.unitsPerEm;
             return path;
         };
+        // the outline at variation coordinates, the current variation of the font if omitted (see getTransform)
+        glyph.getBlendPath = function(variationCoords) {
+            return parseCFFCharstring(font, glyph, charstring, version, variationCoords);
+        };
 
         return glyph;
     };
