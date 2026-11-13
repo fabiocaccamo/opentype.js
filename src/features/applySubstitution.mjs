@@ -2,7 +2,7 @@ import { ContextParams } from '../tokenizer.mjs';
 import { SubstitutionAction, getSubstitutionGlyphEdits } from './featureQuery.mjs';
 import {
     getLayoutGdefTable, getGdefGlyphClass, getLigatureId, getLigatureComponent, BASE_GLYPH_CLASS, LIGATURE_GLYPH_CLASS,
-    MARK_GLYPH_CLASS
+    MARK_GLYPH_CLASS, getCachedLayoutValue
 } from '../layout.mjs';
 
 /**
@@ -157,7 +157,8 @@ function replaceSubstitutedGlyphs(action, glyphSequence, position) {
 }
 
 /**
- * Apply single substitution format 1 and 2
+ * Apply single substitution format 1 and 2, and alternate substitution format 1 (its substitution is the alternate the
+ * value of its feature chose, see FeatureQuery.getAlternate)
  * @param {SubstitutionAction} action
  * @param {GlyphSequence} glyphSequence
  * @param {number} position
@@ -170,8 +171,8 @@ function singleSubstitution(action, glyphSequence, position) {
 
 /**
  * Apply contextual substitutions (context and chaining context, all formats): the substitutions of their nested
- * lookups (single, multiple, ligature), in order, each one at its glyph and like the substitution of its type at the
- * top level, with the feature tag of the contextual lookup
+ * lookups (single, multiple, alternate, ligature), in order, each one at its glyph and like the substitution of its
+ * type at the top level, with the feature tag of the contextual lookup
  * @param {SubstitutionAction} action its substitution is a ContextualMatch (see FeatureQuery)
  * @param {GlyphSequence} glyphSequence
  * @param {number} position
@@ -330,6 +331,7 @@ const SUBSTITUTIONS = {
     11: singleSubstitution,
     12: singleSubstitution,
     21: multipleSubstitutionFormat1,
+    31: singleSubstitution,
     41: ligatureSubstitutionFormat1,
     51: contextualSubstitution,
     52: contextualSubstitution,
@@ -383,13 +385,16 @@ function getLookupFirstGlyphCoverages(lookupTable) {
  * contextual rule that matched (see applySubstitution)
  * @param {FeatureQuery} query
  * @param {any} lookupTable
- * @param {string} tag feature tag set as the state of the substituted tokens
+ * @param {string} tag the tag of the feature of the lookup, set as the state of the substituted tokens
  * @param {Token[]} tokens
- * @param {function(Token): boolean} [isTokenEnabled] whether a rule or a ligature of the lookup can start at the glyphs
- * of a token (e.g. the arabic form of the token), at every glyph if omitted; unlike the feature mask of HarfBuzz, the
- * later input glyphs of a rule and the components of a ligature are matched whatever their token
+ * @param {function(Token): (number|null)} [getTokenFeatureValue] the value of the feature of the lookup at the glyphs of
+ * a token, like the mask HarfBuzz gives a glyph (see getLookupFeatureValue): the alternate index there of its alternate
+ * substitutions and of the ones that its contextual rules apply at the glyph, null where a rule or a ligature of the
+ * lookup cannot start (e.g. the arabic form of the lookup outside the letters of the form), where a nested alternate
+ * substitution has the value 0, like the mask of HarfBuzz there; 1 at every glyph if omitted. Unlike the feature mask
+ * of HarfBuzz, the later input glyphs of a rule and the components of a ligature are matched whatever their token
  */
-function applyLookupToTokens(query, lookupTable, tag, tokens, isTokenEnabled = () => true) {
+function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureValue = () => 1) {
     const layout = query.font.substitution;
     const coverages = getLookupFirstGlyphCoverages(lookupTable);
     // a glyph no subtable covers cannot start a substitution: skip it without building its context
@@ -402,12 +407,14 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, isTokenEnabled = (
     // applySubstitution updates the glyphs of the sequence, the context of the lookup
     const glyphSequence = getGlyphSequence(tokens, getLayoutGdefTable(query.font));
     const contextParams = new ContextParams(glyphSequence.glyphIndexes, 0);
+    const getGlyphFeatureValue = glyphPosition => getTokenFeatureValue(glyphSequence.glyphTokens[glyphPosition]) || 0;
     for (let position = 0; position < glyphSequence.glyphIndexes.length; position++) {
-        if (!isTokenEnabled(glyphSequence.glyphTokens[position]) || !isCovered(glyphSequence.glyphIndexes[position])) {
+        const canStart = getTokenFeatureValue(glyphSequence.glyphTokens[position]) !== null;
+        if (!canStart || !isCovered(glyphSequence.glyphIndexes[position])) {
             continue;
         }
         contextParams.setCurrentIndex(position);
-        const action = query.lookupSubstitution(lookupTable, contextParams, tag);
+        const action = query.lookupSubstitution(lookupTable, contextParams, tag, getGlyphFeatureValue);
         if (action) {
             position += applySubstitution(action, glyphSequence, position) - 1;
         }
@@ -415,51 +422,82 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, isTokenEnabled = (
 }
 
 /**
+ * A lookup of features (see getFeaturesLookups)
+ * @typedef FeatureLookup
+ * @type Object
+ * @property {any} lookupTable
+ * @property {string} tag the tag of the first feature that has the lookup
+ * @property {boolean} isEnabledFeatureLookup whether an enabled feature has the lookup, not only the required feature
+ * @property {boolean} isRequiredFeatureLookup whether the required feature has the lookup, which then applies at every
+ * glyph like the global mask that HarfBuzz gives it
+ */
+
+/**
  * Get the lookups of features in lookup list order, like HarfBuzz: each lookup once, with the tag of the (first)
- * feature it belongs to, without the indexes past the lookup list
+ * feature it belongs to, without the indexes past the lookup list. They are computed once for the GSUB table, the
+ * features, the language system and the feature variation record of the variation of the query (see
+ * getCachedLayoutValue in layout.mjs).
  * @param {FeatureQuery} query
  * @param {string[]} tags feature tags
  * @param {string} script script tag
  * @param {string} [language] language tag, the default language system of the script if omitted
  * @param {boolean} [withRequiredFeature=false] whether to add the lookups of the required feature of the language system
  * (see FeatureQuery.getRequiredFeature), whatever its tag
- * @returns {Array<{lookupTable: any, tag: string, isRequiredFeatureLookup: boolean}>} isRequiredFeatureLookup: whether the
- * required feature has the lookup, which then applies at every glyph like the global mask that HarfBuzz gives it
+ * @returns {FeatureLookup[]}
  */
 function getFeaturesLookups(query, tags, script, language, withRequiredFeature = false) {
-    const features = tags.map(tag => ({ tag, feature: query.getFeature({ tag, script, language }), isRequired: false }));
-    const requiredFeature = withRequiredFeature && query.getRequiredFeature(script, language);
-    if (requiredFeature) {
-        features.push({ tag: requiredFeature.tag, feature: requiredFeature.feature, isRequired: true });
-    }
-    // the tag of the first feature of each lookup, and whether the required feature has it
-    const lookupOrigins = new Map();
-    for (const { tag, feature, isRequired } of features) {
-        if (!feature || !feature.lookupListIndexes) {
-            continue;
+    const key = JSON.stringify(['lookups', tags, script, language, withRequiredFeature, query.getFeatureVariationIndex()]);
+    return getCachedLayoutValue(query.font.tables.gsub, key, () => {
+        const features = tags.map(tag => ({ tag, feature: query.getFeature({ tag, script, language }), isRequired: false }));
+        const requiredFeature = withRequiredFeature && query.getRequiredFeature(script, language);
+        if (requiredFeature) {
+            features.push({ tag: requiredFeature.tag, feature: requiredFeature.feature, isRequired: true });
         }
-        for (const lookupIndex of feature.lookupListIndexes) {
-            const lookupOrigin = lookupOrigins.get(lookupIndex) || { tag, isRequiredFeatureLookup: false };
-            lookupOrigin.isRequiredFeatureLookup = lookupOrigin.isRequiredFeatureLookup || isRequired;
-            lookupOrigins.set(lookupIndex, lookupOrigin);
+        // the tag of the first feature of each lookup, and whether an enabled feature and the required feature have it
+        const lookupOrigins = new Map();
+        for (const { tag, feature, isRequired } of features) {
+            if (!feature || !feature.lookupListIndexes) {
+                continue;
+            }
+            for (const lookupIndex of feature.lookupListIndexes) {
+                const lookupOrigin = lookupOrigins.get(lookupIndex) ||
+                    { tag, isEnabledFeatureLookup: false, isRequiredFeatureLookup: false };
+                lookupOrigin.isEnabledFeatureLookup = lookupOrigin.isEnabledFeatureLookup || !isRequired;
+                lookupOrigin.isRequiredFeatureLookup = lookupOrigin.isRequiredFeatureLookup || isRequired;
+                lookupOrigins.set(lookupIndex, lookupOrigin);
+            }
         }
-    }
-    const lookupIndexes = Array.from(lookupOrigins.keys()).sort((indexA, indexB) => indexA - indexB);
-    const lookups = [];
-    for (const lookupIndex of lookupIndexes) {
-        const lookupTable = query.getLookupByIndex(lookupIndex);
-        if (lookupTable) {
-            const { tag, isRequiredFeatureLookup } = lookupOrigins.get(lookupIndex);
-            lookups.push({ lookupTable, tag, isRequiredFeatureLookup });
+        const lookupIndexes = Array.from(lookupOrigins.keys()).sort((indexA, indexB) => indexA - indexB);
+        const lookups = [];
+        for (const lookupIndex of lookupIndexes) {
+            const lookupTable = query.getLookupByIndex(lookupIndex);
+            if (lookupTable) {
+                lookups.push({ lookupTable, ...lookupOrigins.get(lookupIndex) });
+            }
         }
-    }
-    return lookups;
+        return lookups;
+    });
+}
+
+/**
+ * The value of the feature of a lookup of features at every glyph, like the lookup mask of HarfBuzz: the value of its
+ * first feature (see FeatureQuery.getFeatureValue), or 1 for a lookup of the required feature only (the global mask
+ * of HarfBuzz). Not yet like HarfBuzz for a lookup of several features, which joins their masks: a lookup that the
+ * required feature shares with an enabled feature takes the value of the enabled feature, where HarfBuzz joins the
+ * global mask to the mask of the feature (an alternate index past the alternates, unless the feature has the global
+ * mask, the value 1 of a feature that is not an arabic form)
+ * @param {FeatureQuery} query
+ * @param {FeatureLookup} featureLookup
+ * @returns {number}
+ */
+function getLookupFeatureValue(query, featureLookup) {
+    return featureLookup.isEnabledFeatureLookup ? query.getFeatureValue(featureLookup.tag) : 1;
 }
 
 /**
  * Apply the lookups of features to a list of tokens like HarfBuzz: in lookup list order, each one once and at every
- * glyph (see applyLookupToTokens), with the tag of its first feature, so that a lookup sees the glyphs the previous ones
- * substituted, and not feature by feature
+ * glyph (see applyLookupToTokens), with the tag and the value of its first feature (see getLookupFeatureValue), so that
+ * a lookup sees the glyphs the previous ones substituted, and not feature by feature
  * @param {FeatureQuery} query
  * @param {string[]} tags feature tags
  * @param {string} script script tag
@@ -469,8 +507,9 @@ function getFeaturesLookups(query, tags, script, language, withRequiredFeature =
  * (see getRequiredFeatureStage)
  */
 function applyFeaturesToTokens(query, tags, script, language, tokens, withRequiredFeature = false) {
-    for (const { lookupTable, tag } of getFeaturesLookups(query, tags, script, language, withRequiredFeature)) {
-        applyLookupToTokens(query, lookupTable, tag, tokens);
+    for (const featureLookup of getFeaturesLookups(query, tags, script, language, withRequiredFeature)) {
+        const featureValue = getLookupFeatureValue(query, featureLookup);
+        applyLookupToTokens(query, featureLookup.lookupTable, featureLookup.tag, tokens, () => featureValue);
     }
 }
 
@@ -521,6 +560,7 @@ export {
     getGlyphSequence,
     applyLookupToTokens,
     getFeaturesLookups,
+    getLookupFeatureValue,
     applyFeaturesToTokens,
     getRequiredFeatureStage,
     applyFeatureStagesToTokens,

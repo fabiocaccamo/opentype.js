@@ -47,6 +47,20 @@ opentype.Font.prototype.charToGlyph = function(c) {};
  * length of the given string.
  * The glyphs are in visual order, like HarfBuzz: the glyphs of an Arabic text in reverse order, the glyphs of a
  * multiple substitution included (e.g. a letter and the mark that ccmp decomposed it into, the mark first).
+ * options.features maps feature tags to a boolean or an integer from 0 (e.g. { liga: false, cv01: 2 }), like
+ * font-feature-settings and the feature values of HarfBuzz: 0 or false turns a feature off, any other value turns it
+ * on (true is 1) and is the alternate index of its alternate substitutions (GSUB lookup type 3), 1 for the first
+ * alternate, an index past the alternates of a glyph leaving it unchanged, the 8 lowest bits of the value kept (an
+ * Arabic form that the option sets applies at every glyph of an Arabic run, and sets the bit 1 of its form mask in
+ * its value (a bitwise OR) at the letters of the form, rtlm the bit 1 of its mask in its value in a run of a
+ * right-to-left script, like the masks of HarfBuzz: fina 2 is 3 at a final teh, fina 3 stays 3, fina 256 is 1, and
+ * rtlm 2 is 3, rtlm 3 stays 3, rtlm 256 is 1, so 256 turns them off only outside their mask); any other value throws
+ * a TypeError. Not yet like HarfBuzz for a lookup of
+ * several features (two enabled features, or the required feature and an enabled feature), which takes the value of
+ * the first enabled one, where HarfBuzz joins the masks of the features. Like HarfBuzz, rand is on by default with
+ * the value 255 (a random alternate, from the random numbers of HarfBuzz from the start of each script run), and the
+ * direction features of the script of each run (rtla and rtlm in a run of a right-to-left script such as Arabic or
+ * Hebrew, ltra and ltrm in the other runs).
  * @param  {string} s
  * @param  {Object=} options
  * @return {opentype.Glyph[]}
@@ -119,7 +133,8 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
  * and GPOS features of its OpenType script, or as one run with the OpenType script options.script (the
  * tag taken literally, e.g. 'deva' or 'dev2'), and with the language system options.language (an OpenType tag
  * such as 'TRK ' or 'TRK'). Like HarfBuzz, which looks each feature up in GSUB and in GPOS, the GPOS features of a
- * run are the default GSUB features of its shaper but the Arabic forms, and abvm, blwm, curs, dist, kern (with
+ * run are the default GSUB features of its shaper (rand included) but the Arabic forms, the direction features of
+ * the script of the run, the same ones as in GSUB (see stringToGlyphs), and abvm, blwm, curs, dist, kern (with
  * options.kerning), mark and mkmk, with options.features, and the required feature of the GPOS language system (its
  * ReqFeatureIndex) whatever options.features; their lookups apply in lookup list order, to each run in the order of
  * the text, extension lookups included. The single adjustments (lookup type 1) are applied with their value
@@ -159,9 +174,8 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
  * IgnoreMarks kern the letter across the mark; the GPOS lookups of the Arabic forms, which HarfBuzz applies at the
  * glyphs of each form only, apply only when options.features enables them, at every glyph; the GPOS feature
  * variations (the FeatureVariations of the GPOS table) are not applied yet, the lookups of a GPOS feature are the
- * ones of its FeatureList record at every variation; nor the GPOS lookups of the direction features (ltra, ltrm,
- * rtla, rtlm) and of rand, which HarfBuzz enables by default, nor the GSUB lookups of abvm, blwm, curs, dist, kern
- * (with options.kerning), mark and mkmk, which HarfBuzz looks up in GSUB too.
+ * ones of its FeatureList record at every variation; nor the GSUB lookups of abvm, blwm, curs, dist, kern (with
+ * options.kerning), mark and mkmk, which HarfBuzz looks up in GSUB too.
  * @param  {string} text
  * @param  {Object=} options
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number, xAdvance: number, yAdvance: number, xOffset: number, yOffset: number}>}

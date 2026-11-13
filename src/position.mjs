@@ -4,7 +4,7 @@
 import Layout, {
     getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, isMarkGlyph, getLigatureId,
     getLigatureComponent, isMarkIgnoredWithoutGlyphClasses, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES, IGNORE_MARKS, RIGHT_TO_LEFT, getRequiredFeatureIndex,
-    getOpenTypeScriptTags, matchSequenceContext, matchChainedSequenceContext
+    getOpenTypeScriptTags, matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue
 } from './layout.mjs';
 
 // the features of common_features and horizontal_features (hb-ot-shape.cc) that are not default GSUB features of a
@@ -950,7 +950,9 @@ function getTaggedFeatureTables(position, langSysTable, featureTags) {
  * The lookup tables of the GPOS features of a script and language that the language system has (with the
  * fallbacks of getLangSysTable) and of its required feature, whatever the feature tags, like HarfBuzz
  * (hb_ot_map_builder_t), in the order they apply in (see getLookupTablesOfFeatureTables); none without a GPOS
- * table or a language system, or when GPOS does not apply to the script (see isGposAppliedToScript).
+ * table or a language system, or when GPOS does not apply to the script (see isGposAppliedToScript). They are
+ * computed once for the GPOS table, the script, the language and the feature tags (see getCachedLayoutValue in
+ * layout.mjs).
  * @param {Position} position
  * @param {string} script
  * @param {string} [language]
@@ -958,17 +960,20 @@ function getTaggedFeatureTables(position, langSysTable, featureTags) {
  * @returns {object[]}
  */
 function getPositioningLookupTables(position, script, language, featureTags) {
-    if (!position.getTable() || !isGposAppliedToScript(position, script)) {
+    const table = position.getTable();
+    if (!table) {
         return [];
     }
-    const langSysTable = position.getLangSysTable(script, language);
-    if (!langSysTable) {
-        return [];
-    }
-    const featureTables = [getRequiredFeatureTable(position, langSysTable)]
-        .filter(featureTable => featureTable)
-        .concat(getTaggedFeatureTables(position, langSysTable, featureTags));
-    return getLookupTablesOfFeatureTables(position, featureTables);
+    return getCachedLayoutValue(table, JSON.stringify(['lookups', script, language, featureTags]), () => {
+        const langSysTable = isGposAppliedToScript(position, script) && position.getLangSysTable(script, language);
+        if (!langSysTable) {
+            return [];
+        }
+        const featureTables = [getRequiredFeatureTable(position, langSysTable)]
+            .filter(featureTable => featureTable)
+            .concat(getTaggedFeatureTables(position, langSysTable, featureTags));
+        return getLookupTablesOfFeatureTables(position, featureTables);
+    });
 }
 
 /**

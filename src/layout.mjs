@@ -86,6 +86,24 @@ function getOpenTypeScriptTags(script) {
     return tags;
 }
 
+// the OpenType script tags of the scripts that HarfBuzz lays out from right to left (hb_script_get_horizontal_direction)
+const RIGHT_TO_LEFT_SCRIPT_TAGS = [
+    'adlm', 'arab', 'armi', 'avst', 'chrs', 'cprt', 'elym', 'gara', 'hatr', 'hebr', 'khar', 'lydi', 'mand', 'mani',
+    'mend', 'merc', 'mero', 'narb', 'nbat', 'nko ', 'orkh', 'ougr', 'palm', 'phli', 'phlp', 'phnx', 'prti', 'rohg',
+    'samr', 'sarb', 'sogd', 'sogo', 'syrc', 'thaa', 'yezi'
+];
+
+/**
+ * Whether the script of a run is a right-to-left script, like the horizontal direction HarfBuzz gives the script of
+ * a buffer (hb_script_get_horizontal_direction): Arabic, Hebrew, Syriac, Thaana, NKo... The other scripts, and a
+ * text of no script (DFLT), are left to right.
+ * @param {string[]} scriptTags - the OpenType script tags of the run (see getOpenTypeScriptTags)
+ * @return {boolean}
+ */
+function isRightToLeftScript(scriptTags) {
+    return scriptTags.some(tag => RIGHT_TO_LEFT_SCRIPT_TAGS.includes(tag));
+}
+
 /**
  * The script tag HarfBuzz chooses in a layout table for a list of script tags (hb_ot_layout_table_select_script): the
  * first one the table has, otherwise the first of the fallback scripts DFLT, dflt and latn that it has.
@@ -216,6 +234,47 @@ function getRequiredFeatureIndex(langSysTable) {
     if (langSysTable && langSysTable.reqFeatureIndex !== NO_REQUIRED_FEATURE_INDEX) {
         return langSysTable.reqFeatureIndex;
     }
+}
+
+// the values computed from a GSUB or GPOS table, by table then by key (see getCachedLayoutValue)
+const layoutCaches = new WeakMap();
+// the number of values cached for a table, past which its cache starts again empty before a new value
+const MAX_CACHED_LAYOUT_VALUES = 1024;
+
+/**
+ * A value computed from a GSUB or GPOS table (e.g. the lookups of a set of features), computed once for the table and
+ * a key: the methods of Layout that add a script, a language system, a feature or a lookup to the table clear its
+ * values (see clearLayoutCache), a table that replaces it has values of its own.
+ * @param {object|undefined} table - the GSUB or GPOS table, the value is computed at every call without one
+ * @param {string} key - what the value depends on besides the table
+ * @param {function(): any} computeValue
+ * @returns {any}
+ */
+function getCachedLayoutValue(table, key, computeValue) {
+    if (!table) {
+        return computeValue();
+    }
+    let cache = layoutCaches.get(table);
+    if (!cache) {
+        cache = new Map();
+        layoutCaches.set(table, cache);
+    }
+    if (!cache.has(key)) {
+        if (cache.size >= MAX_CACHED_LAYOUT_VALUES) {
+            cache.clear();
+        }
+        cache.set(key, computeValue());
+    }
+    return cache.get(key);
+}
+
+/**
+ * Clear the values computed from a GSUB or GPOS table (see getCachedLayoutValue), after a change of its scripts,
+ * language systems, features or lookups.
+ * @param {object} table
+ */
+function clearLayoutCache(table) {
+    layoutCaches.delete(table);
 }
 
 // the glyph classes of the GDEF GlyphClassDef
@@ -760,6 +819,7 @@ Layout.prototype = {
                     }
                 };
                 scripts.splice(-1 - pos, 0, scr);
+                clearLayoutCache(layout);
                 return scr.script;
             }
             return getFallbackScriptTable(scripts);
@@ -795,6 +855,7 @@ Layout.prototype = {
                     langSys: {reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: []}
                 };
                 scriptTable.langSysRecords.splice(-1 - pos, 0, langSysRecord);
+                clearLayoutCache(this.getTable());
                 return langSysRecord.langSys;
             }
             return getDefaultLangSysTable(scriptTable);
@@ -837,6 +898,7 @@ Layout.prototype = {
                 };
                 allFeatures.push(featureRecord);
                 featIndexes.push(index);
+                clearLayoutCache(this.getTable());
                 return featureRecord.feature;
             }
         }
@@ -878,6 +940,7 @@ Layout.prototype = {
                 const index = allLookups.length;
                 allLookups.push(lookupTable);
                 lookupListIndexes.push(index);
+                clearLayoutCache(this.getTable());
                 return [lookupTable];
             }
         }
@@ -957,7 +1020,9 @@ export {
     LIGATURE_GLYPH_CLASS,
     MARK_GLYPH_CLASS,
     getRequiredFeatureIndex,
+    getCachedLayoutValue,
     getOpenTypeScriptTags,
+    isRightToLeftScript,
     getChosenScriptTag,
     selectScriptTag
 };

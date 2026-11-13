@@ -143,21 +143,47 @@ describe('font.mjs', function() {
     });
 
     describe('updateFeatures', function() {
-        it('enables and disables the features of every shaper, rvrn included in their defaults', function() {
+        it('enables and disables the features of every shaper, rvrn and rand included in their defaults', function() {
             // the substitution features HarfBuzz 11.3.2 enables by default for every script (hb_ot_shape_collect_features:
-            // rvrn, ccmp, locl, rlig, calt, clig, liga, rclt), the Arabic shaper adding the forms and mset
-            // (collect_features_arabic), the Thai shaper none; not yet the direction features (ltra, ltrm, rtla), rand and
-            // the stch of the Arabic shaper, which HarfBuzz also enables
+            // rvrn, rand, ccmp, locl, rlig, calt, clig, liga, rclt), the Arabic shaper adding the forms and mset
+            // (collect_features_arabic), the Thai shaper none; the direction features (ltra, ltrm, rtla, rtlm), which
+            // HarfBuzz enables by the direction of the run, are added to each run (see Bidi); not yet the stch of the
+            // Arabic shaper, which HarfBuzz also enables
             assert.deepStrictEqual(font.updateFeatures(), [
-                { script: 'arab', tags: ['rvrn', 'ccmp', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'mset'] },
-                { script: 'latn', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig'] },
-                { script: 'thai', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig'] }
+                { script: 'arab', tags: ['rvrn', 'ccmp', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'mset', 'rand'] },
+                { script: 'latn', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] },
+                { script: 'thai', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] }
             ]);
             assert.deepStrictEqual(font.updateFeatures({ ccmp: false, liga: false, ss01: true }), [
-                { script: 'arab', tags: ['rvrn', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'clig', 'mset', 'ss01'] },
-                { script: 'latn', tags: ['rvrn', 'locl', 'rlig', 'rclt', 'calt', 'clig', 'ss01'] },
-                { script: 'thai', tags: ['rvrn', 'locl', 'rlig', 'rclt', 'calt', 'clig', 'ss01'] }
+                { script: 'arab', tags: ['rvrn', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'clig', 'mset', 'rand', 'ss01'] },
+                { script: 'latn', tags: ['rvrn', 'locl', 'rlig', 'rclt', 'calt', 'clig', 'rand', 'ss01'] },
+                { script: 'thai', tags: ['rvrn', 'locl', 'rlig', 'rclt', 'calt', 'clig', 'rand', 'ss01'] }
             ]);
+        });
+
+        it('enables a feature with a number other than 0 and disables it with 0, like the values of HarfBuzz', function() {
+            // hb-shape --features=liga=0,ss01=2,cv01=0 and --features=rand=256: a value keeps its 8 lowest bits
+            const latinTags = options => font.updateFeatures(options).find(feature => feature.script === 'latn').tags;
+            assert.deepStrictEqual(latinTags({ liga: 0, ss01: 2, cv01: 0 }), ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'clig', 'rand', 'ss01']);
+            assert.deepStrictEqual(latinTags({ rand: 256, ss02: 257, ss03: undefined }), ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'ss02']);
+        });
+
+        it('keeps an arabic form whose value is a multiple of 256, which HarfBuzz still applies at the letters of the form', function() {
+            // hb-shape --features=fina=256 TestAlternateSubstitution.ttf -u 062A,062A [47=1+500|46=0+500], teh.fina1 at the
+            // final teh; --features=fina=0 [46=1+500|46=0+500]; --script=latn --features=fina=256 [46=0+500|46=1+500]
+            const featuresOption = { fina: 256, init: 0 };
+            const tagsOf = script => font.updateFeatures(featuresOption).find(feature => feature.script === script).tags;
+            assert.deepStrictEqual(tagsOf('arab'), ['rvrn', 'ccmp', 'locl', 'isol', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'mset', 'rand']);
+            assert.deepStrictEqual(tagsOf('latn'), ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand']);
+        });
+
+        it('throws on a feature value that is neither a boolean nor an integer from 0', function() {
+            for (const value of [-1, 1.5, '1', null]) {
+                assert.throws(() => font.updateFeatures({ ss01: value }), {
+                    name: 'TypeError',
+                    message: `The value of the feature ss01 must be a boolean or an integer from 0, not ${typeof value} ${value}`
+                });
+            }
         });
     });
 
@@ -171,6 +197,26 @@ describe('font.mjs', function() {
             assert.deepEqual(font.stringToGlyphs('fi'), [fiGlyph]);
             assert.deepEqual(font.stringToGlyphs('ffi'), [ffiGlyph]);
             assert.deepEqual(font.stringToGlyphs('fffiffif'), [ffGlyph, fiGlyph, ffiGlyph, fGlyph]);
+        });
+
+        it('substitutes the alternates of the feature values in a font parsed with lowMemory, whose glyphs load on request', function() {
+            // TestAlternateSubstitution.ttf (test/generate-alternate-substitution-font.py): hb-shape --no-glyph-names
+            // --cluster-level=1 --features=aalt=2,cv01=3 TestAlternateSubstitution.ttf -u 0061,0062,0063,0064,0065,0064,0065
+            // [4=0+500|6=1+500|12=2+500|15=3+500|18=4+500|14=5+500|19=6+500], the random alternates of rand at d and e
+            const lowMemoryFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf', { lowMemory: true });
+            const glyphs = lowMemoryFont.stringToGlyphs('abcdede', { features: { aalt: 2, cv01: 3 } });
+            assert.deepStrictEqual(glyphs.map(glyph => glyph.index), [4, 6, 12, 15, 18, 14, 19]);
+            assert.deepStrictEqual(glyphs.map(glyph => glyph.name), ['a.alt2', 'b', 'c.alt3', 'd.alt2', 'e.alt1', 'd.alt1', 'e.alt2']);
+        });
+
+        it('takes feature values in a font without GSUB and GPOS, and in an empty text', function() {
+            // TestCMAP13.ttf maps every character to the glyph 1: hb-shape --no-glyph-names --cluster-level=1
+            // --features=aalt=2,rand=3 TestCMAP13.ttf -u 0061,0062,0063,0064,0065 [1=0+2350|1=1+2350|1=2+2350|1=3+2350|1=4+2350]
+            const cmapFont = loadSync('./test/fonts/TestCMAP13.ttf');
+            assert.deepStrictEqual(cmapFont.stringToGlyphIndexes('abcde', { features: { aalt: 2, rand: 3 } }), [1, 1, 1, 1, 1]);
+            assert.deepStrictEqual(cmapFont.stringToGlyphIndexes('', { features: { aalt: 2, rand: 3 } }), []);
+            const alternateFont = loadSync('./test/fonts/TestAlternateSubstitution.ttf');
+            assert.deepStrictEqual(alternateFont.stringToGlyphIndexes('', { features: { aalt: 2, fina: 256 } }), []);
         });
 
         it('works on fonts with coverage table format 2', function() {
@@ -1354,29 +1400,48 @@ describe('font.mjs', function() {
                 for (const tag of ['rtla', 'rtlm']) {
                     retaggedFonts[tag] = loadRetaggedFont('init', tag);
                 }
+                retaggedFonts.ltraOfInit = loadRetaggedFont('init', 'ltra');
+                retaggedFonts.rtlaOfSs01 = loadRetaggedFont('ss01', 'rtla');
             });
 
-            itFailsUntilFixed('applies the GPOS lookups of the direction features and of rand by default, like HarfBuzz',
-                'getPositioningFeatureTags (src/font.mjs): the GPOS features of a run are the default GSUB features of its ' +
-                'shaper and DEFAULT_POSITIONING_FEATURES, without ltra and ltrm (left-to-right runs), rtla and rtlm ' +
-                '(right-to-left runs) and rand, which HarfBuzz enables by default (hb-ot-shape.cc)',
-                function() {
-                    // -u 0064,006F: [8=0+420|9=1+500] with ltra, ltrm and rand; -u 0628,0628,0628: [18=2+500|18=1+400|18=0+400]
-                    // with rtla and rtlm
-                    assert.deepStrictEqual(
-                        [
-                            formatShape(retaggedFonts.ltra.shape('do')),
-                            formatShape(retaggedFonts.ltrm.shape('do')),
-                            formatShape(retaggedFonts.rand.shape('do')),
-                            formatShape(retaggedFonts.rtla.shape('ببب')),
-                            formatShape(retaggedFonts.rtlm.shape('ببب'))
-                        ],
-                        [
-                            '[8=0+420|9=1+500]', '[8=0+420|9=1+500]', '[8=0+420|9=1+500]',
-                            '[18=2+500|18=1+400|18=0+400]', '[18=2+500|18=1+400|18=0+400]'
-                        ]
-                    );
-                });
+            it('applies the GPOS lookups of the direction features and of rand by default, like HarfBuzz', function() {
+                // -u 0064,006F: [8=0+420|9=1+500] with ltra, ltrm and rand; -u 0628,0628,0628: [18=2+500|18=1+400|18=0+400]
+                // with rtla and rtlm
+                assert.deepStrictEqual(
+                    [
+                        formatShape(retaggedFonts.ltra.shape('do')),
+                        formatShape(retaggedFonts.ltrm.shape('do')),
+                        formatShape(retaggedFonts.rand.shape('do')),
+                        formatShape(retaggedFonts.rtla.shape('ببب')),
+                        formatShape(retaggedFonts.rtlm.shape('ببب'))
+                    ],
+                    [
+                        '[8=0+420|9=1+500]', '[8=0+420|9=1+500]', '[8=0+420|9=1+500]',
+                        '[18=2+500|18=1+400|18=0+400]', '[18=2+500|18=1+400|18=0+400]'
+                    ]
+                );
+            });
+
+            it('applies the GPOS lookups of the direction features of the other direction only when the features option turns them on', function() {
+                // the init of TestPairPositioning.ttf tagged ltra, ltra-init.ttf: -u 0628,0628,0628 [18=2+500|18=1+500|18=0+500],
+                // --features=+ltra [18=2+500|18=1+400|18=0+400]; its ss01 tagged rtla, rtla-ss01.ttf: -u 0064,006F
+                // [8=0+500|9=1+500], --features=+rtla [8=0+420|9=1+500]
+                assert.deepStrictEqual(
+                    [
+                        formatShape(retaggedFonts.ltraOfInit.shape('ببب')),
+                        formatShape(retaggedFonts.ltraOfInit.shape('ببب', { features: { ltra: true } })),
+                        formatShape(retaggedFonts.rtlaOfSs01.shape('do')),
+                        formatShape(retaggedFonts.rtlaOfSs01.shape('do', { features: { rtla: true } }))
+                    ],
+                    ['[18=2+500|18=1+500|18=0+500]', '[18=2+500|18=1+400|18=0+400]', '[8=0+500|9=1+500]', '[8=0+420|9=1+500]']
+                );
+            });
+
+            it('does not apply the GPOS lookups of a direction feature that the features option turns off', function() {
+                // ltra.ttf: -u 0064,006F --features=-ltra [8=0+500|9=1+500], --features=ltra=0 [8=0+500|9=1+500]
+                assert.strictEqual(formatShape(retaggedFonts.ltra.shape('do', { features: { ltra: false } })), '[8=0+500|9=1+500]');
+                assert.strictEqual(formatShape(retaggedFonts.ltra.shape('do', { features: { ltra: 0 } })), '[8=0+500|9=1+500]');
+            });
         });
 
         itFailsUntilFixed('applies the GPOS feature variations at the variation of the options, like HarfBuzz',

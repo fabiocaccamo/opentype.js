@@ -13,9 +13,10 @@ import { applyFeatureStagesToTokens } from '../applySubstitution.mjs';
  * Apply the enabled latin features to a script run of the text
  * @param {Token[]} tokens the tokens of the run
  * @param {string} script the script tag of the run in the GSUB table
+ * @param {string[]} tags the enabled feature tags of the run: the latin features and the direction features of the run
  */
-function latinFeatures(tokens, script) {
-    applyFeatureStagesToTokens(this.query, this.featuresTags.latn, script, this.language, tokens);
+function latinFeatures(tokens, script, tags) {
+    applyFeatureStagesToTokens(this.query, tags, script, this.language, tokens);
 }
 
 export default latinFeatures;
