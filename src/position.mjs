@@ -964,7 +964,7 @@ function getPositioningLookupTables(position, script, language, featureTags) {
     if (!table) {
         return [];
     }
-    return getCachedLayoutValue(table, JSON.stringify(['lookups', script, language, featureTags]), () => {
+    return getCachedLayoutValue(position.font, 'gpos', JSON.stringify(['lookups', script, language, featureTags]), () => {
         const langSysTable = isGposAppliedToScript(position, script) && position.getLangSysTable(script, language);
         if (!langSysTable) {
             return [];

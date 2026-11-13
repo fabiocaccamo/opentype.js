@@ -253,6 +253,56 @@ describe('featureQuery.mjs', function() {
             assert.deepEqual(substitution, [273, 1087]);
         });
     });
+    describe('the cache of the features of a language system', function() {
+        // TestAlternateSubstitution.ttf: aalt substitutes g (23) by g.alt (24) with its lookup 0. The font edited with
+        // fontTools like the tests edit the parsed tables, then hb-shape --no-glyph-names --cluster-level=1
+        // --features=<tag> <font> -u 0067: the original font, --features=aalt [24=0+500] and --features=ss20
+        // [23=0+500]; the FeatureTag of aalt renamed ss20 (aalt-renamed.ttf) and the feature index of aalt removed
+        // from every language system (aalt-unlisted.ttf), --features=aalt [23=0+500]; a feature ss20 with a single
+        // substitution g by g.alt added to the default language system of latn (ss20-added.ttf), --features=ss20
+        // [24=0+500]
+        const loadAlternateFont = parseOptions => loadSync('./test/fonts/TestAlternateSubstitution.ttf', parseOptions);
+        const getFeatureTags = font => new FeatureQuery(font).getScriptFeatures('latn').map(({ tag }) => tag);
+        const getGlyphIndexesOfG = (font, tag) => font.stringToGlyphIndexes('g', { features: { [tag]: true } });
+
+        it('computes the features again at every call and sees a direct change of a feature tag with layoutCache false', function() {
+            const uncachedFont = loadAlternateFont({ layoutCache: false });
+            const query = new FeatureQuery(uncachedFont);
+            assert.notStrictEqual(query.getScriptFeatures('latn'), query.getScriptFeatures('latn'));
+            assert.deepStrictEqual(getGlyphIndexesOfG(uncachedFont, 'aalt'), [24]);
+            uncachedFont.tables.gsub.features.find(featureRecord => featureRecord.tag === 'aalt').tag = 'ss20';
+            assert.ok(getFeatureTags(uncachedFont).includes('ss20'));
+            assert.ok(!getFeatureTags(uncachedFont).includes('aalt'));
+            assert.deepStrictEqual(getGlyphIndexesOfG(uncachedFont, 'aalt'), [23]);
+        });
+
+        it('sees a direct change of the features of the language systems with layoutCache false', function() {
+            const uncachedFont = loadAlternateFont({ layoutCache: false });
+            const gsub = uncachedFont.tables.gsub;
+            assert.ok(getFeatureTags(uncachedFont).includes('aalt'));
+            assert.deepStrictEqual(getGlyphIndexesOfG(uncachedFont, 'aalt'), [24]);
+            const aaltIndex = gsub.features.findIndex(featureRecord => featureRecord.tag === 'aalt');
+            for (const scriptRecord of gsub.scripts) {
+                const languageSystem = scriptRecord.script.defaultLangSys;
+                languageSystem.featureIndexes = languageSystem.featureIndexes.filter(index => index !== aaltIndex);
+            }
+            assert.ok(!getFeatureTags(uncachedFont).includes('aalt'));
+            assert.deepStrictEqual(getGlyphIndexesOfG(uncachedFont, 'aalt'), [23]);
+        });
+
+        it('computes the features again after font.substitution adds a feature to a font with a GPOS table too', function() {
+            // the features are cached for the GSUB table, which the addition clears, not for the GPOS table
+            const cachedFont = loadAlternateFont();
+            assert.ok(cachedFont.tables.gpos);
+            const features = new FeatureQuery(cachedFont).getScriptFeatures('latn');
+            assert.strictEqual(new FeatureQuery(cachedFont).getScriptFeatures('latn'), features);
+            assert.ok(!getFeatureTags(cachedFont).includes('ss20'));
+            assert.deepStrictEqual(getGlyphIndexesOfG(cachedFont, 'ss20'), [23]);
+            cachedFont.substitution.add('ss20', { sub: 23, by: 24 }, 'latn');
+            assert.ok(getFeatureTags(cachedFont).includes('ss20'));
+            assert.deepStrictEqual(getGlyphIndexesOfG(cachedFont, 'ss20'), [24]);
+        });
+    });
     describe('unsupported lookups', function() {
         // a reverse chaining substitution (lookup type 8) of b
         const reverseChainingLookup = {

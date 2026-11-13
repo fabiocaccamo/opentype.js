@@ -825,7 +825,11 @@ opentype.load = function(url, callback) {};
 opentype.loadSync = function(url) {};
 
 /**
- * @param  {ArrayBuffer}
+ * opt.layoutCache (default true): with false the layout does not cache the lookups of the GSUB and GPOS tables of
+ * the font, so a change made directly to the objects of these tables applies at the next layout; any value other than
+ * a boolean or undefined throws a TypeError.
+ * @param  {ArrayBuffer} buffer
+ * @param  {Object=} opt
  * @return {opentype.Font}
  */
-opentype.parse = function(buffer) {};
+opentype.parse = function(buffer, opt) {};

@@ -1068,6 +1068,22 @@ describe('applySubstitution.mjs', function() {
             assert.strictEqual(addedLookups.length, 3);
             assert.strictEqual(getLookups(), addedLookups);
         });
+
+        it('computes the lookups of a set of features at every call with layoutCache false, after a direct change too', function() {
+            // TestAlternateSubstitution.ttf with aalt reduced to its lookup 1 (sub a from [...]), without its lookup 0
+            // (sub g by g.alt), with fontTools as aalt-edited.ttf: hb-shape --no-glyph-names --cluster-level=1
+            // --features=aalt -u 0067 [24=0+500], edited [23=0+500]
+            const uncachedFont = parse(readFileSync('./test/fonts/TestAlternateSubstitution.ttf'), { layoutCache: false });
+            const gsub = uncachedFont.tables.gsub;
+            const getLookups = () => getFeaturesLookups(new FeatureQuery(uncachedFont), ['aalt'], 'latn');
+            const getLookupTables = () => getLookups().map(({ lookupTable }) => lookupTable);
+            assert.notStrictEqual(getLookups(), getLookups());
+            assert.deepStrictEqual(getLookupTables(), [gsub.lookups[0], gsub.lookups[1]]);
+            assert.deepStrictEqual(uncachedFont.stringToGlyphIndexes('g', { features: { aalt: true } }), [24]);
+            gsub.features.find(featureRecord => featureRecord.tag === 'aalt').feature.lookupListIndexes = [1];
+            assert.deepStrictEqual(getLookupTables(), [gsub.lookups[1]]);
+            assert.deepStrictEqual(uncachedFont.stringToGlyphIndexes('g', { features: { aalt: true } }), [23]);
+        });
     });
 
     describe('getLookupFeatureValue', function() {

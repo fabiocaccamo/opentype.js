@@ -210,29 +210,27 @@ describe('layout.mjs', function() {
         });
 
         it('computes a value once for a table and a key', function() {
-            const table = font.tables.gsub;
-            assert.equal(getCachedLayoutValue(table, 'scripts', computeScriptCount), 0);
-            assert.equal(getCachedLayoutValue(table, 'scripts', computeScriptCount), 0);
-            assert.equal(getCachedLayoutValue(table, 'other key', computeScriptCount), 0);
+            assert.equal(getCachedLayoutValue(font, 'gsub', 'scripts', computeScriptCount), 0);
+            assert.equal(getCachedLayoutValue(font, 'gsub', 'scripts', computeScriptCount), 0);
+            assert.equal(getCachedLayoutValue(font, 'gsub', 'other key', computeScriptCount), 0);
             assert.equal(computationCount, 2);
             // a table that replaces it
             font.tables.gsub = { version: 1, scripts: [{ tag: 'latn', script: { defaultLangSys: null, langSysRecords: [] } }], features: [], lookups: [] };
-            assert.equal(getCachedLayoutValue(font.tables.gsub, 'scripts', computeScriptCount), 1);
+            assert.equal(getCachedLayoutValue(font, 'gsub', 'scripts', computeScriptCount), 1);
             assert.equal(computationCount, 3);
         });
 
         it('starts the values of a table again from none before a new key past 1024 values', function() {
-            const table = font.tables.gsub;
             for (let i = 0; i < 1024; i++) {
-                getCachedLayoutValue(table, `key ${i}`, computeScriptCount);
+                getCachedLayoutValue(font, 'gsub', `key ${i}`, computeScriptCount);
             }
             // a cached value of a full cache
-            getCachedLayoutValue(table, 'key 0', computeScriptCount);
+            getCachedLayoutValue(font, 'gsub', 'key 0', computeScriptCount);
             assert.equal(computationCount, 1024);
             // a new key empties the cache, then the earlier keys compute their values again
-            getCachedLayoutValue(table, 'key 1024', computeScriptCount);
-            getCachedLayoutValue(table, 'key 0', computeScriptCount);
-            getCachedLayoutValue(table, 'key 1024', computeScriptCount);
+            getCachedLayoutValue(font, 'gsub', 'key 1024', computeScriptCount);
+            getCachedLayoutValue(font, 'gsub', 'key 0', computeScriptCount);
+            getCachedLayoutValue(font, 'gsub', 'key 1024', computeScriptCount);
             assert.equal(computationCount, 1026);
         });
 
@@ -241,29 +239,54 @@ describe('layout.mjs', function() {
                 computationCount++;
                 return 1;
             };
-            assert.equal(getCachedLayoutValue(undefined, 'key', computeOne), 1);
-            assert.equal(getCachedLayoutValue(undefined, 'key', computeOne), 1);
+            assert.equal(getCachedLayoutValue(font, 'gpos', 'key', computeOne), 1);
+            assert.equal(getCachedLayoutValue(font, 'gpos', 'key', computeOne), 1);
             assert.equal(computationCount, 2);
         });
 
+        it('computes the value at every call for a font whose layout cache is off', function() {
+            const uncachedFont = new Font({
+                familyName: 'MyFont',
+                styleName: 'Medium',
+                unitsPerEm: 1000,
+                ascender: 800,
+                descender: -200,
+                glyphs: glyphs
+            });
+            // as parse sets it with the layoutCache option false
+            uncachedFont.isLayoutCacheEnabled = false;
+            uncachedFont.tables.gsub = font.tables.gsub;
+            const computeUncachedScriptCount = () => {
+                computationCount++;
+                return uncachedFont.tables.gsub.scripts.length;
+            };
+            assert.equal(getCachedLayoutValue(uncachedFont, 'gsub', 'scripts', computeUncachedScriptCount), 0);
+            // a script added directly to the table
+            uncachedFont.tables.gsub.scripts.push({ tag: 'latn', script: { defaultLangSys: null, langSysRecords: [] } });
+            assert.equal(getCachedLayoutValue(uncachedFont, 'gsub', 'scripts', computeUncachedScriptCount), 1);
+            assert.equal(computationCount, 2);
+            // no value of the table was cached: a font with the cache on, sharing the table, computes it
+            assert.equal(getCachedLayoutValue(font, 'gsub', 'scripts', computeScriptCount), 1);
+            assert.equal(computationCount, 3);
+        });
+
         it('computes the values again after a script, a language system, a feature or a lookup is added to the table', function() {
-            const table = font.tables.gsub;
             const additions = [
                 () => layout.getScriptTable('latn', true),
                 () => layout.getLangSysTable('latn', 'TRK ', true),
                 () => layout.getFeatureTable('latn', 'TRK ', 'liga', true),
                 () => layout.getLookupTables('latn', 'TRK ', 'liga', 4, true)
             ];
-            getCachedLayoutValue(table, 'scripts', computeScriptCount);
+            getCachedLayoutValue(font, 'gsub', 'scripts', computeScriptCount);
             for (const addition of additions) {
                 addition();
-                getCachedLayoutValue(table, 'scripts', computeScriptCount);
+                getCachedLayoutValue(font, 'gsub', 'scripts', computeScriptCount);
             }
             assert.equal(computationCount, 1 + additions.length);
             // reading the table, or an addition that finds what it would add, keeps the values
             layout.getLookupTables('latn', 'TRK ', 'liga', 4, true);
             layout.getFeatureTable('latn', 'dflt', 'liga');
-            getCachedLayoutValue(table, 'scripts', computeScriptCount);
+            getCachedLayoutValue(font, 'gsub', 'scripts', computeScriptCount);
             assert.equal(computationCount, 1 + additions.length);
         });
     });
