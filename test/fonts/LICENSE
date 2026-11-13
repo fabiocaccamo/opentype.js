@@ -87,6 +87,11 @@ TestCMAPMacTurkish.ttf
     SIL Open Font License, Version 1.1
     https://opensource.org/licenses/OFL-1.1
 
+TestContextualPositioning.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-contextual-positioning-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 TestCVARGVAROne.ttf
 TestCVARGVARTwo.ttf
     Copyright 2015 Google Inc. All Rights Reserved.

@@ -292,6 +292,89 @@ describe('parse.mjs', function() {
         });
     });
 
+    describe('parseSequenceContext and parseChainedSequenceContext', function() {
+        // the contextual subtables of GSUB (types 5 and 6) and GPOS (types 7 and 8), see gsub.spec.mjs and gpos.spec.mjs
+        // for each format
+        it('names the format field of the subtable as given', function() {
+            // a sequence context of format 3 at the offset 2 (after a filler): one input glyph, no lookup record
+            const sequenceContext = '0000 0003 0001 0000 0008   0001 0001 0005';
+            assert.deepStrictEqual(new Parser(unhex(sequenceContext), 2).parseSequenceContext('posFormat', 'GPOS lookup type 7'), {
+                posFormat: 3,
+                coverages: [{ format: 1, glyphs: [5] }],
+                lookupRecords: []
+            });
+            assert.strictEqual(new Parser(unhex(sequenceContext), 2).parseSequenceContext('substFormat', 'lookup type 5').substFormat, 3);
+            // a chained sequence context of format 3: no backtrack, one input glyph, no lookahead, no lookup record
+            const chainedSequenceContext = '0003 0000 0001 000C 0000 0000   0001 0001 0006';
+            assert.deepStrictEqual(new Parser(unhex(chainedSequenceContext), 0).parseChainedSequenceContext('substFormat', 'lookup type 6'), {
+                substFormat: 3,
+                backtrackCoverage: [],
+                inputCoverage: [{ format: 1, glyphs: [6] }],
+                lookaheadCoverage: [],
+                lookupRecords: []
+            });
+        });
+
+        it('reads a rule with a glyph count of 0 as an empty input without lookup records, like HarfBuzz', function() {
+            // the glyph count includes the first glyph, so the specification does not allow 0; HarfBuzz reads an empty
+            // input (Rule::sanitize, inputCount ? inputCount - 1 : 0) and applies none of the lookup records, all past
+            // its input (apply_lookup): the rule matches its first glyph and applies nothing
+            const lookupRecord = { sequenceIndex: 0, lookupListIndex: 2 };
+            // format 1: coverage [5], one rule: glyphCount 0, seqLookupCount 1, a lookup record
+            const glyphRules = '0001 0008 0001 000E   0001 0001 0005   0001 0004   0000 0001 0000 0002';
+            assert.deepStrictEqual(new Parser(unhex(glyphRules), 0).parseSequenceContext('substFormat', 'lookup type 5'), {
+                substFormat: 1,
+                coverage: { format: 1, glyphs: [5] },
+                ruleSets: [[{ input: [], lookupRecords: [] }]]
+            });
+            // format 2: coverage [5], glyph 5 in class 0, one class rule: glyphCount 0, seqLookupCount 1, a lookup record
+            const classRules = '0002 000A 0010 0001 0018   0001 0001 0005   0001 0005 0001 0000   0001 0004   0000 0001 0000 0002';
+            assert.deepStrictEqual(new Parser(unhex(classRules), 0).parseSequenceContext('posFormat', 'GPOS lookup type 7'), {
+                posFormat: 2,
+                coverage: { format: 1, glyphs: [5] },
+                classDef: { format: 1, startGlyph: 5, classes: [0] },
+                classSets: [[{ classes: [], lookupRecords: [] }]]
+            });
+            // the first rule has a glyph count of 1, the same record
+            const glyphRule = '0001 0008 0001 000E   0001 0001 0005   0001 0004   0001 0001 0000 0002';
+            assert.deepStrictEqual(new Parser(unhex(glyphRule), 0).parseSequenceContext('posFormat', 'GPOS lookup type 7').ruleSets,
+                [[{ input: [], lookupRecords: [lookupRecord] }]]);
+        });
+
+        it('reads a chained rule with an input glyph count of 0 as an empty input without lookup records, like HarfBuzz', function() {
+            // format 1: coverage [5], one rule: no backtrack, inputGlyphCount 0, no lookahead, a lookup record
+            const glyphRules = '0001 0008 0001 000E   0001 0001 0005   0001 0004   0000 0000 0000 0001 0000 0004';
+            assert.deepStrictEqual(new Parser(unhex(glyphRules), 0).parseChainedSequenceContext('posFormat', 'GPOS lookup type 8'), {
+                posFormat: 1,
+                coverage: { format: 1, glyphs: [5] },
+                chainRuleSets: [[{ backtrack: [], input: [], lookahead: [], lookupRecords: [] }]]
+            });
+            // format 2: coverage [5], NULL backtrack and lookahead class definitions, glyph 5 in input class 0, one
+            // class rule: a backtrack class 1, inputGlyphCount 0, a lookahead class 2, a lookup record
+            const classRules = '0002 000E 0000 0014 0000 0001 001C   0001 0001 0005   0001 0005 0001 0000   0001 0004   ' +
+                '0001 0001 0000 0001 0002 0001 0000 0005';
+            assert.deepStrictEqual(new Parser(unhex(classRules), 0).parseChainedSequenceContext('substFormat', 'lookup type 6'), {
+                substFormat: 2,
+                coverage: { format: 1, glyphs: [5] },
+                backtrackClassDef: undefined,
+                inputClassDef: { format: 1, startGlyph: 5, classes: [0] },
+                lookaheadClassDef: undefined,
+                chainClassSet: [[{ backtrack: [1], input: [], lookahead: [2], lookupRecords: [] }]]
+            });
+            // the input glyph count is a uint16: 0x8000 reads past the end of the data, not a negative length
+            const longInput = '0001 0008 0001 000E   0001 0001 0005   0001 0004   0000 8000';
+            assert.throws(() => new Parser(unhex(longInput), 0).parseChainedSequenceContext('posFormat', 'GPOS lookup type 8'),
+                /Offset is outside the bounds of the DataView/);
+        });
+
+        it('throws on a format that is not 1, 2 or 3, with the name of the lookup type', function() {
+            assert.throws(() => new Parser(unhex('0000 0004'), 2).parseSequenceContext('substFormat', 'lookup type 5'),
+                /0x2: lookup type 5 format must be 1, 2 or 3/);
+            assert.throws(() => new Parser(unhex('0000'), 0).parseChainedSequenceContext('posFormat', 'GPOS lookup type 8'),
+                /0x0: GPOS lookup type 8 format must be 1, 2 or 3/);
+        });
+    });
+
     describe('parseValueRecordList', function() {
         // a SinglePosFormat2 subtable at the offset 2 (after a filler), its ValueFormat 0x0044 (XAdvance, XAdvDevice)
         // list of two ValueRecords at the offset 4, then their VariationIndex tables (deltaFormat 0x8000) at the

@@ -319,6 +319,138 @@ describe('tables/gpos.mjs', function() {
         assert.deepStrictEqual(subtable.extension.mark2Array, [[{ anchorFormat: 1, xCoordinate: 0, yCoordinate: 900 }]]);
     });
 
+    // lookup type 7
+    it('can parse lookup7 SequenceContextFormat1, the glyph rules of each covered glyph', function() {
+        // https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#sequence-context-format-1-simple-glyph-contexts
+        const data = '0001 0008 0001 000E' +    // posFormat, coverage offset, seqRuleSetCount, seqRuleSet offset
+            '0001 0001 0005' +                  // coverage format 1
+            '0001 0004' +                       // seqRuleSet: seqRuleCount, seqRule offset
+            '0002 0002 0006 0000 0001 0001 0002'; // seqRule: glyphCount, seqLookupCount, input, two lookup records
+        assert.deepStrictEqual(parseLookup(7, data), {
+            posFormat: 1,
+            coverage: { format: 1, glyphs: [5] },
+            ruleSets: [[{
+                input: [6],
+                lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 1 }, { sequenceIndex: 1, lookupListIndex: 2 }]
+            }]]
+        });
+    });
+
+    it('can parse lookup7 SequenceContextFormat2, the class rules of each class with a NULL class sequence rule set', function() {
+        // https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#sequence-context-format-2-class-based-glyph-contexts
+        const data = '0002 000C 0014 0002 0000 001E' +   // posFormat, coverage and classDef offsets, two classSeqRuleSet offsets
+            '0001 0002 0005 0006' +                      // coverage format 1
+            '0001 0005 0002 0001 0001' +                 // classDef format 1: glyphs 5 and 6 in class 1
+            '0001 0004' +                                // classSeqRuleSet: classSeqRuleCount, classSeqRule offset
+            '0002 0001 0001 0001 0003';                  // classSeqRule: glyphCount, seqLookupCount, input class, lookup record
+        assert.deepStrictEqual(parseLookup(7, data), {
+            posFormat: 2,
+            coverage: { format: 1, glyphs: [5, 6] },
+            classDef: { format: 1, startGlyph: 5, classes: [1, 1] },
+            classSets: [undefined, [{ classes: [1], lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 3 }] }]]
+        });
+    });
+
+    it('can parse lookup7 SequenceContextFormat3, the coverage of each input glyph', function() {
+        // https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#sequence-context-format-3-coverage-based-glyph-contexts
+        const data = '0003 0002 0001 000E 0014 0000 0004' + // posFormat, glyphCount, seqLookupCount, coverage offsets, lookup record
+            '0001 0001 0005   0001 0001 0006';             // coverage tables format 1
+        assert.deepStrictEqual(parseLookup(7, data), {
+            posFormat: 3,
+            coverages: [{ format: 1, glyphs: [5] }, { format: 1, glyphs: [6] }],
+            lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 4 }]
+        });
+    });
+
+    // lookup type 8
+    it('can parse lookup8 ChainedSequenceContextFormat1, the glyph rules of each covered glyph', function() {
+        // https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#chained-sequence-context-format-1-simple-glyph-contexts
+        const data = '0001 0008 0001 000E' +    // posFormat, coverage offset, chainedSeqRuleSetCount, chainedSeqRuleSet offset
+            '0001 0001 0005' +                  // coverage format 1
+            '0001 0004' +                       // chainedSeqRuleSet: chainedSeqRuleCount, chainedSeqRule offset
+            '0001 0004   0002 0006   0001 0007   0001 0001 0002'; // backtrack, input, lookahead, lookup records
+        assert.deepStrictEqual(parseLookup(8, data), {
+            posFormat: 1,
+            coverage: { format: 1, glyphs: [5] },
+            chainRuleSets: [[{
+                backtrack: [4],
+                input: [6],
+                lookahead: [7],
+                lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 2 }]
+            }]]
+        });
+    });
+
+    it('can parse lookup8 ChainedSequenceContextFormat2, the class rules of each input class', function() {
+        // https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#chained-sequence-context-format-2-class-based-glyph-contexts
+        const data = '0002 0010 0016 001E 0028 0002 0000 0030' + // posFormat, coverage and classDef offsets, two chainedClassSeqRuleSet offsets
+            '0001 0001 0005' +                                   // coverage format 1
+            '0001 0004 0001 0001' +                              // backtrack classDef format 1: glyph 4 in class 1
+            '0001 0005 0002 0001 0001' +                         // input classDef format 1: glyphs 5 and 6 in class 1
+            '0001 0007 0001 0002' +                              // lookahead classDef format 1: glyph 7 in class 2
+            '0001 0004' +                                        // chainedClassSeqRuleSet: rule count, rule offset
+            '0001 0001   0002 0001   0001 0002   0001 0000 0003'; // backtrack, input, lookahead classes, lookup records
+        assert.deepStrictEqual(parseLookup(8, data), {
+            posFormat: 2,
+            coverage: { format: 1, glyphs: [5] },
+            backtrackClassDef: { format: 1, startGlyph: 4, classes: [1] },
+            inputClassDef: { format: 1, startGlyph: 5, classes: [1, 1] },
+            lookaheadClassDef: { format: 1, startGlyph: 7, classes: [2] },
+            chainClassSet: [undefined, [{
+                backtrack: [1],
+                input: [1],
+                lookahead: [2],
+                lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 3 }]
+            }]]
+        });
+    });
+
+    it('can parse lookup8 ChainedSequenceContextFormat3, the coverage of each glyph of the sequences', function() {
+        // https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#chained-sequence-context-format-3-coverage-based-glyph-contexts
+        const data = '0003 0001 0014 0001 001A 0001 0020 0001 0000 0004' + // posFormat, the coverage offsets of each sequence, lookup record
+            '0001 0001 0004   0001 0001 0005   0001 0001 0006';           // coverage tables format 1
+        assert.deepStrictEqual(parseLookup(8, data), {
+            posFormat: 3,
+            backtrackCoverage: [{ format: 1, glyphs: [4] }],
+            inputCoverage: [{ format: 1, glyphs: [5] }],
+            lookaheadCoverage: [{ format: 1, glyphs: [6] }],
+            lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 4 }]
+        });
+    });
+
+    it('throws on a lookup7 or lookup8 format that is not 1, 2 or 3', function() {
+        for (const lookupType of [7, 8]) {
+            assert.throws(() => parseLookup(lookupType, '0004 0000 0000 0000'), new RegExp(`GPOS lookup type ${lookupType} format must be 1, 2 or 3`));
+        }
+    });
+
+    it('can parse the contextual positioning lookups of an extension lookup', function() {
+        const data = '0001 0008 00000008' +
+            '0003 0001 0014 0001 001A 0001 0020 0001 0000 0004   0001 0001 0004   0001 0001 0005   0001 0001 0006';
+        const subtable = parseLookup(9, data);
+        assert.strictEqual(subtable.lookupType, 8);
+        assert.deepStrictEqual(subtable.extension.inputCoverage, [{ format: 1, glyphs: [5] }]);
+    });
+
+    it('reads the contextual positioning lookups of a font like fontTools, in the formats 1, 2 and 3', function() {
+        // TestContextualPositioning.ttf, built by test/generate-contextual-positioning-font.py (fontTools otTables): the
+        // lookups 9 to 14 of the features ss01 to ss06; a 5, b 6, c 7, d 8, e 9, o 12, x 13, T 3
+        const font = parse(readFileSync('./test/fonts/TestContextualPositioning.ttf'));
+        const lookups = font.tables.gpos.lookups;
+        assert.deepStrictEqual(lookups.slice(9, 15).map(lookup => [lookup.lookupType, lookup.subtables.map(subtable => subtable.posFormat)]),
+            [[7, [1]], [7, [2]], [7, [3]], [8, [1]], [8, [2]], [8, [3]]]);
+        // CONTEXT_CLASSES: c d in class 2, its rule c d' a b' with lookup SHIFT_UP (2) at the second glyph
+        const contextClasses = lookups[10].subtables[0];
+        assert.deepStrictEqual(contextClasses.coverage, { format: 1, glyphs: [5, 6, 7, 8, 9, 12] });
+        assert.strictEqual(font.position.getGlyphClass(contextClasses.classDef, 8), 2);
+        assert.deepStrictEqual(contextClasses.classSets[2], [{ classes: [1], lookupRecords: [{ sequenceIndex: 1, lookupListIndex: 2 }] }]);
+        // CHAIN_GLYPHS: T a' lookup TIGHTEN (0) b' x; a' lookup SHIFT_UP (2) x;
+        assert.deepStrictEqual(lookups[12].subtables[0].chainRuleSets, [[
+            { backtrack: [3], input: [6], lookahead: [13], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }] },
+            { backtrack: [], input: [], lookahead: [13], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 2 }] }
+        ]]);
+    });
+
     //// Lookup type 9 ////////////////////////////////////////////////////////
     it('can parse lookup9 ExtensionPosFormat1 wrapping a PairPosFormat1 subtable', function() {
         // https://docs.microsoft.com/en-us/typography/opentype/spec/gpos#lookuptype-9-extension-positioning

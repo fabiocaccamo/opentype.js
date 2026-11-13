@@ -66,98 +66,14 @@ subtableParsers[4] = function parseLookup4() {
     };
 };
 
-const lookupRecordDesc = {
-    sequenceIndex: Parser.uShort,
-    lookupListIndex: Parser.uShort
-};
-
-// https://www.microsoft.com/typography/OTSPEC/GSUB.htm#CSF
+// https://learn.microsoft.com/en-us/typography/opentype/spec/gsub#lookuptype-5-contextual-substitution-subtable
 subtableParsers[5] = function parseLookup5() {
-    const start = this.offset + this.relativeOffset;
-    const substFormat = this.parseUShort();
-
-    if (substFormat === 1) {
-        return {
-            substFormat: substFormat,
-            coverage: this.parsePointer(Parser.coverage),
-            ruleSets: this.parseListOfLists(function() {
-                const glyphCount = this.parseUShort();
-                const substCount = this.parseUShort();
-                return {
-                    input: this.parseUShortList(glyphCount - 1),
-                    lookupRecords: this.parseRecordList(substCount, lookupRecordDesc)
-                };
-            })
-        };
-    } else if (substFormat === 2) {
-        return {
-            substFormat: substFormat,
-            coverage: this.parsePointer(Parser.coverage),
-            classDef: this.parsePointer(Parser.classDef),
-            classSets: this.parseListOfLists(function() {
-                const glyphCount = this.parseUShort();
-                const substCount = this.parseUShort();
-                return {
-                    classes: this.parseUShortList(glyphCount - 1),
-                    lookupRecords: this.parseRecordList(substCount, lookupRecordDesc)
-                };
-            })
-        };
-    } else if (substFormat === 3) {
-        const glyphCount = this.parseUShort();
-        const substCount = this.parseUShort();
-        return {
-            substFormat: substFormat,
-            coverages: this.parseList(glyphCount, Parser.pointer(Parser.coverage)),
-            lookupRecords: this.parseRecordList(substCount, lookupRecordDesc)
-        };
-    }
-    check.assert(false, '0x' + start.toString(16) + ': lookup type 5 format must be 1, 2 or 3.');
+    return this.parseSequenceContext('substFormat', 'lookup type 5');
 };
 
-// https://www.microsoft.com/typography/OTSPEC/GSUB.htm#CC
+// https://learn.microsoft.com/en-us/typography/opentype/spec/gsub#lookuptype-6-chained-contexts-substitution-subtable
 subtableParsers[6] = function parseLookup6() {
-    const start = this.offset + this.relativeOffset;
-    const substFormat = this.parseUShort();
-    if (substFormat === 1) {
-        return {
-            substFormat: 1,
-            coverage: this.parsePointer(Parser.coverage),
-            chainRuleSets: this.parseListOfLists(function() {
-                return {
-                    backtrack: this.parseUShortList(),
-                    input: this.parseUShortList(this.parseShort() - 1),
-                    lookahead: this.parseUShortList(),
-                    lookupRecords: this.parseRecordList(lookupRecordDesc)
-                };
-            })
-        };
-    } else if (substFormat === 2) {
-        return {
-            substFormat: 2,
-            coverage: this.parsePointer(Parser.coverage),
-            backtrackClassDef: this.parsePointer(Parser.classDef),
-            inputClassDef: this.parsePointer(Parser.classDef),
-            lookaheadClassDef: this.parsePointer(Parser.classDef),
-            chainClassSet: this.parseListOfLists(function() {
-                return {
-                    backtrack: this.parseUShortList(),
-                    input: this.parseUShortList(this.parseShort() - 1),
-                    lookahead: this.parseUShortList(),
-                    lookupRecords: this.parseRecordList(lookupRecordDesc)
-                };
-            })
-        };
-    } else if (substFormat === 3) {
-        return {
-            substFormat: 3,
-            backtrackCoverage: this.parseList(Parser.pointer(Parser.coverage)),
-            inputCoverage: this.parseList(Parser.pointer(Parser.coverage)),
-            lookaheadCoverage: this.parseList(Parser.pointer(Parser.coverage)),
-            lookupRecords: this.parseRecordList(lookupRecordDesc)
-        };
-    }
-    check.assert(false, '0x' + start.toString(16) + ': lookup type 6 format must be 1, 2 or 3.');
+    return this.parseChainedSequenceContext('substFormat', 'lookup type 6');
 };
 
 // https://www.microsoft.com/typography/OTSPEC/GSUB.htm#ES

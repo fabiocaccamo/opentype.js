@@ -316,14 +316,14 @@ function isMarkIgnoredByLookup(gdef, lookupTable, glyphIndex) {
 
 /**
  * Whether a lookup ignores a glyph of a font without glyph classes (no GlyphClassDef in the GDEF table of the layout,
- * see getLayoutGdefTable) that a mark attachment subtable covers as a mark, taking it as a mark of no mark attachment
- * class: with IgnoreMarks, with UseMarkFilteringSet when the mark glyph set of the lookup does not cover it, and with a
- * MarkAttachmentType (see isMarkIgnoredByLookup). Like HarfBuzz with the classes it then synthesizes for the glyphs of
- * the nonspacing marks of Unicode (Mn); not yet like HarfBuzz for the glyph of a spacing character (e.g. U+00B4), a
- * base glyph for HarfBuzz, which no such lookupFlag ignores.
+ * see getLayoutGdefTable), taking it as a mark of no mark attachment class: with IgnoreMarks, with UseMarkFilteringSet
+ * when the mark glyph set of the lookup does not cover it, and with a MarkAttachmentType (see isMarkIgnoredByLookup).
+ * For a mark attachment lookup, which applies only at the glyphs its subtables cover as marks, like HarfBuzz with the
+ * classes it then synthesizes for the glyphs of the nonspacing marks of Unicode (Mn); not yet like HarfBuzz for the
+ * glyph of a spacing character (e.g. U+00B4), a base glyph for HarfBuzz, which no such lookupFlag ignores.
  * @param {object|undefined} gdef - the GDEF table of the font
  * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
- * @param {number} glyphIndex - the index of a glyph that a mark attachment subtable covers as a mark
+ * @param {number} glyphIndex
  * @returns {boolean} false with a GlyphClassDef, whose classes isGlyphIgnoredByLookup reads
  */
 function isMarkIgnoredWithoutGlyphClasses(gdef, lookupTable, glyphIndex) {
@@ -403,6 +403,258 @@ function getNotIgnoredGlyphPositions(gdef, lookupTable, glyphs, position, step, 
         positions.push(nextPosition);
     }
     return positions;
+}
+
+/**
+ * A sequence of a contextual rule (its backtrack, its input or its lookahead).
+ * @typedef RuleSequence
+ * @type Object
+ * @property {Array} items - glyph indexes, glyph classes or coverage tables, in the order they are matched
+ * @property {function(number, any): boolean} matchesItem - whether a glyph index matches an item
+ */
+
+const matchesGlyphIndex = (glyphIndex, expectedGlyphIndex) => glyphIndex === expectedGlyphIndex;
+const matchesCoverage = (glyphIndex, coverage) => getCoverageIndex(coverage, glyphIndex) >= 0;
+const EMPTY_SEQUENCE = { items: [], matchesItem: matchesGlyphIndex };
+
+/**
+ * The class of a glyph in a class definition table of a contextual subtable.
+ * @param {object|undefined} classDef
+ * @param {number} glyphIndex
+ * @returns {number} 0 for a glyph of no class, and without a class definition table
+ */
+function getContextGlyphClass(classDef, glyphIndex) {
+    return (classDef && getGlyphClass(classDef, glyphIndex)) || 0;
+}
+
+/**
+ * The matchesItem function of a sequence of glyph classes (see RuleSequence).
+ * @param {object|undefined} classDef
+ * @returns {function(number, number): boolean}
+ */
+function getGlyphClassMatcher(classDef) {
+    return (glyphIndex, glyphClass) => getContextGlyphClass(classDef, glyphIndex) === glyphClass;
+}
+
+/**
+ * Match a sequence of a contextual rule on the glyphs that a lookup does not ignore, from the glyph after a position
+ * (the glyph before it with a step of -1).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the rule
+ * @param {number[]} glyphIndexes - the glyphs of the context
+ * @param {number} position - the position the sequence starts after
+ * @param {number} step - 1 for an input or a lookahead, -1 for a backtrack
+ * @param {RuleSequence} sequence
+ * @returns {number[]|null} the positions of the matched glyphs, null if the sequence does not match
+ */
+function matchRuleSequence(gdef, lookupTable, glyphIndexes, position, step, sequence) {
+    const items = sequence.items;
+    const positions = getNotIgnoredGlyphPositions(gdef, lookupTable, glyphIndexes, position, step, items.length);
+    if (positions.length < items.length) {
+        return null;
+    }
+    for (let i = 0; i < items.length; i++) {
+        if (!sequence.matchesItem(glyphIndexes[positions[i]], items[i])) {
+            return null;
+        }
+    }
+    return positions;
+}
+
+/**
+ * Match a contextual rule at a glyph, on the glyphs that the lookup does not ignore, like HarfBuzz: the input glyphs
+ * from the glyph after it, the lookahead from the glyph after the last input glyph, the backtrack from the glyph before
+ * it. The glyph itself, the first glyph of the input, is matched by the caller.
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the rule
+ * @param {number[]} glyphIndexes - the glyphs of the context
+ * @param {number} index - the position of the glyph
+ * @param {{backtrack: RuleSequence, input: RuleSequence, lookahead: RuleSequence}} rule - the input without its first
+ * glyph
+ * @returns {number[]|null} the positions of the input glyphs, the glyph first, null if the rule does not match
+ */
+function matchContextRule(gdef, lookupTable, glyphIndexes, index, rule) {
+    const inputPositions = matchRuleSequence(gdef, lookupTable, glyphIndexes, index, 1, rule.input);
+    if (!inputPositions) {
+        return null;
+    }
+    inputPositions.unshift(index);
+    const lastInputPosition = inputPositions[inputPositions.length - 1];
+    if (!matchRuleSequence(gdef, lookupTable, glyphIndexes, lastInputPosition, 1, rule.lookahead)) {
+        return null;
+    }
+    if (!matchRuleSequence(gdef, lookupTable, glyphIndexes, index, -1, rule.backtrack)) {
+        return null;
+    }
+    return inputPositions;
+}
+
+/**
+ * A contextual rule that matches at a glyph (see matchSequenceContext and matchChainedSequenceContext).
+ * @typedef ContextRuleMatch
+ * @type Object
+ * @property {number[]} inputPositions - the positions of the input glyphs, the glyph first
+ * @property {Array<{sequenceIndex: number, lookupListIndex: number}>} lookupRecords - the lookup records of the rule
+ */
+
+/**
+ * Match the rules of a rule set at a glyph, the first rule that matches wins, like HarfBuzz.
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the rules
+ * @param {number[]} glyphIndexes - the glyphs of the context
+ * @param {number} index - the position of the glyph
+ * @param {object[]|undefined} ruleSet - the rules, none if undefined
+ * @param {function(object): {backtrack: RuleSequence, input: RuleSequence, lookahead: RuleSequence}} getRuleSequences -
+ * the sequences of a rule, its input without its first glyph
+ * @returns {ContextRuleMatch|null}
+ */
+function matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, getRuleSequences) {
+    for (const rule of ruleSet || []) {
+        const inputPositions = matchContextRule(gdef, lookupTable, glyphIndexes, index, getRuleSequences(rule));
+        if (inputPositions) {
+            return { inputPositions, lookupRecords: rule.lookupRecords };
+        }
+    }
+    return null;
+}
+
+/**
+ * Match the rule of a coverage-based subtable (format 3) at a glyph: a rule without input glyphs matches nothing, like
+ * HarfBuzz.
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the rule
+ * @param {number[]} glyphIndexes - the glyphs of the context
+ * @param {number} index - the position of the glyph
+ * @param {{backtrack: object[], input: object[], lookahead: object[]}} coverages - the coverage tables of each sequence
+ * @param {Array<{sequenceIndex: number, lookupListIndex: number}>} lookupRecords
+ * @returns {ContextRuleMatch|null}
+ */
+function matchCoverageRule(gdef, lookupTable, glyphIndexes, index, coverages, lookupRecords) {
+    if (!coverages.input.length || !matchesCoverage(glyphIndexes[index], coverages.input[0])) {
+        return null;
+    }
+    const inputPositions = matchContextRule(gdef, lookupTable, glyphIndexes, index, {
+        backtrack: { items: coverages.backtrack, matchesItem: matchesCoverage },
+        input: { items: coverages.input.slice(1), matchesItem: matchesCoverage },
+        lookahead: { items: coverages.lookahead, matchesItem: matchesCoverage }
+    });
+    return inputPositions && { inputPositions, lookupRecords };
+}
+
+/**
+ * The rule set of the coverage index of a glyph (format 1), undefined when the coverage table does not cover it.
+ * @param {object} coverage
+ * @param {Array<object[]|undefined>} ruleSets
+ * @param {number} glyphIndex
+ * @returns {object[]|undefined}
+ */
+function getCoveredGlyphRuleSet(coverage, ruleSets, glyphIndex) {
+    const coverageIndex = getCoverageIndex(coverage, glyphIndex);
+    return coverageIndex < 0 ? undefined : ruleSets[coverageIndex];
+}
+
+/**
+ * The rule set of the class of a glyph (format 2), undefined when the coverage table does not cover it.
+ * @param {object} coverage
+ * @param {object|undefined} classDef
+ * @param {Array<object[]|undefined>} classSets
+ * @param {number} glyphIndex
+ * @returns {object[]|undefined}
+ */
+function getCoveredClassRuleSet(coverage, classDef, classSets, glyphIndex) {
+    if (getCoverageIndex(coverage, glyphIndex) < 0) {
+        return undefined;
+    }
+    return classSets[getContextGlyphClass(classDef, glyphIndex)];
+}
+
+/**
+ * Match a sequence context subtable (GSUB lookup type 5, GPOS lookup type 7) at a glyph, like HarfBuzz: the first rule
+ * of the rule set of the glyph (format 1) or of its class (format 2) that matches, or the rule of format 3, on the
+ * glyphs that the lookup does not ignore (see matchContextRule).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the subtable
+ * @param {object} subtable - see Parser.parseSequenceContext
+ * @param {number} format - the format of the subtable (its substFormat or posFormat)
+ * @param {number[]} glyphIndexes - the glyphs of the context
+ * @param {number} index - the position of the glyph
+ * @returns {ContextRuleMatch|null}
+ */
+function matchSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes, index) {
+    const glyphIndex = glyphIndexes[index];
+    switch (format) {
+        case 1: {
+            const ruleSet = getCoveredGlyphRuleSet(subtable.coverage, subtable.ruleSets, glyphIndex);
+            return matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, rule => ({
+                backtrack: EMPTY_SEQUENCE,
+                input: { items: rule.input, matchesItem: matchesGlyphIndex },
+                lookahead: EMPTY_SEQUENCE
+            }));
+        }
+        case 2: {
+            const matchesClass = getGlyphClassMatcher(subtable.classDef);
+            const ruleSet = getCoveredClassRuleSet(
+                subtable.coverage, subtable.classDef, subtable.classSets, glyphIndex
+            );
+            return matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, rule => ({
+                backtrack: EMPTY_SEQUENCE,
+                input: { items: rule.classes, matchesItem: matchesClass },
+                lookahead: EMPTY_SEQUENCE
+            }));
+        }
+        case 3:
+            return matchCoverageRule(gdef, lookupTable, glyphIndexes, index,
+                { backtrack: [], input: subtable.coverages, lookahead: [] }, subtable.lookupRecords);
+        default:
+            throw new Error(`Unknown sequence context format: ${format}`);
+    }
+}
+
+/**
+ * Match a chained sequence context subtable (GSUB lookup type 6, GPOS lookup type 8) at a glyph, like HarfBuzz: the
+ * first rule of the rule set of the glyph (format 1) or of its input class (format 2) that matches, or the rule of
+ * format 3, on the glyphs that the lookup does not ignore (see matchContextRule).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the subtable
+ * @param {object} subtable - see Parser.parseChainedSequenceContext
+ * @param {number} format - the format of the subtable (its substFormat or posFormat)
+ * @param {number[]} glyphIndexes - the glyphs of the context
+ * @param {number} index - the position of the glyph
+ * @returns {ContextRuleMatch|null}
+ */
+function matchChainedSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes, index) {
+    const glyphIndex = glyphIndexes[index];
+    switch (format) {
+        case 1: {
+            const ruleSet = getCoveredGlyphRuleSet(subtable.coverage, subtable.chainRuleSets, glyphIndex);
+            return matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, rule => ({
+                backtrack: { items: rule.backtrack, matchesItem: matchesGlyphIndex },
+                input: { items: rule.input, matchesItem: matchesGlyphIndex },
+                lookahead: { items: rule.lookahead, matchesItem: matchesGlyphIndex }
+            }));
+        }
+        case 2: {
+            const matchesBacktrackClass = getGlyphClassMatcher(subtable.backtrackClassDef);
+            const matchesInputClass = getGlyphClassMatcher(subtable.inputClassDef);
+            const matchesLookaheadClass = getGlyphClassMatcher(subtable.lookaheadClassDef);
+            const ruleSet = getCoveredClassRuleSet(
+                subtable.coverage, subtable.inputClassDef, subtable.chainClassSet, glyphIndex
+            );
+            return matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, rule => ({
+                backtrack: { items: rule.backtrack, matchesItem: matchesBacktrackClass },
+                input: { items: rule.input, matchesItem: matchesInputClass },
+                lookahead: { items: rule.lookahead, matchesItem: matchesLookaheadClass }
+            }));
+        }
+        case 3:
+            return matchCoverageRule(gdef, lookupTable, glyphIndexes, index, {
+                backtrack: subtable.backtrackCoverage,
+                input: subtable.inputCoverage,
+                lookahead: subtable.lookaheadCoverage
+            }, subtable.lookupRecords);
+        default:
+            throw new Error(`Unknown chained sequence context format: ${format}`);
+    }
 }
 
 /**
@@ -695,6 +947,8 @@ export {
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
     getNotIgnoredGlyphPositions,
+    matchSequenceContext,
+    matchChainedSequenceContext,
     RIGHT_TO_LEFT,
     IGNORE_BASE_GLYPHS,
     IGNORE_LIGATURES,

@@ -297,6 +297,18 @@ describe('font.mjs', function() {
             assert.equal(trackingFont.getAdvanceWidth('AVTo', trackingFont.unitsPerEm, { kerning: false }), 1366 + 1366 + 1251 + 1139);
         });
 
+        it('leaves out the contextual kerning of the kern feature, which the text layout applies', function() {
+            // TestContextualPositioning.ttf (test/generate-contextual-positioning-font.py): its kern feature has the
+            // contextual lookup CONTEXTUAL_KERN only (type 8), ignore pos T' o' x; pos T' lookup KERN_PAIRS o;
+            // KERN_PAIRS: pos T o -70; hb-shape --no-glyph-names --cluster-level=1 TestContextualPositioning.ttf -u 0054,006F
+            // [3=0+530|12=1+500]
+            const contextualFont = loadSync('./test/fonts/TestContextualPositioning.ttf');
+            const glyph = character => contextualFont.charToGlyph(character);
+            assert.deepStrictEqual(contextualFont.position.getKerningTables('latn'), []);
+            assert.equal(contextualFont.getKerningValue(glyph('T'), glyph('o')), 0);
+            assert.equal(contextualFont.getAdvanceWidth('To', contextualFont.unitsPerEm), 530 + 500);
+        });
+
         it('uses the kern table for a script whose GPOS has no kern feature, not when the kern feature has no pair adjustment lookup', function() {
             // checked with hb-shape on fonts built by fontTools with the same tables: a font whose kern feature
             // has a single adjustment lookup only is not kerned by its kern table
@@ -1687,23 +1699,25 @@ describe('font.mjs', function() {
             assert.strictEqual(formatShape(requiredFeatureFont.shape('do', { features: { ss01: false } })), '[8=0+420|9=1+500]');
         });
 
-        it('skips the lookups of the types not implemented yet, with a warning once per font and lookup type', function() {
-            // TestTracking3.ttf: its required feature trak has a chained context positioning lookup (type 8), skipped,
-            // and single adjustment lookups; -u 0041,0056: [36=0+1290|57=1@-76,0+1290]
+        it('applies the contextual positioning lookups without a warning', function() {
+            // TestTracking3.ttf: its required feature trak has a chained context positioning lookup (type 8, format 2, in an
+            // extension lookup); --variations=TRAK=1 -u 0041,0056: [36=0+2109|57=1@-485,0+1699]; the lookups of type 7 and 8,
+            // formats 1 to 3, of TestContextualPositioning.ttf (ss01 to ss06), --features=+ss01,+ss02,+ss03,+ss04,+ss05,+ss06
+            // -u 0041,0056: [2=0@10,0+625|4=1+560]
             const warnings = [];
             const consoleWarn = console.warn;
             console.warn = message => warnings.push(message);
             try {
                 const trackingFont = loadSync('./test/fonts/TestTracking3.ttf');
-                assert.strictEqual(formatShape(trackingFont.shape('AV')), '[36=0+1290|57=1@-76,0+1290]');
-                trackingFont.shape('To');
-                // a font parsed again is another font, which warns again
-                loadSync('./test/fonts/TestTracking3.ttf').shape('AV');
+                assert.strictEqual(formatShape(trackingFont.shape('AV', { variation: { TRAK: 1 } })), '[36=0+2109|57=1@-485,0+1699]');
+                const contextualFont = loadSync('./test/fonts/TestContextualPositioning.ttf');
+                const features = { ss01: true, ss02: true, ss03: true, ss04: true, ss05: true, ss06: true };
+                assert.strictEqual(formatShape(contextualFont.shape('AV', { features })), '[2=0@10,0+625|4=1+560]');
+                contextualFont.shape('Tabcdeox', { features });
             } finally {
                 console.warn = consoleWarn;
             }
-            const warning = '[opentype.js] GPOS lookupType: 8 is not yet supported, lookup skipped';
-            assert.deepStrictEqual(warnings, [warning, warning]);
+            assert.deepStrictEqual(warnings, []);
         });
 
         it('applies the cursive and mark attachment lookups without a warning', function() {
