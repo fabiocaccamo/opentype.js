@@ -160,8 +160,8 @@ const fontWarnings = new WeakMap();
  * Warn about a value of a font (e.g. a lookup type that is not supported yet), once per font, kind and value. The
  * message is built at the first warning only, as the callers check their warning at every text they lay out.
  * @param {opentype.Font} font
- * @param {string} kind - e.g. 'GPOS lookupType'
- * @param {number|string} value - e.g. the lookup type
+ * @param {string} kind - e.g. 'GSUB substitutionType'
+ * @param {number|string} value - e.g. the substitution type
  * @param {function(): string} getMessage
  */
 function warnOncePerFont(font, kind, value, getMessage) {

@@ -744,6 +744,140 @@ Parser.prototype.parseLookupList = function(lookupTableParsers) {
     }))) || [];
 };
 
+// sequence context tables
+// The contextual lookups of GSUB (types 5 and 6) and of GPOS (types 7 and 8) share these tables, only the name of
+// their format field differs (substFormat, posFormat).
+// https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#sequence-context-format-1-simple-glyph-contexts
+
+const sequenceLookupRecordDescription = {
+    sequenceIndex: Parser.uShort,
+    lookupListIndex: Parser.uShort
+};
+
+/**
+ * The length of the input of a rule after its first glyph, like HarfBuzz (Rule::sanitize): a glyph count of 0, which
+ * the specification does not allow, gives an empty input.
+ * @param {number} glyphCount - the input glyphs of the rule, its first glyph included
+ * @returns {number}
+ */
+function getRuleInputLength(glyphCount) {
+    return glyphCount ? glyphCount - 1 : 0;
+}
+
+/**
+ * The number of lookup records of a rule to parse, like HarfBuzz: none for a glyph count of 0, whose sequence indexes
+ * are all past the input (apply_lookup), so that the rule matches its first glyph and applies nothing.
+ * @param {number} glyphCount - the input glyphs of the rule, its first glyph included
+ * @param {number} sequenceLookupCount - the lookup records of the rule
+ * @returns {number}
+ */
+function getRuleLookupRecordCount(glyphCount, sequenceLookupCount) {
+    return glyphCount ? sequenceLookupCount : 0;
+}
+
+/**
+ * Parse a sequence context subtable of format 1, 2 or 3 (GSUB lookup type 5, GPOS lookup type 7).
+ * @param {string} formatField - the name of the format field of the subtable: substFormat or posFormat
+ * @param {string} lookupName - the name of the lookup type in the error of an unknown format, e.g. 'GPOS lookup type 7'
+ * @returns {object} rule sets of glyphs (format 1), of classes (format 2), or coverages (format 3), with their lookup
+ * records
+ */
+Parser.prototype.parseSequenceContext = function(formatField, lookupName) {
+    const start = this.offset + this.relativeOffset;
+    const format = this.parseUShort();
+    if (format === 1) {
+        return {
+            [formatField]: format,
+            coverage: this.parsePointer(Parser.coverage),
+            ruleSets: this.parseListOfLists(function() {
+                const glyphCount = this.parseUShort();
+                const sequenceLookupCount = this.parseUShort();
+                return {
+                    input: this.parseUShortList(getRuleInputLength(glyphCount)),
+                    lookupRecords: this.parseRecordList(
+                        getRuleLookupRecordCount(glyphCount, sequenceLookupCount), sequenceLookupRecordDescription
+                    )
+                };
+            })
+        };
+    } else if (format === 2) {
+        return {
+            [formatField]: format,
+            coverage: this.parsePointer(Parser.coverage),
+            classDef: this.parsePointer(Parser.classDef),
+            classSets: this.parseListOfLists(function() {
+                const glyphCount = this.parseUShort();
+                const sequenceLookupCount = this.parseUShort();
+                return {
+                    classes: this.parseUShortList(getRuleInputLength(glyphCount)),
+                    lookupRecords: this.parseRecordList(
+                        getRuleLookupRecordCount(glyphCount, sequenceLookupCount), sequenceLookupRecordDescription
+                    )
+                };
+            })
+        };
+    } else if (format === 3) {
+        const glyphCount = this.parseUShort();
+        const sequenceLookupCount = this.parseUShort();
+        return {
+            [formatField]: format,
+            coverages: this.parseList(glyphCount, Parser.pointer(Parser.coverage)),
+            lookupRecords: this.parseRecordList(sequenceLookupCount, sequenceLookupRecordDescription)
+        };
+    }
+    check.assert(false, '0x' + start.toString(16) + ': ' + lookupName + ' format must be 1, 2 or 3.');
+};
+
+// a chained sequence rule (format 1) or chained class sequence rule (format 2)
+function parseChainedSequenceRule() {
+    const backtrack = this.parseUShortList();
+    const inputGlyphCount = this.parseUShort();
+    const input = this.parseUShortList(getRuleInputLength(inputGlyphCount));
+    const lookahead = this.parseUShortList();
+    const sequenceLookupCount = this.parseUShort();
+    const lookupRecords = this.parseRecordList(
+        getRuleLookupRecordCount(inputGlyphCount, sequenceLookupCount), sequenceLookupRecordDescription
+    );
+    return { backtrack, input, lookahead, lookupRecords };
+}
+
+/**
+ * Parse a chained sequence context subtable of format 1, 2 or 3 (GSUB lookup type 6, GPOS lookup type 8).
+ * @param {string} formatField - the name of the format field of the subtable: substFormat or posFormat
+ * @param {string} lookupName - the name of the lookup type in the error of an unknown format, e.g. 'GPOS lookup type 8'
+ * @returns {object} rule sets of glyphs (format 1), of classes (format 2), or coverages (format 3), with their lookup
+ * records
+ */
+Parser.prototype.parseChainedSequenceContext = function(formatField, lookupName) {
+    const start = this.offset + this.relativeOffset;
+    const format = this.parseUShort();
+    if (format === 1) {
+        return {
+            [formatField]: format,
+            coverage: this.parsePointer(Parser.coverage),
+            chainRuleSets: this.parseListOfLists(parseChainedSequenceRule)
+        };
+    } else if (format === 2) {
+        return {
+            [formatField]: format,
+            coverage: this.parsePointer(Parser.coverage),
+            backtrackClassDef: this.parsePointer(Parser.classDef),
+            inputClassDef: this.parsePointer(Parser.classDef),
+            lookaheadClassDef: this.parsePointer(Parser.classDef),
+            chainClassSet: this.parseListOfLists(parseChainedSequenceRule)
+        };
+    } else if (format === 3) {
+        return {
+            [formatField]: format,
+            backtrackCoverage: this.parseList(Parser.pointer(Parser.coverage)),
+            inputCoverage: this.parseList(Parser.pointer(Parser.coverage)),
+            lookaheadCoverage: this.parseList(Parser.pointer(Parser.coverage)),
+            lookupRecords: this.parseRecordList(sequenceLookupRecordDescription)
+        };
+    }
+    check.assert(false, '0x' + start.toString(16) + ': ' + lookupName + ' format must be 1, 2 or 3.');
+};
+
 // https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2#featurevariations-table
 Parser.prototype.parseFeatureVariationsList = function() {
     return this.parsePointer32(function() {

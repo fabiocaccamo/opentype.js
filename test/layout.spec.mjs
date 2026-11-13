@@ -11,6 +11,8 @@ import Layout, {
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
     getNotIgnoredGlyphPositions,
+    matchSequenceContext,
+    matchChainedSequenceContext,
     getRequiredFeatureIndex,
     getOpenTypeScriptTags,
     selectScriptTag
@@ -517,6 +519,118 @@ describe('layout.mjs', function() {
             assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 0, 1, 3), [2, 4]);
             assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 4, -1, 2), [2, 0]);
             assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 0, 1, 0), []);
+        });
+    });
+
+    describe('matchSequenceContext and matchChainedSequenceContext', function() {
+        // the matching of the contextual subtables of GSUB (types 5 and 6) and GPOS (types 7 and 8), see
+        // featureQuery.spec.mjs and position.spec.mjs for their references from hb-shape
+        const gdef = createLookupFlagsGdef();
+        const { a: glyphA, b: glyphB, c: glyphC, acute } = glyphIndexes;
+        const noFlag = { lookupFlag: 0 };
+        const ignoreMarks = { lookupFlag: 0x0008 };
+        const coverage = glyphs => ({ format: 1, glyphs });
+        const records = lookupListIndex => [{ sequenceIndex: 0, lookupListIndex }];
+
+        it('matches the first rule of the rule set of the glyph (format 1), the input positions across the glyphs the lookup ignores', function() {
+            const subtable = {
+                coverage: coverage([glyphA]),
+                ruleSets: [[{ input: [glyphC], lookupRecords: records(1) }, { input: [glyphB], lookupRecords: records(2) }, { input: [], lookupRecords: records(3) }]]
+            };
+            const glyphs = [glyphA, acute, glyphB];
+            assert.deepStrictEqual(matchSequenceContext(gdef, ignoreMarks, subtable, 1, glyphs, 0), { inputPositions: [0, 2], lookupRecords: records(2) });
+            assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 1, glyphs, 0), { inputPositions: [0], lookupRecords: records(3) });
+            assert.strictEqual(matchSequenceContext(gdef, noFlag, subtable, 1, glyphs, 2), null);
+        });
+
+        it('matches the rules of the class of the glyph (format 2), class 0 for the glyphs out of the class definition', function() {
+            const subtable = {
+                coverage: coverage([glyphA, glyphB]),
+                classDef: { format: 1, startGlyph: glyphA, classes: [1, 2] },
+                classSets: [undefined, [{ classes: [0], lookupRecords: records(1) }], undefined]
+            };
+            assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 2, [glyphA, glyphC], 0), { inputPositions: [0, 1], lookupRecords: records(1) });
+            assert.strictEqual(matchSequenceContext(gdef, noFlag, subtable, 2, [glyphA, glyphB], 0), null);
+            assert.strictEqual(matchSequenceContext(gdef, noFlag, subtable, 2, [glyphB, glyphC], 0), null);
+        });
+
+        it('matches no rule at a glyph out of the coverage whose class has rules (format 2), like HarfBuzz', function() {
+            // ContextFormat2 and ChainContextFormat2 of HarfBuzz: NOT_COVERED before the class of the glyph
+            const classDef = { format: 1, startGlyph: glyphA, classes: [1, 1] };
+            const subtable = { coverage: coverage([glyphA]), classDef, classSets: [undefined, [{ classes: [], lookupRecords: records(1) }]] };
+            assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 2, [glyphA], 0), { inputPositions: [0], lookupRecords: records(1) });
+            assert.strictEqual(matchSequenceContext(gdef, noFlag, subtable, 2, [glyphB], 0), null);
+            const chainedSubtable = {
+                coverage: coverage([glyphA]),
+                inputClassDef: classDef,
+                chainClassSet: [undefined, [{ backtrack: [], input: [], lookahead: [], lookupRecords: records(2) }]]
+            };
+            assert.deepStrictEqual(matchChainedSequenceContext(gdef, noFlag, chainedSubtable, 2, [glyphA], 0), { inputPositions: [0], lookupRecords: records(2) });
+            assert.strictEqual(matchChainedSequenceContext(gdef, noFlag, chainedSubtable, 2, [glyphB], 0), null);
+        });
+
+        it('takes every glyph as class 0 without a class definition table (format 2), like the Null ClassDef of HarfBuzz', function() {
+            const subtable = { coverage: coverage([glyphA]), classDef: undefined, classSets: [[{ classes: [0], lookupRecords: records(1) }]] };
+            assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 2, [glyphA, glyphC], 0), { inputPositions: [0, 1], lookupRecords: records(1) });
+            // a NULL backtrack and lookahead ClassDef: their glyphs in class 0
+            const chainedSubtable = {
+                coverage: coverage([glyphB]),
+                backtrackClassDef: undefined,
+                inputClassDef: { format: 1, startGlyph: glyphB, classes: [1] },
+                lookaheadClassDef: undefined,
+                chainClassSet: [undefined, [{ backtrack: [0], input: [], lookahead: [0], lookupRecords: records(2) }]]
+            };
+            assert.deepStrictEqual(matchChainedSequenceContext(gdef, noFlag, chainedSubtable, 2, [glyphA, glyphB, glyphC], 1), { inputPositions: [1], lookupRecords: records(2) });
+        });
+
+        it('looks a glyph up in a coverage table of format 1 by binary search, like HarfBuzz, so an unsorted one misses glyphs', function() {
+            // CoverageFormat1::get_coverage of HarfBuzz (bsearch): the coverage table must list its glyphs in increasing
+            // order, the glyph A before B is missed in [B, A]
+            const subtable = { coverage: coverage([glyphB, glyphA]), ruleSets: [[{ input: [], lookupRecords: records(1) }], [{ input: [], lookupRecords: records(2) }]] };
+            assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 1, [glyphB], 0), { inputPositions: [0], lookupRecords: records(1) });
+            assert.strictEqual(matchSequenceContext(gdef, noFlag, subtable, 1, [glyphA], 0), null);
+        });
+
+        it('matches the coverage of each input glyph (format 3), and no rule without input glyphs, like HarfBuzz', function() {
+            const subtable = { coverages: [coverage([glyphA, glyphB]), coverage([glyphC])], lookupRecords: records(4) };
+            assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 3, [glyphB, glyphC], 0), { inputPositions: [0, 1], lookupRecords: records(4) });
+            assert.strictEqual(matchSequenceContext(gdef, noFlag, subtable, 3, [glyphC, glyphC], 0), null);
+            assert.strictEqual(matchSequenceContext(gdef, noFlag, { coverages: [], lookupRecords: records(4) }, 3, [glyphA], 0), null);
+        });
+
+        it('matches the backtrack from the glyph before backwards and the lookahead after the last input glyph', function() {
+            const glyphRule = { backtrack: [glyphB, glyphA], input: [glyphC], lookahead: [glyphA], lookupRecords: records(5) };
+            const subtable = { coverage: coverage([glyphC]), chainRuleSets: [[glyphRule]] };
+            // a b c c a: the backtrack b a is matched from the glyph before the first c, the closest glyph first
+            const glyphs = [glyphA, glyphB, glyphC, glyphC, glyphA];
+            assert.deepStrictEqual(matchChainedSequenceContext(gdef, noFlag, subtable, 1, glyphs, 2), { inputPositions: [2, 3], lookupRecords: records(5) });
+            assert.strictEqual(matchChainedSequenceContext(gdef, noFlag, subtable, 1, glyphs, 3), null);
+            const coverageSubtable = {
+                backtrackCoverage: [coverage([glyphB]), coverage([glyphA])],
+                inputCoverage: [coverage([glyphC]), coverage([glyphC])],
+                lookaheadCoverage: [coverage([glyphA])],
+                lookupRecords: records(6)
+            };
+            const glyphsWithMarks = [glyphA, acute, glyphB, glyphC, acute, glyphC, glyphA];
+            assert.deepStrictEqual(matchChainedSequenceContext(gdef, ignoreMarks, coverageSubtable, 3, glyphsWithMarks, 3), { inputPositions: [3, 5], lookupRecords: records(6) });
+            assert.strictEqual(matchChainedSequenceContext(gdef, noFlag, coverageSubtable, 3, glyphsWithMarks, 3), null);
+        });
+
+        it('matches the classes of the backtrack, of the input and of the lookahead with their own class definitions (format 2)', function() {
+            const subtable = {
+                coverage: coverage([glyphB]),
+                backtrackClassDef: { format: 1, startGlyph: glyphA, classes: [1] },
+                inputClassDef: { format: 1, startGlyph: glyphB, classes: [1] },
+                lookaheadClassDef: { format: 1, startGlyph: glyphC, classes: [3] },
+                chainClassSet: [undefined, [{ backtrack: [1], input: [], lookahead: [3], lookupRecords: records(7) }]]
+            };
+            assert.deepStrictEqual(matchChainedSequenceContext(gdef, noFlag, subtable, 2, [glyphA, glyphB, glyphC], 1), { inputPositions: [1], lookupRecords: records(7) });
+            assert.strictEqual(matchChainedSequenceContext(gdef, noFlag, subtable, 2, [glyphC, glyphB, glyphC], 1), null);
+        });
+
+        it('throws on an unknown format', function() {
+            assert.throws(() => matchSequenceContext(gdef, noFlag, {}, 4, [glyphA], 0), /Unknown sequence context format: 4/);
+            assert.throws(() => matchChainedSequenceContext(gdef, noFlag, {}, 4, [glyphA], 0), /Unknown chained sequence context format: 4/);
         });
     });
 });

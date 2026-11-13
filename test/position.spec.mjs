@@ -1643,6 +1643,390 @@ describe('position.mjs', function() {
         });
     });
 
+    // TestContextualPositioning.ttf, built by test/generate-contextual-positioning-font.py: each feature ss01 to ss20 and
+    // cv01 to cv05 has one contextual lookup, the generator lists them; the references are
+    // hb-shape --no-glyph-names --cluster-level=1 --features=-kern,+<feature> TestContextualPositioning.ttf -u <code points>
+    // (glyphs: A 2, T 3, V 4, a 5, b 6, c 7, d 8, e 9, o 12, x 13, acutecomb 14, alef 15, bet 16, f_i 17, gravecomb 18)
+    describe('the contextual positionings', function() {
+        let contextualFont;
+
+        before(function() {
+            contextualFont = parse(readFileSync('./test/fonts/TestContextualPositioning.ttf'));
+        });
+
+        // position the glyphs of a text as one run with the lookups of one feature (see positionGlyphs)
+        function positionContextualText(text, featureTag, runOptions) {
+            return positionTextGlyphs(contextualFont, text, { featureTags: [featureTag], ...runOptions });
+        }
+
+        it('applies the lookup records of the first glyph rule that matches (lookup type 7, format 1), then goes on after its input', function() {
+            // pos a' lookup TIGHTEN b' lookup WIDEN; pos a' lookup SHIFT_UP c'; pos a' lookup WIDEN b' c';
+            // -u 0061,0062: [5=0+460|6=1@10,0+525], -u 0061,0063: [5=0@0,30+500|7=1+500], -u 0061,0064: [5=0+500|8=1+500]
+            assert.strictEqual(positionContextualText('ab', 'ss01'), '5+460|6@10,0+525');
+            assert.strictEqual(positionContextualText('ac', 'ss01'), '5@0,30+500|7+500');
+            assert.strictEqual(positionContextualText('ad', 'ss01'), '5+500|8+500');
+            // -u 0061,0062,0063: [5=0+460|6=1@10,0+525|7=2+500], the first rule wins
+            assert.strictEqual(positionContextualText('abc', 'ss01'), '5+460|6@10,0+525|7+500');
+            // -u 0061,0062,0061,0063: [5=0+460|6=1@10,0+525|5=2@0,30+500|7=3+500]
+            assert.strictEqual(positionContextualText('abac', 'ss01'), '5+460|6@10,0+525|5@0,30+500|7+500');
+        });
+
+        it('applies the lookup records of the class rules of the class of the glyph (lookup type 7, format 2)', function() {
+            // pos [a b]' lookup TIGHTEN [c d]'; pos [c d]' [a b]' lookup SHIFT_UP; pos [e o]' lookup WIDEN [e o]' lookup WIDEN;
+            // -u 0061,0063: [5=0+460|7=1+500], -u 0064,0062: [8=0+500|6=1@0,30+500], -u 0065,006F: [9=0@10,0+525|12=1@10,0+525]
+            assert.strictEqual(positionContextualText('ac', 'ss02'), '5+460|7+500');
+            assert.strictEqual(positionContextualText('db', 'ss02'), '8+500|6@0,30+500');
+            assert.strictEqual(positionContextualText('eo', 'ss02'), '9@10,0+525|12@10,0+525');
+            // -u 006F,006F,0065: [12=0@10,0+525|12=1@10,0+525|9=2+500], -u 0061,0065: [5=0+500|9=1+500]
+            assert.strictEqual(positionContextualText('ooe', 'ss02'), '12@10,0+525|12@10,0+525|9+500');
+            assert.strictEqual(positionContextualText('ae', 'ss02'), '5+500|9+500');
+        });
+
+        it('applies the lookup records of the coverage rule (lookup type 7, format 3)', function() {
+            // pos [A T]' lookup WIDEN [V o]' lookup TIGHTEN;
+            // -u 0041,0056: [2=0@10,0+625|4=1+560], -u 0054,006F: [3=0@10,0+625|12=1+460], -u 0041,0061: [2=0+600|5=1+500]
+            assert.strictEqual(positionContextualText('AV', 'ss03'), '2@10,0+625|4+560');
+            assert.strictEqual(positionContextualText('To', 'ss03'), '3@10,0+625|12+460');
+            assert.strictEqual(positionContextualText('Aa', 'ss03'), '2+600|5+500');
+        });
+
+        it('applies the lookup records of the first chained glyph rule that matches (lookup type 8, format 1)', function() {
+            // pos T a' lookup TIGHTEN b' x; pos a' lookup SHIFT_UP x;
+            // -u 0054,0061,0062,0078: [3=0+600|5=1+460|6=2+500|13=3+500], -u 0061,0062,0078: [5=0+500|6=1+500|13=2+500]
+            assert.strictEqual(positionContextualText('Tabx', 'ss04'), '3+600|5+460|6+500|13+500');
+            assert.strictEqual(positionContextualText('abx', 'ss04'), '5+500|6+500|13+500');
+            // -u 0054,0061,0062: [3=0+600|5=1+500|6=2+500], -u 0054,0061,0078: [3=0+600|5=1@0,30+500|13=2+500]
+            assert.strictEqual(positionContextualText('Tab', 'ss04'), '3+600|5+500|6+500');
+            assert.strictEqual(positionContextualText('Tax', 'ss04'), '3+600|5@0,30+500|13+500');
+        });
+
+        it('applies the lookup records of the chained class rules of the input class of the glyph (lookup type 8, format 2)', function() {
+            // pos [T V] [a o]' lookup TIGHTEN [b d]; pos [a o]' lookup SHIFT_UP [c e];
+            // -u 0054,0061,0062: [3=0+600|5=1+460|6=2+500], -u 0056,006F,0064: [4=0+600|12=1+460|8=2+500]
+            assert.strictEqual(positionContextualText('Tab', 'ss05'), '3+600|5+460|6+500');
+            assert.strictEqual(positionContextualText('Vod', 'ss05'), '4+600|12+460|8+500');
+            // -u 0061,0062: [5=0+500|6=1+500], -u 006F,0065: [12=0@0,30+500|9=1+500]
+            assert.strictEqual(positionContextualText('ab', 'ss05'), '5+500|6+500');
+            assert.strictEqual(positionContextualText('oe', 'ss05'), '12@0,30+500|9+500');
+        });
+
+        it('applies the lookup records of the chained coverage rule (lookup type 8, format 3)', function() {
+            // pos [A T] [a o]' lookup WIDEN [b c]' [e x];
+            // -u 0041,0061,0062,0065: [2=0+600|5=1@10,0+525|6=2+500|9=3+500], -u 0054,006F,0063,0078: [3=0+600|12=1@10,0+525|7=2+500|13=3+500]
+            assert.strictEqual(positionContextualText('Aabe', 'ss06'), '2+600|5@10,0+525|6+500|9+500');
+            assert.strictEqual(positionContextualText('Tocx', 'ss06'), '3+600|12@10,0+525|7+500|13+500');
+            // -u 0061,0062,0065: [5=0+500|6=1+500|9=2+500], -u 0041,0061,0062: [2=0+600|5=1+500|6=2+500]
+            assert.strictEqual(positionContextualText('abe', 'ss06'), '5+500|6+500|9+500');
+            assert.strictEqual(positionContextualText('Aab', 'ss06'), '2+600|5+500|6+500');
+        });
+
+        it('matches the backtrack, the input and the lookahead on the glyphs the lookupFlag does not ignore', function() {
+            // pos T o' lookup TIGHTEN x; with IgnoreMarks (ss07), without (ss08)
+            // ss07 -u 0054,0301,006F,0301,0078: [3=0+600|14=1+0|12=2+460|14=3+0|13=4+500]
+            assert.strictEqual(positionContextualText('T\u{301}o\u{301}x', 'ss07'), '3+600|14+0|12+460|14+0|13+500');
+            // ss08 -u 0054,0301,006F,0301,0078: [3=0+600|14=1+0|12=2+500|14=3+0|13=4+500], -u 0054,006F,0078: [3=0+600|12=1+460|13=2+500]
+            assert.strictEqual(positionContextualText('T\u{301}o\u{301}x', 'ss08'), '3+600|14+0|12+500|14+0|13+500');
+            assert.strictEqual(positionContextualText('Tox', 'ss08'), '3+600|12+460|13+500');
+        });
+
+        it('matches the input of a contextual positioning (lookup type 7) on the glyphs its lookupFlag does not ignore', function() {
+            // pos [T V]' lookup TIGHTEN [o a]'; with IgnoreMarks, -u 0054,0301,006F: [3=0+560|14=1+0|12=2+500],
+            // -u 0054,006F: [3=0+560|12=1+500]
+            assert.strictEqual(positionContextualText('T\u{301}o', 'ss18'), '3+560|14+0|12+500');
+            assert.strictEqual(positionContextualText('To', 'ss18'), '3+560|12+500');
+        });
+
+        it('matches across the marks out of the mark filtering set or of another mark attachment class of the lookup', function() {
+            // pos T o' lookup TIGHTEN x; with UseMarkFilteringSet [gravecomb] (ss19) and MarkAttachmentType [gravecomb] (ss20)
+            // ss19 -u 0054,006F,0301,0078: [3=0+600|12=1+460|14=2+0|13=3+500]
+            assert.strictEqual(positionContextualText('To\u{301}x', 'ss19'), '3+600|12+460|14+0|13+500');
+            // ss19 -u 0054,006F,0300,0078: [3=0+600|12=1+500|18=2+0|13=3+500]
+            assert.strictEqual(positionContextualText('To\u{300}x', 'ss19'), '3+600|12+500|18+0|13+500');
+            // ss20 -u 0054,006F,0301,0078: [3=0+600|12=1+460|14=2+0|13=3+500]
+            assert.strictEqual(positionContextualText('To\u{301}x', 'ss20'), '3+600|12+460|14+0|13+500');
+            // ss20 -u 0054,0300,006F,0078: [3=0+600|18=1+0|12=2+500|13=3+500]
+            assert.strictEqual(positionContextualText('T\u{300}ox', 'ss20'), '3+600|18+0|12+500|13+500');
+        });
+
+        it('pairs a nested pair adjustment with the next glyph its own lookupFlag does not ignore, past the input, like HarfBuzz', function() {
+            // pos T' lookup PAIR_IGNORE_MARKS; pos A' lookup PAIR_IGNORE_MARKS; PAIR_IGNORE_MARKS: IgnoreMarks, pos T o -60; pos A V -80;
+            // -u 0054,0301,006F: [3=0+540|14=1+0|12=2+500], -u 0041,0301,0301,0056: [2=0+520|14=1+0|14=2+0|4=3+600]
+            assert.strictEqual(positionContextualText('T\u{301}o', 'ss09'), '3+540|14+0|12+500');
+            assert.strictEqual(positionContextualText('A\u{301}\u{301}V', 'ss09'), '2+520|14+0|14+0|4+600');
+            // -u 0054,0041,0056: [3=0+600|2=1+520|4=2+600]
+            assert.strictEqual(positionContextualText('TAV', 'ss09'), '3+600|2+520|4+600');
+        });
+
+        it('applies a nested lookup at its glyph even when its own lookupFlag ignores the glyph, like HarfBuzz', function() {
+            // pos a acutecomb' lookup SHIFT_MARK_IGNORE_MARKS; SHIFT_MARK_IGNORE_MARKS: IgnoreMarks, pos acutecomb <0 40 0 0>;
+            // -u 0061,0301: [5=0+500|14=1@0,40+0], -u 0062,0301: [6=0+500|14=1+0]
+            assert.strictEqual(positionContextualText('a\u{301}', 'ss14'), '5+500|14@0,40+0');
+            assert.strictEqual(positionContextualText('b\u{301}', 'ss14'), '6+500|14+0');
+        });
+
+        it('applies a nested contextual lookup at its glyph', function() {
+            // pos b c' lookup INNER_CONTEXT; INNER_CONTEXT: pos c' lookup TIGHTEN e;
+            // -u 0062,0063,0065: [6=0+500|7=1+460|9=2+500], -u 0062,0063,0078: [6=0+500|7=1+500|13=2+500]
+            assert.strictEqual(positionContextualText('bce', 'ss10'), '6+500|7+460|9+500');
+            assert.strictEqual(positionContextualText('bcx', 'ss10'), '6+500|7+500|13+500');
+        });
+
+        it('nests the lookups of the lookup records up to 64 levels, like HB_MAX_NESTING_LEVEL of HarfBuzz', function() {
+            // pos d' lookup PLUS_ONE; with a second lookup record, at d, to the lookup itself: PLUS_ONE (pos d <0 0 1 0>;)
+            // applies at the 64 levels HarfBuzz nests, -u 0064: [8=0+564], -u 0064,0064: [8=0+564|8=1+564]
+            assert.strictEqual(positionContextualText('d', 'ss11'), '8+564');
+            assert.strictEqual(positionContextualText('dd', 'ss11'), '8+564|8+564');
+        });
+
+        it('applies at most 1024 nested lookups by glyph of the run, 16384 at least, like the max_ops of HarfBuzz', function() {
+            // pos d' lookup PLUS_ONE; with two more lookup records, at d, to the lookup itself: without the budget the
+            // nested lookups grow as 2^64; -u 0064: [8=0+5980], -u 0064,0064: [8=0+5980|8=1+500], the first d takes the
+            // budget of the run
+            assert.strictEqual(positionContextualText('d', 'ss15'), '8+5980');
+            assert.strictEqual(positionContextualText('dd', 'ss15'), '8+5980|8+500');
+            // 21 d, a budget of 21 * 1024: [8=0+7686|8=1+500|...|8=20+500]
+            const glyphs = positionContextualText('d'.repeat(21), 'ss15');
+            assert.strictEqual(glyphs, ['8+7686', ...Array(20).fill('8+500')].join('|'));
+        });
+
+        it('applies the first subtable of a nested lookup that applies', function() {
+            // pos [T V]' lookup PAIR_SECOND_SUBTABLE [o a]; PAIR_SECOND_SUBTABLE: pos T o -10; subtable; pos [T V] [o a] -40;
+            // -u 0054,006F: [3=0+590|12=1+500], -u 0056,006F: [4=0+560|12=1+500], -u 0054,0061: [3=0+560|5=1+500]
+            assert.strictEqual(positionContextualText('To', 'ss16'), '3+590|12+500');
+            assert.strictEqual(positionContextualText('Vo', 'ss16'), '4+560|12+500');
+            assert.strictEqual(positionContextualText('Ta', 'ss16'), '3+560|5+500');
+        });
+
+        it('goes on after the input of the rule, at the second glyph of a nested pair with a second value record', function() {
+            // pos T' lookup PAIR_BOTH_GLYPHS; pos o' lookup TIGHTEN; PAIR_BOTH_GLYPHS: pos T <0 0 -20 0> o <0 0 -10 0>;
+            // -u 0054,006F: [3=0+580|12=1+450], -u 006F: [12=0+460]
+            assert.strictEqual(positionContextualText('To', 'cv04'), '3+580|12+450');
+            assert.strictEqual(positionContextualText('o', 'cv04'), '12+460');
+        });
+
+        it('attaches the mark of a nested mark-to-mark lookup', function() {
+            // pos acutecomb gravecomb' lookup MARK_TO_MARK; MARK_TO_MARK: pos mark acutecomb <anchor -100 700> mark
+            // @GRAVE_MARKS (gravecomb <anchor -100 500>); -u 0065,0301,0300: [9=0+500|14=1+0|18=2@0,200+0],
+            // -u 0065,0300: [9=0+500|18=1+0]
+            assert.strictEqual(positionContextualText('e\u{301}\u{300}', 'cv01'), '9+500|14+0|18@0,200+0');
+            assert.strictEqual(positionContextualText('e\u{300}', 'cv01'), '9+500|18+0');
+        });
+
+        it('applies a nested cursive attachment with the RightToLeft flag of the nested lookup', function() {
+            // pos x x' lookup CURSIVE; CURSIVE: pos cursive x <anchor 50 0> <anchor 450 100>; without RightToLeft (cv02)
+            // the second x follows the first one, with it (cv03) the first x follows the second one;
+            // cv02 -u 0078,0078: [13=0+450|13=1@-50,100+450], cv03 -u 0078,0078: [13=0@0,-100+450|13=1@-50,0+450]
+            assert.strictEqual(positionContextualText('xx', 'cv02'), '13+450|13@-50,100+450');
+            assert.strictEqual(positionContextualText('xx', 'cv03'), '13@0,-100+450|13@-50,0+450');
+            // cv02 -u 0078,0078,0078: [13=0+450|13=1@-50,100+400|13=2@-50,200+450]
+            assert.strictEqual(positionContextualText('xxx', 'cv02'), '13+450|13@-50,100+400|13@-50,200+450');
+        });
+
+        it('attaches the marks of nested mark-to-base and mark-to-ligature lookups, at the component of each mark', function() {
+            // pos e acutecomb' lookup MARK_TO_BASE; pos f_i acutecomb' lookup MARK_TO_LIGATURE;
+            // pos acutecomb acutecomb' lookup MARK_TO_LIGATURE; and the liga of GSUB, IgnoreMarks: sub f i by f_i;
+            const options = { features: { kern: false, ss12: true } };
+            // --features=-kern,+ss12 -u 0065,0301: [9=0+500|14=1@-150,20+0], -u 0061,0301: [5=0+500|14=1+0]
+            assertShape(shapeText(contextualFont, 'e\u{301}', options),
+                { glyphs: [9, 14], clusters: [0, 1], advances: [500, 0], offsets: [[0, 0], [-150, 20]] }, 'e acute');
+            assertShape(shapeText(contextualFont, 'a\u{301}', options),
+                { glyphs: [5, 14], clusters: [0, 1], advances: [500, 0], offsets: [[0, 0], [0, 0]] }, 'a acute');
+            // -u 0066,0301,0069,0301: [17=0+600|14=0@-350,250+0|14=3@-50,250+0], each acute on its component of f_i
+            assertShape(shapeText(contextualFont, 'f\u{301}i\u{301}', options),
+                { glyphs: [17, 14, 14], clusters: [0, 0, 3], advances: [600, 0, 0], offsets: [[0, 0], [-350, 250], [-50, 250]] }, 'f_i');
+        });
+
+        it('attaches the marks of nested mark-to-base and mark-to-ligature lookups whose lookupFlag ignores them', function() {
+            // pos e acutecomb' lookup MARK_TO_BASE_IGNORE_MARKS; pos f_i acutecomb' lookup MARK_TO_LIGATURE_ATTACHMENT_TYPE;
+            // IgnoreMarks and MarkAttachmentType [gravecomb], which ignore the acute
+            const options = { features: { kern: false, cv06: true } };
+            // --features=-kern,+cv06 -u 0065,0301: [9=0+500|14=1@-150,20+0]
+            assertShape(shapeText(contextualFont, 'e\u{301}', options),
+                { glyphs: [9, 14], clusters: [0, 1], advances: [500, 0], offsets: [[0, 0], [-150, 20]] }, 'e acute');
+            // --features=-kern,+cv06 -u 0066,0069,0301: [17=0+600|14=2@-50,250+0]
+            assertShape(shapeText(contextualFont, 'fi\u{301}', options),
+                { glyphs: [17, 14], clusters: [0, 2], advances: [600, 0], offsets: [[0, 0], [-50, 250]] }, 'f_i acute');
+        });
+
+        it('matches the context of a right-to-left run in the order of the text', function() {
+            // pos alef bet' lookup TIGHTEN; --features=-kern,+ss13 -u 05D0,05D1: [16=1+460|15=0+500], the glyphs in visual
+            // order; -u 05D0,05D1,05D1: [16=2+500|16=1+460|15=0+500]
+            const hebrew = { rightToLeft: true, script: 'hebr' };
+            assert.strictEqual(positionContextualText('\u{5D1}\u{5D0}', 'ss13', hebrew), '16+460|15+500');
+            assert.strictEqual(positionContextualText('\u{5D1}\u{5D1}\u{5D0}', 'ss13', hebrew), '16+500|16+460|15+500');
+        });
+
+        it('applies a contextual kerning of the kern feature with its exception, a matching rule without lookup records', function() {
+            // ignore pos T' o' x; pos T' lookup KERN_PAIRS o; KERN_PAIRS: pos T o -70;
+            // -u 0054,006F: [3=0+530|12=1+500], -u 0054,006F,0078: [3=0+600|12=1+500|13=2+500], -u 0054,006F,0061: [3=0+530|12=1+500|5=2+500]
+            assert.strictEqual(positionTextGlyphs(contextualFont, 'To'), '3+530|12+500');
+            assert.strictEqual(positionTextGlyphs(contextualFont, 'Tox'), '3+600|12+500|13+500');
+            assert.strictEqual(positionTextGlyphs(contextualFont, 'Toa'), '3+530|12+500|5+500');
+        });
+
+        it('ends the lookup at an exception rule of an earlier subtable, and tries the next subtable when no rule matches', function() {
+            // ignore pos [T V]' [o a]' x; pos [T V]' lookup KERN_PAIRS [o a]; one format 3 subtable by rule, the
+            // exception first; -u 0054,006F,0078: [3=0+600|12=1+500|13=2+500], -u 0054,006F: [3=0+530|12=1+500]
+            assert.strictEqual(positionContextualText('Tox', 'ss17'), '3+600|12+500|13+500');
+            assert.strictEqual(positionContextualText('To', 'ss17'), '3+530|12+500');
+        });
+
+        it('skips a lookup index past the LookupList, like HarfBuzz', function() {
+            // like recurse of HarfBuzz (hb-ot-layout-gsubgpos.hh), a lookup index past the LookupList is the Null lookup,
+            // which applies nothing; the record of a sequence index past the input (2) is skipped too, which the positions
+            // cannot show: it has no glyph to apply its lookup at
+            const coverage = glyph => ({ format: 1, glyphs: [glyph] });
+            const font = createFont([
+                { lookupType: 1, lookupFlag: 0, subtables: [{ posFormat: 1, coverage: { format: 1, glyphs: [1, 2] }, value: { xAdvance: -10 } }] },
+                {
+                    lookupType: 7,
+                    lookupFlag: 0,
+                    subtables: [{
+                        posFormat: 3,
+                        coverages: [coverage(1), coverage(2)],
+                        lookupRecords: [
+                            { sequenceIndex: 2, lookupListIndex: 0 },
+                            { sequenceIndex: 0, lookupListIndex: 9 },
+                            { sequenceIndex: 1, lookupListIndex: 0 }
+                        ]
+                    }]
+                }
+            ], [1]);
+            assert.strictEqual(positionGlyphs(font, [1, 2, 1, 2], { script: 'DFLT' }), '1+500|2+490|1+500|2+490');
+        });
+
+        it('throws on a lookup type that is not a GPOS lookup type', function() {
+            // a parsed font has GPOS lookup types 1 to 9 only (see parseLookupList), a lookup built by hand can have another
+            const font = createFont([{ lookupType: 10, lookupFlag: 0, subtables: [{}] }], [0]);
+            assert.throws(() => positionGlyphs(font, [1, 2], { script: 'DFLT' }), /Unknown GPOS lookup type: 10/);
+        });
+
+        it('sets to 0 the advance that a nested lookup gives to a GDEF mark', function() {
+            // pos a acutecomb' lookup MARK_ADVANCE; MARK_ADVANCE: pos acutecomb <0 0 10 0>; -u 0061,0301: [5=0+500|14=1+0]
+            assert.strictEqual(positionContextualText('a\u{301}', 'cv05'), '5+500|14+0');
+        });
+
+        itFailsUntilFixed('matches the context of a contextual positioning across a default ignorable, like HarfBuzz',
+            'getNotIgnoredGlyphPositions (src/layout.mjs): the soft hyphen U+00AD, which the font has not, is .notdef in the ' +
+            'input of the rule T a\' b\' x, which then does not match, drawn with its advance; HarfBuzz skips the default ' +
+            'ignorables when it matches the backtrack, the input and the lookahead of a contextual rule, and hides them with ' +
+            'the space glyph and an advance of 0 (hb_ot_hide_default_ignorables)',
+            function() {
+                // pos T a' lookup TIGHTEN b' x; --features=-kern,+ss04 -u 0054,0061,00AD,0062,0078:
+                // [3=0+600|5=1+460|1=2+0|6=3+500|13=4+500], the a tightened as without the soft hyphen
+                assertShape(shapeText(contextualFont, 'Ta\u{AD}bx', { features: { kern: false, ss04: true } }), {
+                    glyphs: [3, 5, 1, 6, 13], clusters: [0, 1, 2, 3, 4], advances: [600, 460, 0, 500, 500]
+                });
+            });
+    });
+
+    describe('the contextual positionings with lookup records past the LookupList', function() {
+        let fontWithInvalidLookupRecords;
+
+        before(function() {
+            // TestContextualPositioning.ttf with three lookup records { sequenceIndex 0, lookupListIndex 999 } after the
+            // first lookup record of SELF_RECURSIVE_TWICE (ss15), the same records set with fontTools for hb-shape
+            fontWithInvalidLookupRecords = parse(readFileSync('./test/fonts/TestContextualPositioning.ttf'));
+            const invalidLookupRecords = Array.from({ length: 3 }, () => ({ sequenceIndex: 0, lookupListIndex: 999 }));
+            fontWithInvalidLookupRecords.tables.gpos.lookups[25].subtables[0].lookupRecords.splice(1, 0, ...invalidLookupRecords);
+        });
+
+        it('takes one operation of the budget of the run for each lookup record past the LookupList, like HarfBuzz', function() {
+            // like recurse of HarfBuzz, which counts the operation before it finds the Null lookup;
+            // --features=-kern,+ss15 -u 0064: [8=0+3240], -u 0064,0064: [8=0+3240|8=1+500] (8=0+5980 without these records)
+            const runOptions = { featureTags: ['ss15'] };
+            assert.strictEqual(positionTextGlyphs(fontWithInvalidLookupRecords, 'd', runOptions), '8+3240');
+            assert.strictEqual(positionTextGlyphs(fontWithInvalidLookupRecords, 'dd', runOptions), '8+3240|8+500');
+        });
+    });
+
+    describe('the contextual positionings without the glyph classes of GDEF', function() {
+        let fontWithoutGlyphClasses;
+
+        before(function() {
+            fontWithoutGlyphClasses = parse(readFileSync('./test/fonts/TestContextualPositioning.ttf'));
+            fontWithoutGlyphClasses.tables.gdef.classDef = undefined;
+        });
+
+        it('attaches the marks of nested mark-to-base and mark-to-ligature lookups whose lookupFlag ignores them, like HarfBuzz', function() {
+            // TestContextualPositioning.ttf with the GlyphClassDef of GDEF removed (fontTools), whose marks HarfBuzz
+            // takes from Unicode: pos e acutecomb' lookup MARK_TO_BASE_IGNORE_MARKS; pos f_i acutecomb' lookup
+            // MARK_TO_LIGATURE_ATTACHMENT_TYPE; the lookupFlag of a nested lookup does not skip the glyph it applies at
+            const options = { features: { kern: false, cv06: true } };
+            // --features=-kern,+cv06 -u 0065,0301: [9=0+500|14=1@-150,20+0]
+            assertShape(shapeText(fontWithoutGlyphClasses, 'e\u{301}', options),
+                { glyphs: [9, 14], clusters: [0, 1], advances: [500, 0], offsets: [[0, 0], [-150, 20]] }, 'e acute');
+            // --features=-kern,+cv06 -u 0066,0069,0301: [17=0+600|14=2@-50,250+0]
+            assertShape(shapeText(fontWithoutGlyphClasses, 'fi\u{301}', options),
+                { glyphs: [17, 14], clusters: [0, 2], advances: [600, 0], offsets: [[0, 0], [-50, 250]] }, 'f_i acute');
+        });
+
+        itFailsUntilFixed('sets to 0 the advance that a nested lookup gives to a nonspacing mark, like HarfBuzz',
+            'zeroMarkAdvances (src/position.mjs): without the GlyphClassDef of GDEF no glyph is a mark, so the acute keeps ' +
+            'the advance of 10 of the nested single adjustment; HarfBuzz takes the glyphs of the nonspacing marks of ' +
+            'Unicode (Mn) as marks (hb_synthesize_glyph_classes) and sets their advance to 0 (the Hebrew holam of Tahoma, ' +
+            'whose GDEF HarfBuzz ignores, gets the same)',
+            function() {
+                // TestContextualPositioning.ttf with the GlyphClassDef of GDEF removed (fontTools): pos a acutecomb' lookup
+                // MARK_ADVANCE; MARK_ADVANCE: pos acutecomb <0 0 10 0>; --features=-kern,+cv05 -u 0061,0301 [5=0+500|14=1+0]
+                assertShape(shapeText(fontWithoutGlyphClasses, 'a\u{301}', { features: { kern: false, cv05: true } }), {
+                    glyphs: [5, 14], clusters: [0, 1], advances: [500, 0], offsets: [[0, 0], [0, 0]]
+                });
+            });
+    });
+
+    describe('the contextual positionings of real fonts', function() {
+        // hb-shape --no-glyph-names --cluster-level=1 <font> -u <code points>, --shapers=ot for Scheherazade-Bold.ttf
+
+        it('applies the chained contextual kerning and mark positioning of an Arabic font', function() {
+            // Scheherazade-Bold.ttf, the kern lookups 1 and 8 to 14 and the mark lookups 3 to 5 of type 8, format 3
+            const scheherazadeFont = loadFont('../Scheherazade-Bold.ttf');
+            // reh hah, -u 0631,062D: [396=1+1144|328=0@-130,0+508]
+            assertShape(shapeText(scheherazadeFont, '\u{631}\u{62D}'),
+                { glyphs: [396, 328], clusters: [1, 0], advances: [1144, 508], offsets: [[0, 0], [-130, 0]] }, 'reh hah');
+            // beh kasratan ain, -u 0628,064D,0639: [670=2+921|1073=1@26,-240+0|932=0+439]
+            assertShape(shapeText(scheherazadeFont, '\u{628}\u{64D}\u{639}'),
+                { glyphs: [670, 1073, 932], clusters: [2, 1, 0], advances: [921, 0, 439], offsets: [[0, 0], [26, -240], [0, 0]] }, 'beh kasratan ain');
+        });
+
+        it('applies the chained contextual kerning of the digits after the end of ayah', function() {
+            // Jomhuria-Regular.ttf, kern lookup 0 of type 8, format 3: -u 06DD,0031,0032,0033:
+            // [615=0+4071|1916=1@-3030,0+0|1917=2@-2380,0+0|1918=3@-1730,0+0]
+            assertShape(shapeText(loadFont('../Jomhuria-Regular.ttf'), '\u{6DD}123'), {
+                glyphs: [615, 1916, 1917, 1918],
+                clusters: [0, 1, 2, 3],
+                advances: [4071, 0, 0, 0],
+                offsets: [[0, 0], [-3030, 0], [-2380, 0], [-1730, 0]]
+            });
+        });
+
+        it('applies the trak required feature of a variable font, a chained context of an extension lookup', function() {
+            // TestTracking3.ttf: lookup 0 (IgnoreMarks), an extension lookup of type 8, format 2, applies the single
+            // adjustment lookup 3 after a glyph of its backtrack class and the lookup 2 otherwise
+            const trackingFont = loadFont('../TestTracking3.ttf');
+            const glyphs = { glyphs: [36, 57, 55, 82, 3, 68], clusters: [0, 1, 2, 3, 4, 5] };
+            // -u 0041,0056,0054,006F,0020,0061: [36=0+1290|57=1@-76,0+1290|55=2+1137|82=3@-113,0+1026|3=4+569|68=5+1139]
+            assertShape(shapeText(trackingFont, 'AVTo a'), {
+                ...glyphs,
+                advances: [1290, 1290, 1137, 1026, 569, 1139],
+                offsets: [[0, 0], [-76, 0], [0, 0], [-113, 0], [0, 0], [0, 0]]
+            }, 'default');
+            // --variations=TRAK=1: [36=0+2109|57=1@-485,0+1699|55=2@-409,0+1546|82=3@-522,0+1435|3=4@-409,0+978|68=5@-409,0+1548]
+            assertShape(shapeText(trackingFont, 'AVTo a', { variation: { TRAK: 1 } }), {
+                ...glyphs,
+                advances: [2109, 1699, 1546, 1435, 978, 1548],
+                offsets: [[0, 0], [-485, 0], [-409, 0], [-522, 0], [-409, 0], [-409, 0]]
+            }, 'TRAK 1');
+            // --variations=TRAK=0.5,TRKS=1: [36=0+1700|57=1@-280,0+1495|55=2@-204,0+1342|82=3@-317,0+1231|
+            // 3=4@-2252,0+2822|68=5@-204,0+1344]
+            assertShape(shapeText(trackingFont, 'AVTo a', { variation: { TRAK: 0.5, TRKS: 1 } }), {
+                ...glyphs,
+                advances: [1700, 1495, 1342, 1231, 2822, 1344],
+                offsets: [[0, 0], [-280, 0], [-204, 0], [-317, 0], [-2252, 0], [-204, 0]]
+            }, 'TRAK 0.5 TRKS 1');
+        });
+    });
+
     describe('getGlyphRunKerningValue with second value records', function() {
         it('adds the x advance of the second value record of a pair, and skips the pair of its second glyph', function() {
             // -u 0061,0062,0063,0064: [5=0+450|6=1+480|7=2+460|8=3+500], -u 0041,0056: [2=0@10,20+570|4=1@-5,15+575]

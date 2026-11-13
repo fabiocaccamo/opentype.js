@@ -4,9 +4,8 @@
 import Layout, {
     getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, isMarkGlyph, getLigatureId,
     getLigatureComponent, isMarkIgnoredWithoutGlyphClasses, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES, IGNORE_MARKS, RIGHT_TO_LEFT, getRequiredFeatureIndex,
-    getOpenTypeScriptTags
+    getOpenTypeScriptTags, matchSequenceContext, matchChainedSequenceContext
 } from './layout.mjs';
-import { warnOncePerFont } from './util.mjs';
 
 // the features of common_features and horizontal_features (hb-ot-shape.cc) that are not default GSUB features of a
 // shaper of the fork (see Font.defaultRenderOptions.features): HarfBuzz looks each feature up in GSUB and in GPOS, so
@@ -19,18 +18,22 @@ const CURSIVE_ATTACHMENT_LOOKUP_TYPE = 3;
 const MARK_TO_BASE_ATTACHMENT_LOOKUP_TYPE = 4;
 const MARK_TO_LIGATURE_ATTACHMENT_LOOKUP_TYPE = 5;
 const MARK_TO_MARK_ATTACHMENT_LOOKUP_TYPE = 6;
+const CONTEXTUAL_POSITIONING_LOOKUP_TYPE = 7;
+const CHAINED_CONTEXTUAL_POSITIONING_LOOKUP_TYPE = 8;
 const EXTENSION_LOOKUP_TYPE = 9;
 
 // the application of a subtable at a glyph of a run by lookup type (see applySingleAdjustment, applyPairAdjustment,
-// applyCursiveAttachment, applyMarkToBaseAttachment, applyMarkToLigatureAttachment and applyMarkToMarkAttachment), the
-// lookup types not listed are not implemented yet
+// applyCursiveAttachment, applyMarkToBaseAttachment, applyMarkToLigatureAttachment, applyMarkToMarkAttachment,
+// applyContextualPositioning and applyChainedContextualPositioning)
 const subtableApplications = {
     [SINGLE_ADJUSTMENT_LOOKUP_TYPE]: applySingleAdjustment,
     [PAIR_ADJUSTMENT_LOOKUP_TYPE]: applyPairAdjustment,
     [CURSIVE_ATTACHMENT_LOOKUP_TYPE]: applyCursiveAttachment,
     [MARK_TO_BASE_ATTACHMENT_LOOKUP_TYPE]: applyMarkToBaseAttachment,
     [MARK_TO_LIGATURE_ATTACHMENT_LOOKUP_TYPE]: applyMarkToLigatureAttachment,
-    [MARK_TO_MARK_ATTACHMENT_LOOKUP_TYPE]: applyMarkToMarkAttachment
+    [MARK_TO_MARK_ATTACHMENT_LOOKUP_TYPE]: applyMarkToMarkAttachment,
+    [CONTEXTUAL_POSITIONING_LOOKUP_TYPE]: applyContextualPositioning,
+    [CHAINED_CONTEXTUAL_POSITIONING_LOOKUP_TYPE]: applyChainedContextualPositioning
 };
 
 // like hb_kern_machine_t of HarfBuzz, the kern table kerns a glyph with the next glyph that is not a GDEF mark
@@ -41,9 +44,14 @@ const KERN_TABLE_LOOKUP = { lookupFlag: IGNORE_MARKS };
 const MARK_ATTACHMENT = 'mark';
 const CURSIVE_ATTACHMENT = 'cursive';
 
-// the depth up to which the offsets of a chain of attached glyphs add up, HB_MAX_NESTING_LEVEL of HarfBuzz
-// (propagate_attachment_offsets)
-const MAX_ATTACHMENT_NESTING_LEVEL = 64;
+// HB_MAX_NESTING_LEVEL of HarfBuzz: the depth up to which the offsets of a chain of attached glyphs add up
+// (propagate_attachment_offsets), and the lookups of contextual lookups nest (recurse)
+const MAX_NESTING_LEVEL = 64;
+
+// HB_BUFFER_MAX_OPS_FACTOR and HB_BUFFER_MAX_OPS_MIN of HarfBuzz: the lookup records of contextual rules apply at most
+// this many nested lookups by glyph of a run, and at most this minimum to a shorter run (max_ops)
+const MAX_OPERATIONS_BY_GLYPH = 1024;
+const MIN_MAX_OPERATIONS = 16384;
 
 /**
  * When the shaper of a run sets the advance of the GDEF marks to 0, like the zero_width_marks of the shapers of
@@ -447,10 +455,9 @@ function getMarkBaseIndexes(gdef, glyphIndexes) {
 
 /**
  * Apply a mark-to-base attachment subtable at a mark of a run, like HarfBuzz (MarkBasePosFormat1): the mark attaches
- * to the glyph before it that is not a GDEF mark (see getMarkBaseIndexes) when the subtable covers both. In a font
- * without glyph classes, a lookup that ignores the mark as a mark (see isMarkIgnoredWithoutGlyphClasses) does not
- * attach it. Not yet like HarfBuzz: a mark after the second glyph of a multiple substitution attaches to that
- * glyph when the subtable covers it, otherwise to nothing, where HarfBuzz attaches it to the first glyph of the
+ * to the glyph before it that is not a GDEF mark (see getMarkBaseIndexes) when the subtable covers both, whatever the
+ * lookupFlag of the lookup. Not yet like HarfBuzz: a mark after the second glyph of a multiple substitution attaches to
+ * that glyph when the subtable covers it, otherwise to nothing, where HarfBuzz attaches it to the first glyph of the
  * substitution (https://github.com/harfbuzz/harfbuzz/issues/740).
  * @param {Position} position
  * @param {object} lookupTable - the lookup of the subtable
@@ -462,7 +469,7 @@ function getMarkBaseIndexes(gdef, glyphIndexes) {
 function applyMarkToBaseAttachment(position, lookupTable, subtable, glyphRun, index) {
     const glyphIndex = glyphRun.glyphIndexes[index];
     const markCoverageIndex = position.getCoverageIndex(subtable.markCoverage, glyphIndex);
-    if (markCoverageIndex < 0 || isMarkIgnoredWithoutGlyphClasses(getLayoutGdefTable(position.font), lookupTable, glyphIndex)) {
+    if (markCoverageIndex < 0) {
         return -1;
     }
     const baseIndex = glyphRun.markBaseIndexes[index];
@@ -494,8 +501,8 @@ function getMarkLigatureComponentIndex(markProperties, ligatureProperties, compo
 /**
  * Apply a mark-to-ligature attachment subtable at a mark of a run, like HarfBuzz (MarkLigPosFormat1): the mark
  * attaches to the glyph before it that is not a GDEF mark (see getMarkBaseIndexes), when the subtable covers both, at
- * the anchor of the ligature component of the mark (see getMarkLigatureComponentIndex). In a font without glyph
- * classes, a lookup that ignores the mark as a mark (see isMarkIgnoredWithoutGlyphClasses) does not attach it.
+ * the anchor of the ligature component of the mark (see getMarkLigatureComponentIndex), whatever the lookupFlag of the
+ * lookup.
  * @param {Position} position
  * @param {object} lookupTable - the lookup of the subtable
  * @param {object} subtable - a mark-to-ligature attachment subtable
@@ -506,7 +513,7 @@ function getMarkLigatureComponentIndex(markProperties, ligatureProperties, compo
 function applyMarkToLigatureAttachment(position, lookupTable, subtable, glyphRun, index) {
     const glyphIndex = glyphRun.glyphIndexes[index];
     const markCoverageIndex = position.getCoverageIndex(subtable.markCoverage, glyphIndex);
-    if (markCoverageIndex < 0 || isMarkIgnoredWithoutGlyphClasses(getLayoutGdefTable(position.font), lookupTable, glyphIndex)) {
+    if (markCoverageIndex < 0) {
         return -1;
     }
     const ligatureIndex = glyphRun.markBaseIndexes[index];
@@ -576,8 +583,97 @@ function applyMarkToMarkAttachment(position, lookupTable, subtable, glyphRun, in
 }
 
 /**
+ * Apply a lookup of the LookupList at a glyph of a run from a lookup record of a contextual rule, like HarfBuzz
+ * (hb_ot_apply_context_t::recurse): the first subtable of the lookup that applies at the glyph, with the lookupFlag of
+ * the lookup, even at a glyph it skips (see isGlyphSkippedByLookup); nothing past MAX_NESTING_LEVEL nested lookups,
+ * nor for a lookup index past the LookupList. Each application below that level takes one operation of the run (see
+ * operationsLeft), a lookup index past the LookupList too.
+ * @param {Position} position
+ * @param {number} lookupListIndex
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the glyph in the run
+ */
+function applyNestedPositioningLookup(position, lookupListIndex, glyphRun, index) {
+    if (!glyphRun.nestingLevelLeft) {
+        return;
+    }
+    glyphRun.operationsLeft--;
+    const lookupTable = position.font.tables.gpos.lookups[lookupListIndex];
+    if (!lookupTable) {
+        return;
+    }
+    glyphRun.nestingLevelLeft--;
+    applyLookupSubtables(position, lookupTable, getLookupSubtables(lookupTable), glyphRun, index);
+    glyphRun.nestingLevelLeft++;
+}
+
+/**
+ * Apply the lookup records of a contextual rule that matches at a glyph, like HarfBuzz (apply_lookup): in record order,
+ * each one applies its lookup (see applyNestedPositioningLookup) at the input glyph of its sequence index, the index of
+ * the glyph in the matched input (the glyphs the rule skips are not counted), a sequence index past the input does
+ * not apply, and none applies once the run has no operation left; GPOS changes no glyph, so the input stays the same.
+ * The lookup goes on after the last input glyph.
+ * @param {Position} position
+ * @param {ContextRuleMatch|null} contextRuleMatch - the rule that matches, null if none
+ * @param {GlyphRun} glyphRun - updated
+ * @returns {number} the position the lookup goes on at, -1 when no rule matches
+ */
+function applyContextRuleMatch(position, contextRuleMatch, glyphRun) {
+    if (!contextRuleMatch) {
+        return -1;
+    }
+    const { inputPositions, lookupRecords } = contextRuleMatch;
+    for (const { sequenceIndex, lookupListIndex } of lookupRecords) {
+        if (sequenceIndex >= inputPositions.length) {
+            continue;
+        }
+        if (glyphRun.operationsLeft <= 0) {
+            break;
+        }
+        applyNestedPositioningLookup(position, lookupListIndex, glyphRun, inputPositions[sequenceIndex]);
+    }
+    return inputPositions[inputPositions.length - 1] + 1;
+}
+
+/**
+ * Apply a contextual positioning subtable (formats 1, 2 and 3) at a glyph of a run, like HarfBuzz (ContextFormat1,
+ * ContextFormat2 and ContextFormat3): the lookup records of the rule that matches at the glyph (see
+ * matchSequenceContext and applyContextRuleMatch).
+ * @param {Position} position
+ * @param {object} lookupTable - the lookup of the subtable, for its lookupFlag
+ * @param {object} subtable - a contextual positioning subtable
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the glyph in the run
+ * @returns {number} the position the lookup goes on at, -1 when the subtable does not apply
+ */
+function applyContextualPositioning(position, lookupTable, subtable, glyphRun, index) {
+    const contextRuleMatch = matchSequenceContext(
+        getLayoutGdefTable(position.font), lookupTable, subtable, subtable.posFormat, glyphRun.glyphIndexes, index
+    );
+    return applyContextRuleMatch(position, contextRuleMatch, glyphRun);
+}
+
+/**
+ * Apply a chained contextual positioning subtable (formats 1, 2 and 3) at a glyph of a run, like HarfBuzz
+ * (ChainContextFormat1, ChainContextFormat2 and ChainContextFormat3): the lookup records of the rule that matches at
+ * the glyph (see matchChainedSequenceContext and applyContextRuleMatch).
+ * @param {Position} position
+ * @param {object} lookupTable - the lookup of the subtable, for its lookupFlag
+ * @param {object} subtable - a chained contextual positioning subtable
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the glyph in the run
+ * @returns {number} the position the lookup goes on at, -1 when the subtable does not apply
+ */
+function applyChainedContextualPositioning(position, lookupTable, subtable, glyphRun, index) {
+    const contextRuleMatch = matchChainedSequenceContext(
+        getLayoutGdefTable(position.font), lookupTable, subtable, subtable.posFormat, glyphRun.glyphIndexes, index
+    );
+    return applyContextRuleMatch(position, contextRuleMatch, glyphRun);
+}
+
+/**
  * Add to the offsets of an attached glyph the offsets of the glyph it is attached to, like HarfBuzz
- * (propagate_attachment_offsets), that glyph first, up to a chain of MAX_ATTACHMENT_NESTING_LEVEL glyphs: the y offset
+ * (propagate_attachment_offsets), that glyph first, up to a chain of MAX_NESTING_LEVEL glyphs: the y offset
  * of a cursive attachment, the x and y offsets of a mark attachment, whose mark also moves back over the advances
  * from its glyph to it (forward over them in a right-to-left run), so that it stays on its anchor.
  * @param {GlyphRun} glyphRun - its attachments are consumed, its glyph positions updated
@@ -655,33 +751,26 @@ function getLookupSubtables(lookupTable) {
 }
 
 /**
- * Whether a GPOS lookup type is implemented (see subtableApplications).
- * @param {number} lookupType
- * @returns {boolean}
+ * Apply the first subtable of a lookup that applies at a glyph of a run (see subtableApplications).
+ * @param {Position} position
+ * @param {object} lookupTable - the lookup of the subtables, for its lookupFlag
+ * @param {Array<{lookupType: number, subtable: object}>} lookupSubtables - see getLookupSubtables
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the glyph in the run
+ * @returns {number} the position the lookup goes on at, -1 when no subtable applies
  */
-function isLookupTypeSupported(lookupType) {
-    return Boolean(subtableApplications[lookupType]);
-}
-
-/**
- * The subtables of a lookup (see getLookupSubtables) of the lookup types that are implemented, with a warning (once
- * per font and lookup type) for the other ones: they are skipped, so that the other lookups of their features still
- * apply.
- * @param {opentype.Font} font
- * @param {object} lookupTable
- * @returns {Array<{lookupType: number, subtable: object}>}
- */
-function getAppliedLookupSubtables(font, lookupTable) {
-    const appliedLookupSubtables = [];
-    for (const lookupSubtable of getLookupSubtables(lookupTable)) {
-        if (isLookupTypeSupported(lookupSubtable.lookupType)) {
-            appliedLookupSubtables.push(lookupSubtable);
-        } else {
-            warnOncePerFont(font, 'GPOS lookupType', lookupSubtable.lookupType,
-                () => `[opentype.js] GPOS lookupType: ${lookupSubtable.lookupType} is not yet supported, lookup skipped`);
+function applyLookupSubtables(position, lookupTable, lookupSubtables, glyphRun, index) {
+    for (const { lookupType, subtable } of lookupSubtables) {
+        const applySubtable = subtableApplications[lookupType];
+        if (!applySubtable) {
+            throw new Error(`Unknown GPOS lookup type: ${lookupType}`);
+        }
+        const nextIndex = applySubtable(position, lookupTable, subtable, glyphRun, index);
+        if (nextIndex >= 0) {
+            return nextIndex;
         }
     }
-    return appliedLookupSubtables;
+    return -1;
 }
 
 /**
@@ -700,6 +789,11 @@ function getAppliedLookupSubtables(font, lookupTable) {
  * attach_chain and attach_type of HarfBuzz
  * @property {boolean} rightToLeft - whether the run is laid out from right to left
  * @property {object} [variation] - variation coordinates, the current font variation if omitted
+ * @property {number} nestingLevelLeft - how many more lookups the lookup records of contextual rules can nest, like the
+ * nesting_level_left of HarfBuzz (see applyNestedPositioningLookup)
+ * @property {number} operationsLeft - how many more nested lookups the lookup records of contextual rules can apply to
+ * the run, like the max_ops of HarfBuzz, so that a font whose lookups nest themselves several times ends: its glyphs
+ * times MAX_OPERATIONS_BY_GLYPH, at least MIN_MAX_OPERATIONS
  */
 
 /**
@@ -718,35 +812,54 @@ function createGlyphRun(gdef, glyphIndexes, glyphPositions, runProperties) {
         markBaseIndexes: getMarkBaseIndexes(gdef, glyphIndexes),
         attachments: [],
         rightToLeft: runProperties.rightToLeft,
-        variation: runProperties.variation
+        variation: runProperties.variation,
+        nestingLevelLeft: MAX_NESTING_LEVEL,
+        operationsLeft: Math.max(glyphIndexes.length * MAX_OPERATIONS_BY_GLYPH, MIN_MAX_OPERATIONS)
     };
 }
 
 /**
+ * Whether a GPOS lookup skips a glyph of a run when it applies from the first glyph, like HarfBuzz
+ * (check_glyph_property in apply_forward): a glyph it ignores (see isGlyphIgnoredByLookup) and, for a mark-to-base or
+ * mark-to-ligature lookup in a font without glyph classes, a glyph it ignores as a mark (see
+ * isMarkIgnoredWithoutGlyphClasses). The lookups that a contextual rule applies skip no glyph (see
+ * applyNestedPositioningLookup).
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {object} lookupTable
+ * @param {number} lookupType - the lookup type of its subtables (see getLookupSubtables)
+ * @param {number} glyphIndex
+ * @returns {boolean}
+ */
+function isGlyphSkippedByLookup(gdef, lookupTable, lookupType, glyphIndex) {
+    if (isGlyphIgnoredByLookup(gdef, lookupTable, glyphIndex)) {
+        return true;
+    }
+    const isMarkToBaseOrLigature = lookupType === MARK_TO_BASE_ATTACHMENT_LOOKUP_TYPE ||
+        lookupType === MARK_TO_LIGATURE_ATTACHMENT_LOOKUP_TYPE;
+    return isMarkToBaseOrLigature && isMarkIgnoredWithoutGlyphClasses(gdef, lookupTable, glyphIndex);
+}
+
+/**
  * Apply a GPOS lookup to a run of glyphs, like HarfBuzz (apply_forward): at each glyph that the lookup does not
- * ignore, from the first one, the first subtable that applies to it; the lookup goes on at the glyph that this
- * subtable gives, otherwise at the next glyph. The subtables of the lookup types not implemented yet are skipped.
+ * skip (see isGlyphSkippedByLookup), from the first one, the first subtable that applies to it; the lookup goes on at
+ * the glyph that this subtable gives, otherwise at the next glyph.
  * @param {Position} position
  * @param {object} lookupTable
  * @param {GlyphRun} glyphRun - updated
  * @param {number} lastIndex - the position in the run of the last glyph the lookup applies at
  */
 function applyPositioningLookup(position, lookupTable, glyphRun, lastIndex) {
-    const lookupSubtables = getAppliedLookupSubtables(position.font, lookupTable);
+    const lookupSubtables = getLookupSubtables(lookupTable);
     if (!lookupSubtables.length) {
         return;
     }
     const gdef = getLayoutGdefTable(position.font);
+    const lookupType = lookupSubtables[0].lookupType;
     let index = 0;
     while (index <= lastIndex) {
         let nextIndex = -1;
-        if (!isGlyphIgnoredByLookup(gdef, lookupTable, glyphRun.glyphIndexes[index])) {
-            for (const { lookupType, subtable } of lookupSubtables) {
-                nextIndex = subtableApplications[lookupType](position, lookupTable, subtable, glyphRun, index);
-                if (nextIndex >= 0) {
-                    break;
-                }
-            }
+        if (!isGlyphSkippedByLookup(gdef, lookupTable, lookupType, glyphRun.glyphIndexes[index])) {
+            nextIndex = applyLookupSubtables(position, lookupTable, lookupSubtables, glyphRun, index);
         }
         index = nextIndex >= 0 ? nextIndex : index + 1;
     }
@@ -1021,7 +1134,7 @@ function positionGlyphRun(position, glyphIndexes, glyphPositions, runOptions) {
         zeroMarkAdvances(gdef, glyphRun, isMarkOffsetMovedBack);
     }
     for (let i = 0; i < glyphIndexes.length; i++) {
-        propagateAttachmentOffsets(glyphRun, i, MAX_ATTACHMENT_NESTING_LEVEL);
+        propagateAttachmentOffsets(glyphRun, i, MAX_NESTING_LEVEL);
     }
 }
 
@@ -1061,7 +1174,8 @@ Position.prototype.getKerningValue = function(kerningLookups, leftIndex, rightIn
  * like HarfBuzz (hb_kern_machine_t), a pair of the kern table starts only at the first glyph of the run and at a
  * glyph that is not a GDEF mark, so a GDEF mark after the first glyph gets 0.
  * Each call applies the lookups to the run up to the glyph, so its cost grows with the position of the glyph:
- * Font.shape positions all the glyphs of a text at once.
+ * Font.shape positions all the glyphs of a text at once, with the contextual positionings of the kern feature,
+ * which are not kerning lookups (see getKerningTables).
  *
  * @param {object[]|undefined} kerningLookups - lookup tables of type 2, in the order they apply, or undefined
  * for the kern table (see getKerningTables)
@@ -1089,7 +1203,8 @@ Position.prototype.getGlyphRunKerningValue = function(kerningLookups, glyphIndex
 /**
  * List the kerning lookup tables (the pair adjustment lookups of the kern feature) of a script and
  * language in LookupList order, the order they apply in, including the pair adjustment subtables
- * wrapped in extension lookups.
+ * wrapped in extension lookups. The contextual positionings of the kern feature (lookup types 7 and 8,
+ * e.g. a contextual kerning and its exceptions) are not listed: they are in the positions of Font.shape only.
  * A script the font has not falls back to DFLT, dflt, then latn, and a language the script has
  * not to the default language system of the script (see Layout.getScriptTable and getLangSysTable),
  * except hebr: like the Hebrew shaper of HarfBuzz (its gpos_tag), a GPOS table without the hebr
