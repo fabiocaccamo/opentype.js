@@ -58,9 +58,47 @@ describe('tables/gpos.mjs', function() {
             value: {
                 xPlacement: 80,             // 0x50
                 yAdvance: 210,              // 0xd2
-                xPlaDevice: undefined,      // not supported yet
-                yAdvDevice: undefined       // not supported yet
+                // the Device tables at the offsets 0x18 and 0x20 from the start of the subtable
+                xPlaDevice: { deltaFormat: 1, startSize: 11, endSize: 15 },
+                yAdvDevice: { deltaFormat: 1, startSize: 11, endSize: 15 }
             }
+        });
+    });
+
+    it('can parse lookup1 SinglePosFormat1 with a Device table and a VariationIndex table', function() {
+        // ValueFormat 0x0099 (XPlacement, YAdvance, XPlaDevice, YAdvDevice), the Device table at the offset 0x0e from
+        // the start of the subtable and the VariationIndex table at 0x16, then the Coverage at 0x1c (fontTools reads the
+        // same fields)
+        const data = '0001 001C 0099   0050 00D2 000E 0016   000B 000F 0001 5540   0003 0007 8000   0001 0001 0005';
+        assert.deepEqual(parseLookup(1, data), {
+            posFormat: 1,
+            coverage: {
+                format: 1,
+                glyphs: [5]
+            },
+            value: {
+                xPlacement: 80,
+                yAdvance: 210,
+                xPlaDevice: { deltaFormat: 1, startSize: 11, endSize: 15 },
+                yAdvDevice: { deltaFormat: 0x8000, deltaSetOuterIndex: 3, deltaSetInnerIndex: 7 }
+            }
+        });
+    });
+
+    it('can parse lookup1 SinglePosFormat2 with VariationIndex tables', function() {
+        // ValueFormat 0x0044 (XAdvance, XAdvDevice), two ValueRecords whose VariationIndex tables (deltaFormat 0x8000)
+        // are at the offsets 0x10 and 0x16 from the start of the subtable, then the Coverage at 0x1c
+        const data = '0002 001C 0044 0002   FFF6 0010   FFEC 0016   0000 0001 8000   0002 0003 8000   0001 0002 0005 0007';
+        assert.deepEqual(parseLookup(1, data), {
+            posFormat: 2,
+            coverage: {
+                format: 1,
+                glyphs: [5, 7]
+            },
+            values: [
+                { xAdvance: -10, xAdvDevice: { deltaFormat: 0x8000, deltaSetOuterIndex: 0, deltaSetInnerIndex: 1 } },
+                { xAdvance: -20, xAdvDevice: { deltaFormat: 0x8000, deltaSetOuterIndex: 2, deltaSetInnerIndex: 3 } }
+            ]
         });
     });
 

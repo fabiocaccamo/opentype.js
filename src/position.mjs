@@ -9,12 +9,14 @@ import { warnOncePerFont } from './util.mjs';
 // the GPOS features of a run are these and the GSUB features of its shaper, their lookups together in LookupList order
 const DEFAULT_POSITIONING_FEATURES = ['abvm', 'blwm', 'curs', 'dist', 'kern', 'mark', 'mkmk'];
 
+const SINGLE_ADJUSTMENT_LOOKUP_TYPE = 1;
 const PAIR_ADJUSTMENT_LOOKUP_TYPE = 2;
 const EXTENSION_LOOKUP_TYPE = 9;
 
-// the application of a subtable at a glyph of a run by lookup type (see applyPairAdjustment), the lookup types
-// not listed are not implemented yet
+// the application of a subtable at a glyph of a run by lookup type (see applySingleAdjustment and
+// applyPairAdjustment), the lookup types not listed are not implemented yet
 const subtableApplications = {
+    [SINGLE_ADJUSTMENT_LOOKUP_TYPE]: applySingleAdjustment,
     [PAIR_ADJUSTMENT_LOOKUP_TYPE]: applyPairAdjustment
 };
 
@@ -104,6 +106,50 @@ function addValueRecord(position, glyphPosition, valueRecord, variation) {
     glyphPosition.xOffset += getValueRecordValue(position, valueRecord, 'xPlacement', variation);
     glyphPosition.yOffset += getValueRecordValue(position, valueRecord, 'yPlacement', variation);
     glyphPosition.xAdvance += getValueRecordValue(position, valueRecord, 'xAdvance', variation);
+}
+
+/**
+ * Find the adjustment of a glyph in a single adjustment subtable, if the subtable applies to the glyph, like
+ * HarfBuzz (SinglePosFormat1 and SinglePosFormat2): format 1 has one value record for the glyphs it covers, format 2
+ * the value record of the coverage index of the glyph, and does not apply when the index is out of its value records.
+ * @param {opentype.Layout} layout - the GPOS layout, for its coverage lookups
+ * @param {object} subtable - a single adjustment subtable
+ * @param {integer} glyphIndex
+ * @returns {{valueRecord: object}|undefined} the adjustment with the value record of the glyph (undefined when the
+ * value format is 0), undefined when the subtable does not apply
+ */
+function findSingleAdjustment(layout, subtable, glyphIndex) {
+    const coverageIndex = layout.getCoverageIndex(subtable.coverage, glyphIndex);
+    if (coverageIndex < 0) {
+        return;
+    }
+    switch (subtable.posFormat) {
+        case 1:
+            return { valueRecord: subtable.value };
+        case 2:
+            if (coverageIndex < subtable.values.length) {
+                return { valueRecord: subtable.values[coverageIndex] };
+            }
+    }
+}
+
+/**
+ * Apply a single adjustment subtable at a glyph of a run, like HarfBuzz (SinglePosFormat1 and SinglePosFormat2): its
+ * value record adjusts the glyph, and the lookup goes on at the next glyph.
+ * @param {Position} position
+ * @param {object} lookupTable - the lookup of the subtable
+ * @param {object} subtable - a single adjustment subtable
+ * @param {GlyphRun} glyphRun - updated
+ * @param {number} index - the position of the glyph in the run
+ * @returns {number} the position the lookup goes on at, -1 when the subtable does not apply
+ */
+function applySingleAdjustment(position, lookupTable, subtable, glyphRun, index) {
+    const singleAdjustment = findSingleAdjustment(position, subtable, glyphRun.glyphIndexes[index]);
+    if (!singleAdjustment) {
+        return -1;
+    }
+    addValueRecord(position, glyphRun.glyphPositions[index], singleAdjustment.valueRecord, glyphRun.variation);
+    return index + 1;
 }
 
 /**
@@ -512,8 +558,9 @@ Position.prototype.getGlyphRunKerningValue = function(kerningLookups, glyphIndex
 };
 
 /**
- * List the kerning lookup tables of a script and language in LookupList order, the order they
- * apply in, including the pair adjustment subtables wrapped in extension lookups.
+ * List the kerning lookup tables (the pair adjustment lookups of the kern feature) of a script and
+ * language in LookupList order, the order they apply in, including the pair adjustment subtables
+ * wrapped in extension lookups.
  * A script the font has not falls back to DFLT, dflt, then latn, and a language the script has
  * not to the default language system of the script (see Layout.getScriptTable and getLangSysTable),
  * except hebr: like the Hebrew shaper of HarfBuzz (its gpos_tag), a GPOS table without the hebr

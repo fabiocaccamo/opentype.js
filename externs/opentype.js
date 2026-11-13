@@ -87,9 +87,10 @@ opentype.Font.prototype.glyphIndexToName = function(gid) {};
  * and the right glyph (or its index). If no kerning pair is found, return 0.
  * The kerning value gets added to the advance width when calculating the spacing
  * between glyphs.
- * For GPOS kerning, the values of all the lookups of the kern feature of the default language
- * are added up, for the script of the characters the cmap maps to the two glyphs (with the fallbacks
- * of opentype.Position.prototype.getKerningTables). The script of a glyph is the Unicode script of its
+ * For GPOS kerning, the values of all the pair adjustment lookups (lookup type 2) of the kern feature of
+ * the default language are added up, for the script of the characters the cmap maps to the two glyphs (with
+ * the fallbacks of opentype.Position.prototype.getKerningTables); its single adjustments (lookup type 1) are
+ * in the positions of opentype.Font.prototype.shape. The script of a glyph is the Unicode script of its
  * characters, none for characters of no script (Common, Inherited or Unknown), and Latin for a glyph
  * shared by characters of several scripts, a character of no script counting as one. The pair takes
  * the first of Thai, Arabic, Hebrew, Cyrillic and Greek that one of its glyphs has, otherwise its first
@@ -119,15 +120,16 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
  * run are the default GSUB features of its shaper but the Arabic forms, and abvm, blwm, curs, dist, kern (with
  * options.kerning), mark and mkmk, with options.features, and the required feature of the GPOS language system (its
  * ReqFeatureIndex) whatever options.features; their lookups apply in lookup list order, to each run in the order of
- * the text, extension lookups included. The pair adjustments (lookup type 2) are applied with their two value
- * records; the other lookup types are skipped with a warning: a mark is drawn at the pen position, without the
- * offset of its anchors. Without a GPOS kern feature for the script and language, the kern table applies like in
- * HarfBuzz, in visual order, the value of a pair split between its two glyphs, each glyph kerned with the next glyph
- * that is not a GDEF mark; unlike HarfBuzz, which splits the value of a pair in each kern subtable on its own, the
- * values of a pair in several subtables are added up before the split: the positions and the pen are the same, the
- * advances can differ by a few units (up to half the number of subtables with an odd value for the pair). The marks
- * are the ones of the GlyphClassDef of GDEF: without it no glyph is a mark, for the GPOS lookups and the kern table,
- * unlike HarfBuzz, which then takes the nonspacing marks of Unicode as marks. A GDEF mark keeps its advance, like
+ * the text, extension lookups included. The single adjustments (lookup type 1) are applied with their value
+ * record, the pair adjustments (lookup type 2) with their two value records; the other lookup types are skipped
+ * with a warning: a mark is drawn at the pen position, without the offset of its anchors. Without a GPOS kern
+ * feature for the script and language, the kern table applies like in HarfBuzz, in visual order, the value of a
+ * pair split between its two glyphs, each glyph kerned with the next glyph that is not a GDEF mark; unlike
+ * HarfBuzz, which splits the value of a pair in each kern subtable on its own, the values of a pair in several
+ * subtables are added up before the split: the positions and the pen are the same, the advances can differ by a
+ * few units (up to half the number of subtables with an odd value for the pair). The marks are the ones of the
+ * GlyphClassDef of GDEF: without it no glyph is a mark, for the GPOS lookups and the kern table, unlike
+ * HarfBuzz, which then takes the nonspacing marks of Unicode as marks. A GDEF mark keeps its advance, like
  * the Indic and Khmer shapers of HarfBuzz. HarfBuzz picks the shaper of a run from its script and from the GSUB
  * script it chose for it: a Khmer run always takes the Khmer shaper, an Indic, USE or Myanmar run takes the default
  * shaper when that GSUB script is DFLT or latn (or mymr, for Myanmar). Not yet like HarfBuzz: in the other runs, its
@@ -573,8 +575,8 @@ opentype.Layout.prototype.expandCoverage = function(coverageTable) {};
 opentype.Position = function(font) {};
 
 /**
- * List the kerning lookup tables of a script and language in LookupList order, the order they apply in,
- * including the pair adjustment subtables wrapped in extension lookups.
+ * List the kerning lookup tables (the pair adjustment lookups of the kern feature) of a script and language in
+ * LookupList order, the order they apply in, including the pair adjustment subtables wrapped in extension lookups.
  * A script the GPOS table has not falls back to DFLT, dflt, then latn, and a language the script has not
  * to the default language system of the script (see getScriptTable and getLangSysTable), except hebr:
  * like the Hebrew shaper of HarfBuzz, a GPOS table without the hebr script does not apply to it.

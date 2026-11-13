@@ -292,6 +292,31 @@ describe('parse.mjs', function() {
         });
     });
 
+    describe('parseValueRecordList', function() {
+        // a SinglePosFormat2 subtable at the offset 2 (after a filler), its ValueFormat 0x0044 (XAdvance, XAdvDevice)
+        // list of two ValueRecords at the offset 4, then their VariationIndex tables (deltaFormat 0x8000) at the
+        // offsets 0x0e and 0x14 from the start of the subtable (OpenType GPOS, ValueRecord)
+        const data = '0000   0002   0044 0002 FFF6 000E FFEC 0014   0000 0001 8000   0002 0003 8000';
+
+        it('parses the device tables at their offsets from the start of the subtable', function() {
+            const p = new Parser(unhex(data), 4);
+            assert.deepStrictEqual(p.parseValueRecordList(2), [
+                { xAdvance: -10, xAdvDevice: { deltaFormat: 0x8000, deltaSetOuterIndex: 0, deltaSetInnerIndex: 1 } },
+                { xAdvance: -20, xAdvDevice: { deltaFormat: 0x8000, deltaSetOuterIndex: 2, deltaSetInnerIndex: 3 } }
+            ]);
+            assert.equal(p.relativeOffset, 12);
+        });
+
+        it('does not parse the device tables without the start of the subtable', function() {
+            const p = new Parser(unhex(data), 4);
+            assert.deepStrictEqual(p.parseValueRecordList(), [
+                { xAdvance: -10, xAdvDevice: undefined },
+                { xAdvance: -20, xAdvDevice: undefined }
+            ]);
+            assert.equal(p.relativeOffset, 12);
+        });
+    });
+
     describe('parseDeltaSets', function() {
         it('should parse DeltaSets without the LONG_WORDS flag', function() {
             const data = '0123 4567 891A BCDE FADE C0FF EE0F DEAD BEEF BADA 55DE CADE';
