@@ -11,8 +11,9 @@ LookupFlags.ttf is also in test/fonts, for the end-to-end tests of test/font.spe
 synthetic tables of test/lookup-flags-font.mjs keep the glyphs and the GDEF table of the font.
 
 The variants of LookupFlags.ttf:
-- LookupFlagsKernTable.ttf: without the GPOS table, with a kern table (format 0) of the pairs a acute -15
-  and a b -60;
+- LookupFlagsKernTable.ttf: without the GPOS table, with a kern table (format 0) of the pairs a acute -15,
+  a b -60, acute b -40 and A V -100;
+- LookupFlagsKernTableNoGDEF.ttf: LookupFlagsKernTable.ttf without the GDEF table;
 - LookupFlagsNoGDEF.ttf: without the GDEF table;
 - LookupFlagsExtension.ttf: the lookups LOOKAHEAD_IGNORE_MARKS (ss03), KERN_IGNORE_MARKS (kern), and
   NESTED_LIGATURE_SKIPPED_MARK (ss37) with its nested ligature LIGATURE_AT_MULTIPLE_IGNORE_MARKS in extension
@@ -1008,7 +1009,7 @@ feature ccmp { lookup MULTIPLE_KOKAI; } ccmp;
 """
 
 # the pairs of the kern table of LookupFlagsKernTable.ttf
-KERN_TABLE_PAIRS = {("a", "acute"): -15, ("a", "b"): -60}
+KERN_TABLE_PAIRS = {("a", "acute"): -15, ("a", "b"): -60, ("acute", "b"): -40, ("A", "V"): -100}
 
 # the lookups of LookupFlagsExtension.ttf in extension lookups
 EXTENSION_LOOKUP_NAMES = [
@@ -1228,6 +1229,9 @@ def main():
     fonts = {"LookupFlags.ttf": build_font(), "LookupFlagsExtension.ttf": build_font(get_extension_features())}
     fonts["LookupFlagsKernTable.ttf"] = build_font()
     replace_gpos_with_kern_table(fonts["LookupFlagsKernTable.ttf"])
+    fonts["LookupFlagsKernTableNoGDEF.ttf"] = build_font()
+    replace_gpos_with_kern_table(fonts["LookupFlagsKernTableNoGDEF.ttf"])
+    del fonts["LookupFlagsKernTableNoGDEF.ttf"]["GDEF"]
     fonts["LookupFlagsNoGDEF.ttf"] = build_font()
     del fonts["LookupFlagsNoGDEF.ttf"]["GDEF"]
     fonts["LookupFlagsEmptyContextInput.ttf"] = build_font()

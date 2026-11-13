@@ -153,4 +153,30 @@ function getTuplePointNumbers(header, sharedPoints) {
     return header.privatePoints ? header.privatePoints : sharedPoints;
 }
 
-export { arraysEqual, binarySearch, binarySearchIndex, binarySearchInsert, isGzip, unGzip, copyPoint, copyComponent, getGlyphVariationPointCount, getTuplePointNumbers };
+// font -> kind of warning -> the values already warned about for the font
+const fontWarnings = new WeakMap();
+
+/**
+ * Warn about a value of a font (e.g. a lookup type that is not supported yet), once per font, kind and value. The
+ * message is built at the first warning only, as the callers check their warning at every text they lay out.
+ * @param {opentype.Font} font
+ * @param {string} kind - e.g. 'GPOS lookupType'
+ * @param {number|string} value - e.g. the lookup type
+ * @param {function(): string} getMessage
+ */
+function warnOncePerFont(font, kind, value, getMessage) {
+    if (!fontWarnings.has(font)) {
+        fontWarnings.set(font, new Map());
+    }
+    const kindWarnings = fontWarnings.get(font);
+    if (!kindWarnings.has(kind)) {
+        kindWarnings.set(kind, new Set());
+    }
+    const warnedValues = kindWarnings.get(kind);
+    if (!warnedValues.has(value)) {
+        warnedValues.add(value);
+        console.warn(getMessage());
+    }
+}
+
+export { arraysEqual, binarySearch, binarySearchIndex, binarySearchInsert, isGzip, unGzip, copyPoint, copyComponent, getGlyphVariationPointCount, getTuplePointNumbers, warnOncePerFont };

@@ -2,10 +2,8 @@
  * Query a feature by some of it's properties to lookup a glyph substitution.
  */
 
-import { getLayoutGdefTable, isGlyphIgnoredByLookup, getNotIgnoredGlyphPositions } from '../layout.mjs';
-
-// font -> substitution types already warned as unsupported (warn once per font)
-const warnedUnsupportedSubstitutionTypes = new WeakMap();
+import { getLayoutGdefTable, isGlyphIgnoredByLookup, getNotIgnoredGlyphPositions, getRequiredFeatureIndex } from '../layout.mjs';
+import { warnOncePerFont } from '../util.mjs';
 
 /**
  * Create feature query instance
@@ -628,8 +626,7 @@ FeatureQuery.prototype.getScriptFeaturesIndexes = function(scriptTag, languageTa
  * @returns {number|undefined} undefined when the language system has no required feature
  */
 FeatureQuery.prototype.getRequiredFeatureIndex = function(scriptTag, languageTag) {
-    const langSysTable = this.font.substitution.getLangSysTable(scriptTag, languageTag);
-    return langSysTable && langSysTable.reqFeatureIndex !== 0xFFFF ? langSysTable.reqFeatureIndex : undefined;
+    return getRequiredFeatureIndex(this.font.substitution.getLangSysTable(scriptTag, languageTag));
 };
 
 /**
@@ -771,18 +768,12 @@ FeatureQuery.prototype.getLookupMethod = function(lookupTable, subtable) {
         default:
             // unsupported lookups are skipped (warned once per type), so the
             // supported lookups of the same feature still apply
-            if (!warnedUnsupportedSubstitutionTypes.has(this.font)) {
-                warnedUnsupportedSubstitutionTypes.set(this.font, new Set());
-            }
-            if (!warnedUnsupportedSubstitutionTypes.get(this.font).has(substitutionType)) {
-                warnedUnsupportedSubstitutionTypes.get(this.font).add(substitutionType);
-                console.warn(
-                    `[opentype.js] substitutionType: ${substitutionType} ` +
-                    `lookupType: ${lookupTable.lookupType} - ` +
-                    `substFormat: ${subtable.substFormat} ` +
-                    'is not yet supported, lookup skipped'
-                );
-            }
+            warnOncePerFont(this.font, 'GSUB substitutionType', substitutionType, () =>
+                `[opentype.js] substitutionType: ${substitutionType} ` +
+                `lookupType: ${lookupTable.lookupType} - ` +
+                `substFormat: ${subtable.substFormat} ` +
+                'is not yet supported, lookup skipped'
+            );
             return null;
     }
 };

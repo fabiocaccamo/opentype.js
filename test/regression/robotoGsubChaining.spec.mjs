@@ -445,8 +445,8 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         // lower; the y of the text layout goes down, so 41.
         itFailsUntilFixed(
             'places the combining acute on the dotless j with the anchors of GPOS mark',
-            'forEachGlyph (src/font.mjs): moves the pen by the advances and the kerning only, GPOS mark to base ' +
-            '(lookup type 4) is not applied: the acute stays at the pen position, [17, 518, 0]',
+            'Font.shape (src/font.mjs) and positionGlyphRun (src/position.mjs): the GPOS lookups of mark to base ' +
+            '(lookup type 4) are skipped: the acute stays at the pen position, [17, 518, 0]',
             function() {
                 assert.deepStrictEqual(getGlyphOrigins(font, 'j\u{301}a').origins, [[25, 0, 0], [17, 832, 41], [4, 518, 0]]);
             }

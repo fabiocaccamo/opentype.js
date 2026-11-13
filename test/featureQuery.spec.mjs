@@ -267,6 +267,40 @@ describe('featureQuery.mjs', function() {
             assert.equal(warnings.length, 1);
             assert.match(warnings[0], /lookupType: 3 - substFormat: 1 is not yet supported, lookup skipped/);
         });
+
+        it('warns once for each unsupported substitution type of a font', function () {
+            // calt: an alternate substitution (lookup type 3) of a, a reverse chaining substitution (lookup type 8) of b
+            const alternateLookup = {
+                lookupType: 3,
+                lookupFlag: 0,
+                subtables: [{ substFormat: 1, coverage: createCoverage([glyphIndexes.a]), alternateSets: [[glyphIndexes['a.alt']]] }]
+            };
+            const reverseChainingLookup = {
+                lookupType: 8,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 1,
+                    coverage: createCoverage([glyphIndexes.b]),
+                    backtrackCoverage: [],
+                    lookaheadCoverage: [],
+                    substitutes: [glyphIndexes['b.alt']]
+                }]
+            };
+            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'calt', [0, 1], [alternateLookup, reverseChainingLookup]) });
+            const originalWarn = console.warn;
+            const warnings = [];
+            console.warn = message => warnings.push(message);
+            try {
+                font.stringToGlyphIndexes('ab');
+                font.stringToGlyphIndexes('ab');
+            } finally {
+                console.warn = originalWarn;
+            }
+            assert.deepStrictEqual(warnings, [
+                '[opentype.js] substitutionType: 31 lookupType: 3 - substFormat: 1 is not yet supported, lookup skipped',
+                '[opentype.js] substitutionType: 81 lookupType: 8 - substFormat: 1 is not yet supported, lookup skipped'
+            ]);
+        });
     });
 
     // the font of test/lookup-flags-font.mjs; the rules of the latinFeatures.spec.mjs tests of the lookupFlag in the

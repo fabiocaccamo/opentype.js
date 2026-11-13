@@ -105,10 +105,18 @@ describe('regression: helpers', function() {
         it('shapes a text like a line of hb-shape, with and without kerning', function() {
             // hb-shape --no-glyph-names --cluster-level=1 EBGaramond-VF-kern-subset.ttf -u 0041,0056
             // [1=0+552|5=1+672]
-            assertShape(shapeText(font, 'AV'), { glyphs: [1, 5], clusters: [0, 1], ends: [1, 2], advances: [552, 672] });
+            assertShape(shapeText(font, 'AV'), { glyphs: [1, 5], clusters: [0, 1], ends: [1, 2], advances: [552, 672], offsets: [[0, 0], [0, 0]] });
             // hb-shape --no-glyph-names --cluster-level=1 --features=-kern EBGaramond-VF-kern-subset.ttf -u 0041,0056
             // [1=0+692|5=1+672]
             assertShape(shapeText(font, 'AV', { kerning: false }), { glyphs: [1, 5], clusters: [0, 1], ends: [1, 2], advances: [692, 672] });
+        });
+
+        it('gives the x and y offsets of each glyph, the y axis going up like hb-shape', function() {
+            // test/fonts/TestPairPositioning.ttf (test/generate-pair-positioning-font.py), pos A <10 20 -30 40> V <-5 15 -25 35>;
+            // hb-shape --no-glyph-names --cluster-level=1 TestPairPositioning.ttf -u 0041,0056
+            // [2=0@10,20+570|4=1@-5,15+575]
+            const pairFont = loadFont('../TestPairPositioning.ttf');
+            assertShape(shapeText(pairFont, 'AV'), { glyphs: [2, 4], clusters: [0, 1], ends: [1, 2], advances: [570, 575], offsets: [[10, 20], [-5, 15]] });
         });
 
         it('shapes an empty text to no glyph', function() {
@@ -126,9 +134,11 @@ describe('regression: helpers', function() {
             }
         });
 
-        it('rejects another glyph, cluster, advance or end, and compares the ends only when expected has them', function() {
-            const shape = { glyphs: [1, 5], clusters: [0, 1], ends: [1, 2], advances: [552, 672] };
+        it('rejects another glyph, cluster, advance, end or offset, and compares the ends and the offsets only when expected has them', function() {
+            const shape = { glyphs: [1, 5], clusters: [0, 1], ends: [1, 2], advances: [552, 672], offsets: [[0, 0], [-25, 10]] };
             assertShape(shape, { glyphs: [1, 5], clusters: [0, 1], advances: [552, 672] });
+            assertShape(shape, { glyphs: [1, 5], clusters: [0, 1], advances: [552, 672], offsets: [[0, 0], [-25, 10]] });
+            assert.throws(() => assertShape(shape, { glyphs: [1, 5], clusters: [0, 1], advances: [552, 672], offsets: [[0, 0], [-25, -10]] }), /offsets/);
             assert.throws(() => assertShape(shape, { glyphs: [1, 6], clusters: [0, 1], advances: [552, 672] }), /glyphs/);
             assert.throws(() => assertShape(shape, { glyphs: [1, 5], clusters: [0, 0], advances: [552, 672] }), /clusters/);
             assert.throws(() => assertShape(shape, { glyphs: [1, 5], clusters: [0, 1], advances: [552, 671] }), /advances/);

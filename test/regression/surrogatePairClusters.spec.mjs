@@ -6,8 +6,8 @@
  *
  * Mechanism: stringToGlyphClusters gives each glyph the UTF-16 range of its characters. A
  * surrogate pair counts for 2 units; a variation selector (1 or 2 units) and the components
- * of a ligature belong to the cluster of their glyph. The advances come from the text layout
- * (forEachGlyph), which has to give the same glyphs.
+ * of a ligature belong to the cluster of their glyph. The advances come from font.shape, whose
+ * glyphs and clusters are the ones of stringToGlyphClusters.
  *
  * Upstream master (5d65b6d) has no stringToGlyphClusters: the regular tests are tests of an
  * API of the fork, but the one of the cmap, which passes there. Its stringToGlyphIndexes gives

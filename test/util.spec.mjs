@@ -1,7 +1,7 @@
 import assert from 'assert';
 import { readFileSync } from 'fs';
 import { parse } from '../src/opentype.mjs';
-import { arraysEqual, getGlyphVariationPointCount, getTuplePointNumbers } from '../src/util.mjs';
+import { arraysEqual, getGlyphVariationPointCount, getTuplePointNumbers, warnOncePerFont } from '../src/util.mjs';
 
 describe('util.mjs', function() {
     describe('arraysEqual', function() {
@@ -34,6 +34,32 @@ describe('util.mjs', function() {
             assert.deepStrictEqual(getTuplePointNumbers({ privatePoints: [1, 2] }, sharedPoints), [1, 2]);
             assert.deepStrictEqual(getTuplePointNumbers({ privatePoints: [] }, sharedPoints), []);
             assert.deepStrictEqual(getTuplePointNumbers({}, sharedPoints), [0, 5]);
+        });
+    });
+
+    describe('warnOncePerFont', function() {
+        it('warns once per font, kind and value, and builds each message at its first warning only', function() {
+            const [firstFont, secondFont] = [{}, {}];
+            const warnings = [];
+            const builtMessages = [];
+            const getMessage = message => () => {
+                builtMessages.push(message);
+                return message;
+            };
+            const consoleWarn = console.warn;
+            console.warn = message => warnings.push(message);
+            try {
+                warnOncePerFont(firstFont, 'GPOS lookupType', 4, getMessage('first font, GPOS 4'));
+                warnOncePerFont(firstFont, 'GPOS lookupType', 4, getMessage('first font, GPOS 4 again'));
+                warnOncePerFont(firstFont, 'GPOS lookupType', 5, getMessage('first font, GPOS 5'));
+                warnOncePerFont(firstFont, 'GSUB substitutionType', 4, getMessage('first font, GSUB 4'));
+                warnOncePerFont(secondFont, 'GPOS lookupType', 4, getMessage('second font, GPOS 4'));
+                warnOncePerFont(secondFont, 'GPOS lookupType', 4, getMessage('second font, GPOS 4 again'));
+            } finally {
+                console.warn = consoleWarn;
+            }
+            const expectedWarnings = ['first font, GPOS 4', 'first font, GPOS 5', 'first font, GSUB 4', 'second font, GPOS 4'];
+            assert.deepStrictEqual([warnings, builtMessages], [expectedWarnings, expectedWarnings]);
         });
     });
 });

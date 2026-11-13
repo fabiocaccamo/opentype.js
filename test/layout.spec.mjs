@@ -5,6 +5,7 @@ import Layout, {
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
     getNotIgnoredGlyphPositions,
+    getRequiredFeatureIndex,
     getOpenTypeScriptTags,
     selectScriptTag
 } from '../src/layout.mjs';
@@ -165,6 +166,32 @@ describe('layout.mjs', function() {
             assert.equal(layout.getLangSysTable('latn', 'TRK'), turkishLangSys);
             layout.getLangSysTable('latn', 'ROM', true);
             assert.deepStrictEqual(font.tables.gsub.scripts[0].script.langSysRecords.map(record => record.tag), ['ROM ', 'TRK ']);
+        });
+    });
+
+    describe('getFeatureTable', function() {
+        const kernFeature = { params: 0, lookupListIndexes: [0] };
+
+        it('ignores a feature index past the FeatureList, like HarfBuzz', function() {
+            // the FeatureIndex [kern, 99]: HarfBuzz still applies kern, see the hb-shape reference of the Font.shape test
+            // with a GPOS feature index past the FeatureList (test/font.spec.mjs)
+            font.tables.gsub = {
+                version: 1,
+                scripts: [{ tag: 'latn', script: { defaultLangSys: { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [0, 99] }, langSysRecords: [] } }],
+                features: [{ tag: 'kern', feature: kernFeature }],
+                lookups: []
+            };
+            assert.equal(layout.getFeatureTable('latn', 'dflt', 'kern'), kernFeature);
+            assert.equal(layout.getFeatureTable('latn', 'dflt', 'mark'), undefined);
+        });
+    });
+
+    describe('getRequiredFeatureIndex', function() {
+        it('gives the ReqFeatureIndex of a language system, undefined without a required feature (0xFFFF)', function() {
+            assert.equal(getRequiredFeatureIndex({ reserved: 0, reqFeatureIndex: 0, featureIndexes: [] }), 0);
+            assert.equal(getRequiredFeatureIndex({ reserved: 0, reqFeatureIndex: 3, featureIndexes: [0] }), 3);
+            assert.equal(getRequiredFeatureIndex({ reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [0] }), undefined);
+            assert.equal(getRequiredFeatureIndex(undefined), undefined);
         });
     });
 
