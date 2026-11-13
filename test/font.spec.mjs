@@ -1510,35 +1510,42 @@ describe('font.mjs', function() {
                 );
             });
 
-            itFailsUntilFixed('sets the advance of a GDEF mark to 0 after GPOS in a Latin text, like HarfBuzz',
-                'Font.shape (src/font.mjs): a GDEF mark keeps its advance width, the default shaper of HarfBuzz sets the x ' +
-                'advance of the GDEF marks to 0 after GPOS (zero_mark_widths_by_gdef)',
-                function() {
-                    // -u 0054,0301,006F [3=0+460|10=1+0|9=2@15,-10+500], the same with --features=-mark
-                    assert.strictEqual(formatShape(markAdvanceFont.shape('T\u{301}o')), '[3=0+460|10=1+0|9=2@15,-10+500]');
-                });
+            it('sets the advance of a GDEF mark to 0 after GPOS in a Latin text, like HarfBuzz', function() {
+                // -u 0054,0301,006F [3=0+460|10=1+0|9=2@15,-10+500], the same with --features=-mark
+                assert.strictEqual(formatShape(markAdvanceFont.shape('T\u{301}o')), '[3=0+460|10=1+0|9=2@15,-10+500]');
+            });
 
             it('keeps the advance of a GDEF mark in the Indic and Khmer scripts, like HarfBuzz', function() {
                 // the Indic and Khmer shapers of HarfBuzz do not zero the advances of the marks (HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE):
                 // --script=deva --features=-mark -u 0061,0301,0062 [5=0+500|10=1+100|6=2+500], the same with --script=khmr.
                 // HarfBuzz takes its Indic shaper for deva because the font has no GSUB: with a GSUB script DFLT or latn it
-                // takes its default shaper (see the expected failure below)
+                // takes its default shaper (see the test below)
                 for (const script of ['deva', 'khmr']) {
                     assert.strictEqual(formatShape(markAdvanceFont.shape('a\u{301}b', { script, features: { mark: false } })), '[5=0+500|10=1+100|6=2+500]', script);
                 }
             });
 
-            itFailsUntilFixed('sets the advance of a GDEF mark to 0 in an Indic script whose GSUB script is DFLT or latn, like HarfBuzz',
-                'Font.shape (src/font.mjs): a GDEF mark keeps its advance in an Indic run, HarfBuzz takes its default shaper ' +
-                '(hb_ot_shaper_categorize) when the GSUB script it chose is DFLT or latn, which sets the x advance of the GDEF ' +
-                'marks to 0 after GPOS (zero_mark_widths_by_gdef)',
-                function() {
-                    // --script=deva --features=-mark -u 0061,0301,0062 [5=0+500|10=1+0|6=2+500]
-                    assert.strictEqual(
-                        formatShape(latinGsubMarkAdvanceFont.shape('a\u{301}b', { script: 'deva', features: { mark: false } })),
-                        '[5=0+500|10=1+0|6=2+500]'
-                    );
-                });
+            it('sets the advance of a GDEF mark to 0 before GPOS in a USE script whose GSUB script is its own, like HarfBuzz', function() {
+                // TestMarkAttachment.ttf (a dot below of 100 units, ss01 adds 40 to it): --script=Gonm --features=+ss01
+                // -u 0061,0323,0301 [2=0+500|12=1@-300,30+0|10=2@-250,20+0], the default shaper for the GSUB script DFLT;
+                // with the script record DFLT of GSUB renamed gonm (fontTools) [2=0+500|12=1@-300,30+40|10=2@-290,20+0],
+                // the USE shaper, which sets the advance of the marks to 0 before GPOS
+                const markFont = loadSync('./test/fonts/TestMarkAttachment.ttf');
+                const options = { script: 'gonm', features: { ss01: true } };
+                assert.strictEqual(formatShape(markFont.shape('a\u{323}\u{301}', options)), '[2=0+500|12=1@-300,30+0|10=2@-250,20+0]');
+                const scripts = markFont.tables.gsub.scripts;
+                scripts.find(scriptRecord => scriptRecord.tag === 'DFLT').tag = 'gonm';
+                scripts.sort((scriptA, scriptB) => scriptA.tag < scriptB.tag ? -1 : 1);
+                assert.strictEqual(formatShape(markFont.shape('a\u{323}\u{301}', options)), '[2=0+500|12=1@-300,30+40|10=2@-290,20+0]');
+            });
+
+            it('sets the advance of a GDEF mark to 0 in an Indic script whose GSUB script is DFLT or latn, like HarfBuzz', function() {
+                // --script=deva --features=-mark -u 0061,0301,0062 [5=0+500|10=1+0|6=2+500]
+                assert.strictEqual(
+                    formatShape(latinGsubMarkAdvanceFont.shape('a\u{301}b', { script: 'deva', features: { mark: false } })),
+                    '[5=0+500|10=1+0|6=2+500]'
+                );
+            });
         });
 
         describe('the kern table', function() {
@@ -1572,7 +1579,7 @@ describe('font.mjs', function() {
                 // -u 0061,0301: [1=0+500|5=1@-500,562+0], no glyph after a that is not a mark: not the a acute -15
                 assert.deepStrictEqual(shapeKernTableText('a\u{301}')[0], [glyphIndexes.a, 500, 0, 0]);
                 // -u 0301,0062: [5=0@20,0+0|2=1@-20,0+480], a mark at the start of the text kerned with the next glyph;
-                // only b: HarfBuzz also sets the advance of the acute to 0 (see the expected failure below)
+                // only b: HarfBuzz also sets the advance of the acute to 0 (see the test below)
                 assert.deepStrictEqual(shapeKernTableText('\u{301}b')[1], [glyphIndexes.b, 480, -20, 0]);
                 // with a b -61: [1=0+469|2=1@-30,0+470], half of the value rounded down to the first glyph
                 kernTableFont.kerningPairs[`${glyphIndexes.a},${glyphIndexes.b}`] = -61;
@@ -1608,14 +1615,10 @@ describe('font.mjs', function() {
                 assert.deepStrictEqual(shapeKernTableText('ab', { features: { kern: false } }), [[glyphIndexes.a, 500, 0, 0], [glyphIndexes.b, 500, 0, 0]]);
             });
 
-            itFailsUntilFixed('sets the advance of a GDEF mark kerned at the start of the text to 0, its offset moved back, like HarfBuzz',
-                'Font.shape (src/font.mjs): the acute keeps the -20 of the acute b pair in its advance, HarfBuzz sets the x advance ' +
-                'of the GDEF marks to 0 after positioning (zero_mark_widths_by_gdef) and, without GPOS, subtracts the advance of ' +
-                'a mark from its x offset first (adjust_mark_offsets)',
-                function() {
-                    // -u 0301,0062: [5=0@20,0+0|2=1@-20,0+480]
-                    assert.deepStrictEqual(shapeKernTableText('\u{301}b'), [[glyphIndexes.acute, 0, 20, 0], [glyphIndexes.b, 480, -20, 0]]);
-                });
+            it('sets the advance of a GDEF mark kerned at the start of the text to 0, its offset moved back, like HarfBuzz', function() {
+                // -u 0301,0062: [5=0@20,0+0|2=1@-20,0+480]
+                assert.deepStrictEqual(shapeKernTableText('\u{301}b'), [[glyphIndexes.acute, 0, 20, 0], [glyphIndexes.b, 480, -20, 0]]);
+            });
 
             itFailsUntilFixed('places a mark of a font without GPOS like the fallback mark positioning of HarfBuzz',
                 'Font.shape (src/font.mjs): a mark is drawn at the pen position, HarfBuzz places a mark of a font without a GPOS ' +
@@ -1685,27 +1688,40 @@ describe('font.mjs', function() {
         });
 
         it('skips the lookups of the types not implemented yet, with a warning once per font and lookup type', function() {
-            // -u 0061,0301: [5=0+500|10=1@-150,0+0], the mark-to-base lookup of mark (type 4) places the acute; skipped,
-            // it gives --features=-mark -u 0061,0301: [5=0+500|10=1+0]
+            // TestTracking3.ttf: its required feature trak has a chained context positioning lookup (type 8), skipped,
+            // and single adjustment lookups; -u 0041,0056: [36=0+1290|57=1@-76,0+1290]
             const warnings = [];
             const consoleWarn = console.warn;
             console.warn = message => warnings.push(message);
             try {
-                const markFont = loadSync('./test/fonts/TestPairPositioning.ttf');
-                assert.strictEqual(formatShape(markFont.shape('a\u{301}')), '[5=0+500|10=1+0]');
-                markFont.shape('o\u{301}');
+                const trackingFont = loadSync('./test/fonts/TestTracking3.ttf');
+                assert.strictEqual(formatShape(trackingFont.shape('AV')), '[36=0+1290|57=1@-76,0+1290]');
+                trackingFont.shape('To');
                 // a font parsed again is another font, which warns again
-                loadSync('./test/fonts/TestPairPositioning.ttf').shape('a\u{301}');
-                // the default GPOS features of latn of Changa-Regular.ttf (fontTools): curs of type 3, mark of the types 4
-                // and 5, mkmk of type 6, kern of type 2
-                const changaFont = loadSync('./test/fonts/Changa-Regular.ttf');
-                changaFont.shape('a');
-                changaFont.shape('b');
+                loadSync('./test/fonts/TestTracking3.ttf').shape('AV');
             } finally {
                 console.warn = consoleWarn;
             }
-            const warning = lookupType => `[opentype.js] GPOS lookupType: ${lookupType} is not yet supported, lookup skipped`;
-            assert.deepStrictEqual(warnings, [warning(4), warning(4), warning(3), warning(4), warning(5), warning(6)]);
+            const warning = '[opentype.js] GPOS lookupType: 8 is not yet supported, lookup skipped';
+            assert.deepStrictEqual(warnings, [warning, warning]);
+        });
+
+        it('applies the cursive and mark attachment lookups without a warning', function() {
+            // -u 0061,0301: [5=0+500|10=1@-150,0+0], the mark-to-base lookup of mark (type 4) of TestPairPositioning.ttf
+            // places the acute; the default GPOS features of latn of Changa-Regular.ttf (fontTools): curs of type 3, mark
+            // of the types 4 and 5, mkmk of type 6, kern of type 2
+            const warnings = [];
+            const consoleWarn = console.warn;
+            console.warn = message => warnings.push(message);
+            try {
+                assert.strictEqual(formatShape(loadSync('./test/fonts/TestPairPositioning.ttf').shape('a\u{301}')), '[5=0+500|10=1@-150,0+0]');
+                const changaFont = loadSync('./test/fonts/Changa-Regular.ttf');
+                changaFont.shape('a\u{301}');
+                changaFont.shape('\u{628}\u{64E}\u{628}');
+            } finally {
+                console.warn = consoleWarn;
+            }
+            assert.deepStrictEqual(warnings, []);
         });
 
         it('applies the single adjustment lookups without a warning', function() {

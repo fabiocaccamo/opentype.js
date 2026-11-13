@@ -1,5 +1,9 @@
 import { ContextParams } from '../tokenizer.mjs';
 import { SubstitutionAction, getSubstitutionGlyphEdits } from './featureQuery.mjs';
+import {
+    getLayoutGdefTable, getGdefGlyphClass, getLigatureId, getLigatureComponent, BASE_GLYPH_CLASS, LIGATURE_GLYPH_CLASS,
+    MARK_GLYPH_CLASS
+} from '../layout.mjs';
 
 /**
  * The glyph indexes of a token that is not deleted: its glyph, or the glyphs of the multiple substitutions that replaced it
@@ -12,21 +16,33 @@ function getTokenGlyphIndexes(token) {
 }
 
 /**
+ * The ligature properties of each glyph of a token (see LigatureProperties in layout.mjs), in the order of its glyphs
+ * (see getTokenGlyphIndexes), which the ligature substitutions set and replaceGlyph keeps with the glyphs
+ * @param {Token} token
+ * @returns {Array<LigatureProperties|undefined>}
+ */
+function getTokenLigatureProperties(token) {
+    return token.ligatureProperties || [];
+}
+
+/**
  * The glyphs of a list of tokens, like the glyph buffer of HarfBuzz: each glyph of a multiple substitution
  * is a glyph of its own, a deleted token has none. applySubstitution updates the sequence with its tokens.
  * @typedef GlyphSequence
  * @type Object
  * @property {number[]} glyphIndexes glyph indexes, in the order of the tokens
  * @property {Token[]} glyphTokens the token of each glyph
+ * @property {Object|undefined} gdef the GDEF table of the layout, whose glyph classes the ligature substitutions read
  */
 
 /**
  * Get the glyph sequence of a list of tokens
  * @param {Token[]} tokens
+ * @param {Object} [gdef] the GDEF table of the layout (see getLayoutGdefTable)
  * @returns {GlyphSequence}
  */
-function getGlyphSequence(tokens) {
-    const glyphSequence = { glyphIndexes: [], glyphTokens: [] };
+function getGlyphSequence(tokens, gdef) {
+    const glyphSequence = { glyphIndexes: [], glyphTokens: [], gdef };
     for (const token of tokens) {
         if (token.state.deleted) {
             continue;
@@ -40,8 +56,68 @@ function getGlyphSequence(tokens) {
 }
 
 /**
+ * The position of a glyph of a glyph sequence among the glyphs of its token
+ * @param {GlyphSequence} glyphSequence
+ * @param {number} position
+ * @returns {number}
+ */
+function getPositionInToken(glyphSequence, position) {
+    const token = glyphSequence.glyphTokens[position];
+    let tokenFirstPosition = position;
+    while (tokenFirstPosition > 0 && glyphSequence.glyphTokens[tokenFirstPosition - 1] === token) {
+        tokenFirstPosition--;
+    }
+    return position - tokenFirstPosition;
+}
+
+/**
+ * The ligature properties of a glyph of a glyph sequence (see getTokenLigatureProperties)
+ * @param {GlyphSequence} glyphSequence
+ * @param {number} position
+ * @returns {LigatureProperties|undefined}
+ */
+function getGlyphLigatureProperties(glyphSequence, position) {
+    return getTokenLigatureProperties(glyphSequence.glyphTokens[position])[getPositionInToken(glyphSequence, position)];
+}
+
+/**
+ * Set the ligature properties of a glyph of a glyph sequence in its token (see getTokenLigatureProperties)
+ * @param {GlyphSequence} glyphSequence
+ * @param {number} position
+ * @param {LigatureProperties} ligatureProperties
+ */
+function setGlyphLigatureProperties(glyphSequence, position, ligatureProperties) {
+    const token = glyphSequence.glyphTokens[position];
+    if (!token.ligatureProperties) {
+        token.ligatureProperties = getTokenGlyphIndexes(token).map(() => undefined);
+    }
+    token.ligatureProperties[getPositionInToken(glyphSequence, position)] = ligatureProperties;
+}
+
+/**
+ * The ligature properties of the glyphs that replace a glyph, like the lig_props of HarfBuzz: each one keeps the
+ * properties of the glyph, but the glyphs of a multiple substitution (two or more glyphs) of a glyph of no ligature
+ * are numbered as the components of no ligature (Sequence::apply, _hb_glyph_info_set_lig_props_for_component), the
+ * component a later ligature that skips one of them gives it (see getFollowingGlyphLigatureProperties)
+ * @param {LigatureProperties|undefined} ligatureProperties the ligature properties of the glyph
+ * @param {number} glyphCount the number of glyphs that replace it
+ * @returns {Array<LigatureProperties|undefined>}
+ */
+function getReplacementLigatureProperties(ligatureProperties, glyphCount) {
+    if (glyphCount < 2 || getLigatureId(ligatureProperties)) {
+        return Array(glyphCount).fill(ligatureProperties);
+    }
+    const componentProperties = [undefined];
+    for (let i = 1; i < glyphCount; i++) {
+        componentProperties.push({ ligatureId: undefined, ligatureComponent: i });
+    }
+    return componentProperties;
+}
+
+/**
  * Replace the glyph at a position of a glyph sequence with a sequence of glyphs, in the glyph sequence and in its token:
- * the token holds one glyph, several glyphs, or none and is deleted
+ * the token holds one glyph, several glyphs, or none and is deleted. The glyphs that replace it take their ligature
+ * properties from it (see getReplacementLigatureProperties).
  * @param {GlyphSequence} glyphSequence
  * @param {number} position
  * @param {number[]} glyphIndexes the glyphs that replace the glyph, none deletes it
@@ -49,12 +125,16 @@ function getGlyphSequence(tokens) {
  */
 function replaceGlyph(glyphSequence, position, glyphIndexes, tag) {
     const token = glyphSequence.glyphTokens[position];
-    let tokenFirstPosition = position;
-    while (tokenFirstPosition > 0 && glyphSequence.glyphTokens[tokenFirstPosition - 1] === token) {
-        tokenFirstPosition--;
-    }
+    const positionInToken = getPositionInToken(glyphSequence, position);
     const tokenGlyphIndexes = getTokenGlyphIndexes(token).slice();
-    tokenGlyphIndexes.splice(position - tokenFirstPosition, 1, ...glyphIndexes);
+    tokenGlyphIndexes.splice(positionInToken, 1, ...glyphIndexes);
+    const replacementProperties = getReplacementLigatureProperties(
+        getGlyphLigatureProperties(glyphSequence, position), glyphIndexes.length
+    );
+    if (token.ligatureProperties || replacementProperties.some(Boolean)) {
+        token.ligatureProperties = token.ligatureProperties || getTokenGlyphIndexes(token).map(() => undefined);
+        token.ligatureProperties.splice(positionInToken, 1, ...replacementProperties);
+    }
     if (!tokenGlyphIndexes.length) {
         token.setState('deleted', true);
     } else {
@@ -143,9 +223,91 @@ function mergeClusters(glyphSequence, startPosition, endPosition) {
 }
 
 /**
+ * The number of components that a glyph brings to a ligature, like _hb_glyph_info_get_lig_num_comps of HarfBuzz: the
+ * components of a ligature that a ligature substitution formed (see LigatureProperties) when GDEF has it in the
+ * ligature class (a font without the GlyphClassDef of GDEF has the class of the substitution, a ligature), 1 otherwise
+ * @param {GlyphSequence} glyphSequence
+ * @param {number} position
+ * @returns {number}
+ */
+function getLigatureComponentCount(glyphSequence, position) {
+    const ligatureProperties = getGlyphLigatureProperties(glyphSequence, position);
+    const componentCount = ligatureProperties && ligatureProperties.ligatureComponentCount;
+    const gdef = glyphSequence.gdef;
+    const isLigatureGlyph = !gdef || !gdef.classDef ||
+        getGdefGlyphClass(gdef, glyphSequence.glyphIndexes[position]) === LIGATURE_GLYPH_CLASS;
+    return componentCount && isLigatureGlyph ? componentCount : 1;
+}
+
+/**
+ * The ligature properties of a glyph after a component of a ligature, like ligate_input of HarfBuzz: the component of
+ * the ligature that the glyph follows, among the components counted so far, the last component counted its own
+ * components when it is a ligature; the glyph takes the component it followed in that ligature (the last one when it
+ * followed none)
+ * @param {symbol|undefined} ligatureId the ligatureId of the ligature
+ * @param {LigatureProperties|undefined} glyphProperties the ligature properties of the glyph
+ * @param {number} componentsSoFar the number of components of the ligature up to the one the glyph follows
+ * @param {number} lastComponentCount the number of components of the component the glyph follows
+ * @returns {LigatureProperties}
+ */
+function getFollowingGlyphLigatureProperties(ligatureId, glyphProperties, componentsSoFar, lastComponentCount) {
+    const component = getLigatureComponent(glyphProperties) || lastComponentCount;
+    return { ligatureId, ligatureComponent: componentsSoFar - lastComponentCount + Math.min(component, lastComponentCount) };
+}
+
+/**
+ * Set the ligature properties of the glyphs of a ligature substitution before it replaces its components, like
+ * ligate_input of HarfBuzz: unless the components are a base glyph and marks or marks only (GDEF classes), the
+ * ligature (its first component) gets a new ligatureId and its number of components, each component that is a
+ * ligature counting its own components (see getLigatureComponentCount), and each glyph the substitution skipped the
+ * component it follows (see getFollowingGlyphLigatureProperties); unless the components are marks only, the glyphs
+ * after the last component that follow one of its components, when it is a ligature, take their component of the new
+ * ligature
+ * @param {GlyphSequence} glyphSequence
+ * @param {number[]} componentPositions the positions of the components in the glyph sequence, the first one first
+ */
+function setLigatureSubstitutionProperties(glyphSequence, componentPositions) {
+    const componentClasses = componentPositions.map(position => getGdefGlyphClass(glyphSequence.gdef, glyphSequence.glyphIndexes[position]));
+    const areOtherComponentsMarks = componentClasses.slice(1).every(glyphClass => glyphClass === MARK_GLYPH_CLASS);
+    const isMarkLigature = areOtherComponentsMarks && componentClasses[0] === MARK_GLYPH_CLASS;
+    const isLigature = !isMarkLigature && !(areOtherComponentsMarks && componentClasses[0] === BASE_GLYPH_CLASS);
+    const componentCounts = componentPositions.map(position => getLigatureComponentCount(glyphSequence, position));
+    const lastIndex = componentPositions.length - 1;
+    const lastComponentLigatureId = getLigatureId(getGlyphLigatureProperties(glyphSequence, componentPositions[lastIndex]));
+    const ligatureId = isLigature ? Symbol('ligature') : undefined;
+    if (isLigature) {
+        const ligatureComponentCount = componentCounts.reduce((count, componentCount) => count + componentCount, 0);
+        setGlyphLigatureProperties(glyphSequence, componentPositions[0], { ligatureId, ligatureComponentCount });
+    }
+    let componentsSoFar = componentCounts[0];
+    for (let i = 1; i <= lastIndex; i++) {
+        if (isLigature) {
+            for (let position = componentPositions[i - 1] + 1; position < componentPositions[i]; position++) {
+                setGlyphLigatureProperties(glyphSequence, position, getFollowingGlyphLigatureProperties(
+                    ligatureId, getGlyphLigatureProperties(glyphSequence, position), componentsSoFar, componentCounts[i - 1]
+                ));
+            }
+        }
+        componentsSoFar += componentCounts[i];
+    }
+    if (isMarkLigature || !lastComponentLigatureId) {
+        return;
+    }
+    for (let position = componentPositions[lastIndex] + 1; position < glyphSequence.glyphIndexes.length; position++) {
+        const glyphProperties = getGlyphLigatureProperties(glyphSequence, position);
+        if (getLigatureId(glyphProperties) !== lastComponentLigatureId || !getLigatureComponent(glyphProperties)) {
+            break;
+        }
+        setGlyphLigatureProperties(glyphSequence, position, getFollowingGlyphLigatureProperties(
+            ligatureId, glyphProperties, componentsSoFar, componentCounts[lastIndex]
+        ));
+    }
+}
+
+/**
  * Apply ligature substitution format 1: the first component becomes the ligature glyph and the
  * other components are deleted, the glyphs the lookup skipped between them stay after the ligature,
- * in one cluster with it
+ * in one cluster with it, with the component of the ligature they follow (see setLigatureSubstitutionProperties)
  * @param {SubstitutionAction} action
  * @param {GlyphSequence} glyphSequence
  * @param {number} position
@@ -156,6 +318,7 @@ function ligatureSubstitutionFormat1(action, glyphSequence, position) {
     if (componentOffsets.length) {
         mergeClusters(glyphSequence, position, position + componentOffsets[componentOffsets.length - 1] + 1);
     }
+    setLigatureSubstitutionProperties(glyphSequence, [position].concat(componentOffsets.map(offset => position + offset)));
     replaceSubstitutedGlyphs(action, glyphSequence, position);
     return 1;
 }
@@ -237,7 +400,7 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, isTokenEnabled = (
         return coverages.some(coverage => layout.getCoverageIndex(coverage, glyphIndex) >= 0);
     };
     // applySubstitution updates the glyphs of the sequence, the context of the lookup
-    const glyphSequence = getGlyphSequence(tokens);
+    const glyphSequence = getGlyphSequence(tokens, getLayoutGdefTable(query.font));
     const contextParams = new ContextParams(glyphSequence.glyphIndexes, 0);
     for (let position = 0; position < glyphSequence.glyphIndexes.length; position++) {
         if (!isTokenEnabled(glyphSequence.glyphTokens[position]) || !isCovered(glyphSequence.glyphIndexes[position])) {
@@ -354,6 +517,7 @@ function applyFeatureStagesToTokens(query, tags, script, language, tokens) {
 export default applySubstitution;
 export {
     getTokenGlyphIndexes,
+    getTokenLigatureProperties,
     getGlyphSequence,
     applyLookupToTokens,
     getFeaturesLookups,

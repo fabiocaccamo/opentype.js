@@ -50,7 +50,7 @@
  *
  * References: see helpers.mjs. The hb-shape commands of Roboto have --language=en, the result of
  * the texts with a ligature depends on the language (of the locale, by default). The @x,y that
- * hb-shape prints for a mark is its GPOS offset: only the known failure of GPOS mark compares it.
+ * hb-shape prints for a mark is its GPOS offset: only the test of GPOS mark compares it.
  * A known failure compares only the value its bug changes (the glyphs, an advance, the origins,
  * a field of the written table).
  */
@@ -443,10 +443,8 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         // [25=0+518|17=1@314,-41+0|4=2+1114]
         // The acute is 314 units after the end of the dotless j (518 + 314 = 832) and 41 units
         // lower; the y of the text layout goes down, so 41.
-        itFailsUntilFixed(
+        it(
             'places the combining acute on the dotless j with the anchors of GPOS mark',
-            'Font.shape (src/font.mjs) and positionGlyphRun (src/position.mjs): the GPOS lookups of mark to base ' +
-            '(lookup type 4) are skipped: the acute stays at the pen position, [17, 518, 0]',
             function() {
                 assert.deepStrictEqual(getGlyphOrigins(font, 'j\u{301}a').origins, [[25, 0, 0], [17, 832, 41], [4, 518, 0]]);
             }

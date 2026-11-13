@@ -111,7 +111,8 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
  * Shape a text like hb-shape: its glyphs after the GSUB features, in visual order, each one with the UTF-16 range
  * [start, end) of its cluster (see stringToGlyphClusters) and its position in font units after the GPOS features,
  * at the variation of options.variation or of the font: xAdvance, yAdvance (0 in horizontal text), xOffset and
- * yOffset (the y axis going up, like the offsets of hb-shape).
+ * yOffset (the y axis going up, like the offsets of hb-shape; a glyph attached by GPOS, e.g. a mark on its base, is
+ * drawn from its own pen position at the offset that puts it on its anchor).
  * The text is shaped by script runs (the Unicode Script of its characters, the characters of no script in
  * the run around them, not yet a closing bracket in the run of its opening bracket), each run with the GSUB
  * and GPOS features of its OpenType script, or as one run with the OpenType script options.script (the
@@ -121,31 +122,42 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
  * options.kerning), mark and mkmk, with options.features, and the required feature of the GPOS language system (its
  * ReqFeatureIndex) whatever options.features; their lookups apply in lookup list order, to each run in the order of
  * the text, extension lookups included. The single adjustments (lookup type 1) are applied with their value
- * record, the pair adjustments (lookup type 2) with their two value records; the other lookup types are skipped
- * with a warning: a mark is drawn at the pen position, without the offset of its anchors. Without a GPOS kern
- * feature for the script and language, the kern table applies like in HarfBuzz, in visual order, the value of a
- * pair split between its two glyphs, each glyph kerned with the next glyph that is not a GDEF mark; unlike
- * HarfBuzz, which splits the value of a pair in each kern subtable on its own, the values of a pair in several
- * subtables are added up before the split: the positions and the pen are the same, the advances can differ by a
- * few units (up to half the number of subtables with an odd value for the pair). The marks are the ones of the
- * GlyphClassDef of GDEF: without it no glyph is a mark, for the GPOS lookups and the kern table, unlike
- * HarfBuzz, which then takes the nonspacing marks of Unicode as marks. A GDEF mark keeps its advance, like
- * the Indic and Khmer shapers of HarfBuzz. HarfBuzz picks the shaper of a run from its script and from the GSUB
- * script it chose for it: a Khmer run always takes the Khmer shaper, an Indic, USE or Myanmar run takes the default
- * shaper when that GSUB script is DFLT or latn (or mymr, for Myanmar). Not yet like HarfBuzz: in the other runs, its
- * default, Arabic, Hebrew and Thai shapers set the advance of a GDEF mark to 0 after GPOS, its USE and Myanmar
- * shapers before GPOS; in a font without a GPOS table (e.g. a font with the kern table only, with or without GDEF),
- * its default, Arabic and Hebrew shapers place each mark over or under its base (its fallback mark positioning),
- * where the mark is drawn at the pen position; the default ignorables (e.g. U+200D, U+00AD), which HarfBuzz skips in
- * the GPOS and kern table pairs and hides with an advance of 0, are drawn with their glyph and their advance, and no
- * pair crosses them; a letter and a combining mark are not composed into the precomposed glyph of the font (e.g. A
- * and U+0300 into Agrave), so the kern table and the GPOS lookups with IgnoreMarks kern the letter across the mark;
- * the GPOS lookups of the Arabic forms, which HarfBuzz applies at the glyphs of each form only, apply only when
- * options.features enables them, at every glyph; the GPOS feature variations (the FeatureVariations of the GPOS
- * table) are not applied yet, the lookups of a GPOS feature are the ones of its FeatureList record at every
- * variation; nor the GPOS lookups of the direction features (ltra, ltrm, rtla, rtlm) and of rand, which HarfBuzz
- * enables by default, nor the GSUB lookups of abvm, blwm, curs, dist, kern (with options.kerning), mark and mkmk,
- * which HarfBuzz looks up in GSUB too.
+ * record, the pair adjustments (lookup type 2) with their two value records, the cursive attachments (lookup type
+ * 3) and the mark attachments (lookup types 4, 5 and 6) with their anchors (with the VariationIndex deltas of a
+ * variable font): a mark is drawn on the glyph before it that is not a mark (at the anchor of the ligature
+ * component it follows), or on the mark before it of the same glyph, and the offsets of an attached glyph follow
+ * the glyph it is attached to; the contextual positionings (lookup types 7 and 8) are skipped with a warning. Not
+ * yet like HarfBuzz: a mark after the second glyph of a multiple substitution attaches to that glyph when the
+ * subtable covers it, otherwise to nothing, where HarfBuzz attaches it to the first glyph of the substitution.
+ * Without a GPOS kern feature for the script and language, the kern table applies like in HarfBuzz, in visual order,
+ * the value of a pair split between its two glyphs, each glyph kerned with the next glyph that is not a GDEF mark;
+ * unlike HarfBuzz, which splits the value of a pair in each kern subtable on its own, the values of a pair in
+ * several subtables are added up before the split: the positions and the pen are the same, the advances can differ
+ * by a few units (up to half the number of subtables with an odd value for the pair). The marks are the ones of the
+ * GlyphClassDef of GDEF: without it no glyph is a mark, for the GPOS lookups (but the mark-to-base and
+ * mark-to-ligature attachments) and the kern table, unlike HarfBuzz, which then takes the nonspacing marks of
+ * Unicode (Mn) as marks, of no mark attachment class. Without it, a mark-to-base or mark-to-ligature lookup with
+ * IgnoreMarks, a MarkAttachmentType, or UseMarkFilteringSet and a mark glyph set that does not cover the mark, takes
+ * every glyph its subtable covers as a mark and does not attach it, like HarfBuzz for the glyphs of the nonspacing
+ * marks; not yet like HarfBuzz for the glyph of a spacing character that the subtable covers as a mark (e.g. U+00B4
+ * mapped to the glyph of U+0301), a base glyph that HarfBuzz attaches. Like HarfBuzz, the advance of a GDEF mark is
+ * set to 0 as the shaper HarfBuzz picks for the run from its script and from the GSUB script it chose for it: after
+ * GPOS with its default, Arabic, Hebrew and Thai shapers, before GPOS with its USE and Myanmar shapers, never with
+ * its Indic, Khmer and Hangul shapers (an Indic, USE or Myanmar run takes the default shaper when that GSUB script
+ * is DFLT or latn, or mymr for Myanmar); without a GPOS table the x offset of a mark of a left-to-right run moves
+ * back by the advance it loses. Not yet like HarfBuzz: in a font without a GPOS table (e.g. a font with the kern
+ * table only, with or without GDEF), its default, Arabic and Hebrew shapers place each mark over or under its base
+ * (its fallback mark positioning), where the mark is drawn at the pen position; the default ignorables (e.g. U+200D,
+ * U+00AD), which HarfBuzz skips in the GPOS and kern table pairs and when it looks for the base of a mark, and hides
+ * with an advance of 0, are drawn with their glyph and their advance, no pair crosses them, and a mark after one of
+ * them but U+200D (e.g. U+00AD, U+200C, U+034F) is not attached to the base before it; a letter and a combining mark are not composed into the
+ * precomposed glyph of the font (e.g. A and U+0300 into Agrave), so the kern table and the GPOS lookups with
+ * IgnoreMarks kern the letter across the mark; the GPOS lookups of the Arabic forms, which HarfBuzz applies at the
+ * glyphs of each form only, apply only when options.features enables them, at every glyph; the GPOS feature
+ * variations (the FeatureVariations of the GPOS table) are not applied yet, the lookups of a GPOS feature are the
+ * ones of its FeatureList record at every variation; nor the GPOS lookups of the direction features (ltra, ltrm,
+ * rtla, rtlm) and of rand, which HarfBuzz enables by default, nor the GSUB lookups of abvm, blwm, curs, dist, kern
+ * (with options.kerning), mark and mkmk, which HarfBuzz looks up in GSUB too.
  * @param  {string} text
  * @param  {Object=} options
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number, xAdvance: number, yAdvance: number, xOffset: number, yOffset: number}>}

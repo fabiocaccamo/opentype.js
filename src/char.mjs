@@ -5,11 +5,14 @@
 import { SCRIPT_CODES, SCRIPT_RANGES, SCRIPT_EXTENSION_RANGES } from './unicode-scripts.mjs';
 
 /**
- * Check if a char is Arabic
+ * Check if a char is Arabic: of the Arabic block (not yet all of it) or of the Arabic Presentation Forms-A and -B
+ * blocks, whose runs are laid out from right to left like HarfBuzz, but the chars of the Common script of these blocks
+ * (U+FD3E ORNATE LEFT PARENTHESIS, U+FD3F ORNATE RIGHT PARENTHESIS and U+FEFF ZERO WIDTH NO-BREAK SPACE), so that a
+ * stray one does not start an Arabic run
  * @param {string} c a single char
  */
 export function isArabicChar(c) {
-    return /[\u0600-\u065F\u066A-\u06D2\u06FA-\u06FF]/.test(c);
+    return /[\u0600-\u065F\u066A-\u06D2\u06FA-\u06FF\uFB50-\uFD3D\uFD40-\uFDFF\uFE70-\uFEFE]/.test(c);
 }
 
 /**

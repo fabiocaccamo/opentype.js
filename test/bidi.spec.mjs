@@ -3,7 +3,7 @@ import Bidi from '../src/bidi.mjs';
 import FeatureQuery from '../src/features/featureQuery.mjs';
 import { parse } from '../src/opentype.mjs';
 import { readFileSync } from 'fs';
-import { itFailsUntilFixed } from './regression/helpers.mjs';
+import { shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
 import {
     glyphIndexes,
     createLookupFlagsFont,
@@ -86,6 +86,32 @@ describe('bidi.mjs', function() {
             const sentences = ranges.map(range => arabicTokenizer.rangeToText(range))[0];
             assert.equal(sentences, 'ائتوني به أستخلصه لنفسي');
         });
+
+        // U+FD3E ORNATE LEFT PARENTHESIS and U+FD3F ORNATE RIGHT PARENTHESIS of the Arabic Presentation Forms-A block, of
+        // the Common script and of the bidi class ON, which take the direction of the strong chars around them (UAX #9 N1)
+        describe('the ornate parentheses', function() {
+            let jomhuriaFont;
+
+            before(function() {
+                jomhuriaFont = loadSync('./test/fonts/Jomhuria-Regular.ttf');
+            });
+
+            it('keeps the ornate parentheses between two latin letters in the order of the text, like HarfBuzz', function() {
+                // hb-shape --no-glyph-names --cluster-level=1 Jomhuria-Regular.ttf -u 0041,FD3E,FD3F,0042
+                // [37=0+981|864=1+846|865=2+846|38=3+981]
+                assert.deepStrictEqual(jomhuriaFont.stringToGlyphIndexes('A\u{FD3E}\u{FD3F}B'), [37, 864, 865, 38]);
+            });
+
+            itFailsUntilFixed('lays the ornate parentheses between two arabic letters out from right to left, like HarfBuzz',
+                'arabicSentenceEndCheck (src/features/arab/contextCheck/arabicSentence.mjs): no resolution of the bidi neutral ' +
+                'chars, so the ornate parentheses, which are not Arabic characters (isArabicChar), end the right-to-left ' +
+                'sentence and are laid out from left to right between the two letters, each one a right-to-left run of its own',
+                function() {
+                    // hb-shape --no-glyph-names --cluster-level=1 Jomhuria-Regular.ttf -u 0627,FD3E,FD3F,0628
+                    // [434=3+1608|865=2+846|864=1+846|433=0+576]
+                    assert.deepStrictEqual(jomhuriaFont.stringToGlyphIndexes('\u{627}\u{FD3E}\u{FD3F}\u{628}'), [434, 865, 864, 433]);
+                });
+        });
     });
     describe('getBidiText', function() {
         it('should adjust then render layout direction of bidi text', function() {
@@ -140,6 +166,37 @@ describe('bidi.mjs', function() {
             const twoRunsClusters = bidiScheherazade.getTextGlyphClusters('\u{631}\u{627}b\u{631}\u{627}');
             assert.deepStrictEqual(twoRunsClusters.map(cluster => [cluster.start, cluster.rightToLeft]),
                 [[1, true], [0, true], [2, false], [4, true], [3, true]]);
+        });
+
+        it('gives each glyph the ligature properties that the ligature substitutions recorded for it', function() {
+            // TestMarkAttachment.ttf: lookupflag IgnoreMarks; sub f i by f_i; in liga, on f acute i b: the ligature of two
+            // components, the acute after its first one (see applySubstitution.spec.mjs), b without ligature properties
+            const markFont = loadSync('./test/fonts/TestMarkAttachment.ttf');
+            const bidi = new Bidi();
+            bidi.registerModifier('glyphIndex', null, token => markFont.charToGlyphIndex(token.char));
+            bidi.applyFeatures(markFont, [{ script: 'latn', tags: ['liga'] }]);
+            const clusters = bidi.getTextGlyphClusters('f\u{301}ib');
+            const ligatureId = clusters[0].ligatureProperties.ligatureId;
+            assert.strictEqual(typeof ligatureId, 'symbol');
+            assert.deepStrictEqual(clusters.map(cluster => [cluster.index, cluster.ligatureProperties]), [
+                [markFont.nameToGlyphIndex('f_i'), { ligatureId, ligatureComponentCount: 2 }],
+                [markFont.charToGlyphIndex('\u{301}'), { ligatureId, ligatureComponent: 1 }],
+                [markFont.charToGlyphIndex('b'), undefined]
+            ]);
+        });
+
+        it('keeps the ligature properties of each glyph of a token of a right-to-left run with its glyph, like HarfBuzz', function() {
+            // TestMarkAttachment.ttf with the multiple substitution of ss10 changed to sub z by f acutecomb i; and U+062A
+            // mapped to z (fontTools), then sub f' lookup LIGA_F_I i'; of ss11: the token of the teh holds the ligature f_i
+            // and the acute after its first component, reversed in the right-to-left run; the acute attaches to the first
+            // component, at 150 700: hb-shape --no-glyph-names --cluster-level=1 --features=+ss10,+ss11 -u 062A
+            // [10=0@150,200+0|9=0+550]
+            const markFont = loadSync('./test/fonts/TestMarkAttachment.ttf');
+            markFont.tables.gsub.lookups[2].subtables[0].sequences[0] = ['f', 'acutecomb', 'i'].map(name => markFont.nameToGlyphIndex(name));
+            markFont.tables.cmap.glyphIndexMap[0x62A] = markFont.nameToGlyphIndex('z');
+            assertShape(shapeText(markFont, '\u{62A}', { features: { ss10: true, ss11: true } }), {
+                glyphs: [10, 9], clusters: [0, 0], advances: [0, 550], offsets: [[150, 200], [0, 0]]
+            });
         });
 
         itFailsUntilFixed('lays a right-to-left word with a zero width non-joiner out from right to left, like HarfBuzz',
@@ -693,15 +750,15 @@ describe('bidi.mjs', function() {
             assert.deepStrictEqual(createArabicFormsFont().stringToGlyphIndexes('\u{644}\u{631}'), [rehAlternate, fatha, lam]);
         });
 
-        it('lays out the mark of a letter that ccmp decomposed before the letter, at the pen position of the letter, like HarfBuzz', function() {
+        it('lays out the mark of a letter that ccmp decomposed before the letter, on the letter, like HarfBuzz', function() {
             // the alef with hamza below, decomposed by the ccmp of arab of Scheherazade-Bold.ttf into the alef and the hamza:
             // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --features=-kern Scheherazade-Bold.ttf -u 0625
-            // [1088=0@13,-92+0|273=0+357], the mark offset by its GPOS mark attachment, not yet applied by the fork
+            // [1088=0@13,-92+0|273=0+357], the mark offset by its GPOS mark attachment (the y of forEachGlyph goes down)
             const glyphPositions = [];
-            arabicFont.forEachGlyph('\u{625}', 0, 0, arabicFont.unitsPerEm, { kerning: false }, (glyph, x) => {
-                glyphPositions.push([glyph.index, x]);
+            arabicFont.forEachGlyph('\u{625}', 0, 0, arabicFont.unitsPerEm, { kerning: false }, (glyph, glyphX, glyphY) => {
+                glyphPositions.push([glyph.index, glyphX, glyphY]);
             });
-            assert.deepStrictEqual(glyphPositions, [[1088, 0], [273, 0]]);
+            assert.deepStrictEqual(glyphPositions, [[1088, 13, 92], [273, 0, 0]]);
         });
 
         // LookupFlagsArabicJoining.ttf: init sub lam by lam.init;, fina sub dal by dal.alt;, no glyph for U+0621 and U+0629
