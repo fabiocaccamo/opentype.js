@@ -247,7 +247,7 @@ python -m fontTools.subset download/Roboto-wdth-wght.ttf \
 - Source: Source Han Sans KR Regular (the region specific subset OTF), `Version 2.005;addfeatures 5.0.0b21`
 - URL: https://raw.githubusercontent.com/adobe-fonts/source-han-sans/6c709ca72d3d7c46ab42ebecc1a26e7d69595a37/SubsetOTF/KR/SourceHanSansKR-Regular.otf
 - sha256 of the download: `d8299926a5284f7461b46fa0617cc05d4f1fce8f034ffff78084225ce8b38071`
-- Used by: `cffAdvanceWidth.spec.mjs` (CID-keyed CFF: Font DICTs with their own nominalWidthX and defaultWidthX)
+- Used by: `cffAdvanceWidth.spec.mjs` (CID-keyed CFF: Font DICTs with their own nominalWidthX and defaultWidthX) and `test/position.spec.mjs` (the GPOS single adjustments of palt, vpal and vert)
 
 ```sh
 curl -sSL -o download/SourceHanSansKR-Regular.otf 'https://raw.githubusercontent.com/adobe-fonts/source-han-sans/6c709ca72d3d7c46ab42ebecc1a26e7d69595a37/SubsetOTF/KR/SourceHanSansKR-Regular.otf'

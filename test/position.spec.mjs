@@ -4,6 +4,7 @@ import { Font, Glyph, Path, parse } from '../src/opentype.mjs';
 import { DEFAULT_POSITIONING_FEATURES, positionGlyphRun } from '../src/position.mjs';
 import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
 import { replaceTextGlyphs } from './testutil.mjs';
+import { shapeText, assertShape } from './regression/helpers.mjs';
 
 // a pair adjustment subtable (format 1) kerning leftGlyph + rightGlyph by xAdvance
 function pairPosSubtable(leftGlyph, rightGlyph, xAdvance) {
@@ -113,6 +114,16 @@ describe('position.mjs', function() {
             ], [1, 0, 1]);
             const kerningTables = font.position.getKerningTables('DFLT');
             assert.deepStrictEqual(kerningTables.map(lookupTable => lookupTable.subtables[0]), [plainSubtable, extensionSubtable]);
+        });
+
+        it('leaves out the single adjustment lookups of the kern feature, which the text layout applies', function() {
+            // TestSingleAdjustment.ttf: the kern feature has the single adjustment lookups 5 (an extension lookup), 6 and 7
+            const singleFont = parse(readFileSync('./test/fonts/TestSingleAdjustment.ttf'));
+            // c has the -10 of the plain lookup 6: -u 0063,0064 [10=0+490|11=1+460], 0 for getKerningValue
+            const kerningTables = singleFont.position.getKerningTables('latn');
+            const [glyphC, glyphD] = [singleFont.charToGlyphIndex('c'), singleFont.charToGlyphIndex('d')];
+            assert.strictEqual(singleFont.position.getKerningValue(kerningTables, glyphC, glyphD), 0);
+            assert.deepStrictEqual(kerningTables, []);
         });
 
         it('ignores extension lookups wrapping other lookup types', function() {
@@ -528,7 +539,8 @@ describe('position.mjs', function() {
         });
 
         // position the glyphs of the characters of a text as one run, in visual order, in the format of hb-shape
-        // without the clusters: glyph@x,y+advance, the offsets when one is not 0
+        // without the clusters: glyph@x,y+advance, the offsets when one is not 0, the y advance after the x advance
+        // (+x,y) when it is not 0
         function positionText(text, runOptions, font = pairFont) {
             const glyphIndexes = Array.from(text).map(character => font.charToGlyphIndex(character));
             const glyphPositions = glyphIndexes.map(glyphIndex => ({
@@ -544,8 +556,8 @@ describe('position.mjs', function() {
                 featureTags: DEFAULT_POSITIONING_FEATURES,
                 variation: undefined
             }, runOptions));
-            return glyphPositions.map(({ xAdvance, xOffset, yOffset }, index) =>
-                `${glyphIndexes[index]}${xOffset || yOffset ? `@${xOffset},${yOffset}` : ''}+${xAdvance}`
+            return glyphPositions.map(({ xAdvance, yAdvance, xOffset, yOffset }, index) =>
+                `${glyphIndexes[index]}${xOffset || yOffset ? `@${xOffset},${yOffset}` : ''}+${xAdvance}${yAdvance ? `,${yAdvance}` : ''}`
             ).join('|');
         }
 
@@ -740,6 +752,185 @@ describe('position.mjs', function() {
                 // -u 0041,0056: [2=0+630|4=1@31,0+631]
                 assert.strictEqual(positionText('AV'), '2+630|4@31,0+631');
             });
+        });
+
+        describe('single adjustments', function() {
+            // TestSingleAdjustment.ttf, built by test/generate-single-adjustment-font.py:
+            // hb-shape --no-glyph-names --cluster-level=1 --features=<features> TestSingleAdjustment.ttf -u <code points>
+            let singleFont;
+
+            beforeEach(function() {
+                singleFont = parse(readFileSync('./test/fonts/TestSingleAdjustment.ttf'));
+            });
+
+            it('applies the value record of a format 1 subtable, its y advance for vertical text only', function() {
+                // --features=case -u 0048: [5=0@10,20+570], pos H <10 20 -30 40>;, --features=vpal -u 0056: [7=0@0,50+600],
+                // pos V <0 50 0 -100>; (HarfBuzz ValueFormat::apply_value), the y advances 0; --features=-kern: H and V +600
+                assert.strictEqual(positionText('H', { featureTags: ['case'] }, singleFont), '5@10,20+570');
+                assert.strictEqual(positionText('V', { featureTags: ['vpal'] }, singleFont), '7@0,50+600');
+                assert.strictEqual(positionText('HV', { featureTags: [] }, singleFont), '5+600|7+600');
+            });
+
+            it('applies the value records of a right-to-left run to their glyphs, in the order of the text', function() {
+                // -u 05D0,05D1: [15=1@-5,0+530|14=0@10,0+480], the glyphs in visual order: bet, then alef, pos alef
+                // <10 0 -20 0>; pos bet <-5 0 30 0>; (format 2)
+                assert.strictEqual(positionText('\u{5D1}\u{5D0}', { rightToLeft: true, script: 'hebr' }, singleFont), '15@-5,0+530|14@10,0+480');
+            });
+
+            it('applies the variation deltas of the VariationIndex tables of the value records of a format 2 subtable', function() {
+                // --features=lfbd -u 0041,0042: [2=0@10,0+580|3=1@-5,0+510], --variations=wght=500 [2=0@20,0+560|3=1@-15,0+530],
+                // --variations=wght=900 [2=0@30,0+540|3=1@-25,0+550]
+                assert.strictEqual(positionText('AB', { featureTags: ['lfbd'] }, singleFont), '2@10,0+580|3@-5,0+510');
+                assert.strictEqual(positionText('AB', { featureTags: ['lfbd'], variation: { wght: 500 } }, singleFont), '2@20,0+560|3@-15,0+530');
+                assert.strictEqual(positionText('AB', { featureTags: ['lfbd'], variation: { wght: 900 } }, singleFont), '2@30,0+540|3@-25,0+550');
+            });
+
+            it('skips the marks out of the mark filtering set or of another mark attachment class of the lookup', function() {
+                // --features=ss01 -u 0061,0301,0300: [8=0+500|13=1@0,20+0|16=2@0,10+0], the acute out of the mark filtering
+                // set of the first lookup, the grave of another mark attachment class than the second one
+                assert.strictEqual(positionText('a\u{301}\u{300}', { featureTags: ['ss01'] }, singleFont), '8+500|13@0,20+0|16@0,10+0');
+            });
+
+            it('applies the value record of the coverage index of a glyph in a format 2 subtable, not the next subtables', function() {
+                // --features=cpsp -u 0041,0042,0043,0048: [2=0@5,0+610|3=1@-10,0+520|4=2@15,0+530|5=3@-20,0+615], not the
+                // pos C <0 0 99 0>; of the second subtable
+                assert.strictEqual(positionText('ABCH', { featureTags: ['cpsp'] }, singleFont), '2@5,0+610|3@-10,0+520|4@15,0+530|5@-20,0+615');
+            });
+
+            it('adds up the single adjustments of the lookups of the features', function() {
+                // --features=case,cpsp -u 0048: [5=0@-10,20+585]
+                assert.strictEqual(positionText('H', { featureTags: ['case', 'cpsp'] }, singleFont), '5@-10,20+585');
+            });
+
+            it('skips a glyph that the lookupFlag ignores', function() {
+                // --features=palt -u 0061,0301,0061: [8=0@-20,0+450|13=1+0|8=2@-20,0+450], the acute covered and ignored
+                assert.strictEqual(positionText('a\u{301}a', { featureTags: ['palt'] }, singleFont), '8@-20,0+450|13+0|8@-20,0+450');
+            });
+
+            it('applies the variation deltas of the VariationIndex tables of every field', function() {
+                // --features=halt -u 004F,006F: [6=0@10,0+580|12=1@-10,5+490], --variations=wght=500
+                // [6=0@20,20+560|12=1@-20,-5+470], --variations=wght=900 [6=0@30,40+540|12=1@-30,-15+450]
+                assert.strictEqual(positionText('Oo', { featureTags: ['halt'] }, singleFont), '6@10,0+580|12@-10,5+490');
+                assert.strictEqual(positionText('Oo', { featureTags: ['halt'], variation: { wght: 500 } }, singleFont), '6@20,20+560|12@-20,-5+470');
+                assert.strictEqual(positionText('Oo', { featureTags: ['halt'], variation: { wght: 900 } }, singleFont), '6@30,40+540|12@-30,-15+450');
+            });
+
+            it('applies the single adjustments of the kern feature, of an extension lookup and of the first subtable that covers a glyph', function() {
+                // -u 0062,0063,0064: [9=0+485|10=1+490|11=2+460], the b -15 of the extension lookup, the c -10 of the first
+                // subtable, the d -40 of the second one; --features=-kern [9=0+500|10=1+500|11=2+500]
+                assert.strictEqual(positionText('bcd', {}, singleFont), '9+485|10+490|11+460');
+                assert.strictEqual(positionText('bcd', { featureTags: [] }, singleFont), '9+500|10+500|11+500');
+            });
+
+            it('goes on at the next subtable for a glyph whose coverage index is out of the value records of format 2, like HarfBuzz', function() {
+                // TestSingleAdjustment.ttf with the value records of A and B only in the format 2 subtable of cpsp (fontTools),
+                // saved as short-values.ttf: --features=cpsp -u 0041,0042,0043,0048 [2=0@5,0+610|3=1@-10,0+520|4=2+599|5=3+600],
+                // the C +99 of the second subtable (SinglePosFormat2::apply)
+                const valueRecordsSubtable = singleFont.tables.gpos.lookups[1].subtables[0];
+                valueRecordsSubtable.values = valueRecordsSubtable.values.slice(0, 2);
+                assert.strictEqual(positionText('ABCH', { featureTags: ['cpsp'] }, singleFont), '2@5,0+610|3@-10,0+520|4+599|5+600');
+            });
+
+            it('applies a subtable of value format 0 to the glyphs it covers, so the next subtables do not, like HarfBuzz', function() {
+                // TestSingleAdjustment.ttf with the value format 0 in the first subtable of SINGLE_FIRST_SUBTABLE, pos c
+                // (fontTools), saved as value-format-0.ttf: -u 0062,0063,0064 [9=0+485|10=1+500|11=2+460], not the c -40 of
+                // the second subtable
+                singleFont.tables.gpos.lookups[6].subtables[0].value = undefined;
+                assert.strictEqual(positionText('bcd', {}, singleFont), '9+485|10+500|11+460');
+            });
+
+            it('applies a format 2 subtable of value format 0 to the glyphs it covers, so the next subtables do not, like HarfBuzz', function() {
+                // TestSingleAdjustment.ttf with the value format 0 in the format 2 subtable of cpsp, pos A B C H (fontTools),
+                // saved as format2-value-format-0.ttf: --features=cpsp -u 0041,0042,0043,0048 [2=0+600|3=1+500|4=2+500|5=3+600],
+                // not the C +99 of the second subtable (SinglePosFormat2::apply)
+                const valueRecordsSubtable = singleFont.tables.gpos.lookups[1].subtables[0];
+                valueRecordsSubtable.values = valueRecordsSubtable.values.map(() => undefined);
+                assert.strictEqual(positionText('ABCH', { featureTags: ['cpsp'] }, singleFont), '2+600|3+500|4+500|5+600');
+            });
+        });
+    });
+
+    describe('the single adjustments of real fonts', function() {
+        // hb-shape --no-glyph-names --cluster-level=1 <font> -u <code points>
+        let cidKeyedFont;
+        let trackingFont;
+        let abrilFont;
+
+        before(function() {
+            cidKeyedFont = parse(readFileSync('./test/fonts/regression/TestCFF1-CIDKeyed-subset.otf'));
+            abrilFont = parse(readFileSync('./test/fonts/AbrilFatface-Regular.otf'));
+        });
+
+        beforeEach(function() {
+            trackingFont = parse(readFileSync('./test/fonts/TestTracking3.ttf'));
+        });
+
+        it('applies the palt and vpal of a CJK font, its format 2 subtables, to the full width glyphs of fwid', function() {
+            // TestCFF1-CIDKeyed-subset.otf, --features=fwid -u 0041,0056,004F,4E00: [13=0+1000|15=1+1000|14=2+1000|11=3+1000]
+            const fullWidth = { glyphs: [13, 15, 14, 11], clusters: [0, 1, 2, 3] };
+            assertShape(shapeText(cidKeyedFont, 'AVO\u{4E00}', { features: { fwid: true } }),
+                { ...fullWidth, advances: [1000, 1000, 1000, 1000], offsets: [[0, 0], [0, 0], [0, 0], [0, 0]] }, 'fwid');
+            // --features=fwid,palt: [13=0@-107,0+776|15=1@-96,0+809|14=2@-60,0+880|11=3+1000]
+            assertShape(shapeText(cidKeyedFont, 'AVO\u{4E00}', { features: { fwid: true, palt: true } }),
+                { ...fullWidth, advances: [776, 809, 880, 1000], offsets: [[-107, 0], [-96, 0], [-60, 0], [0, 0]] }, 'fwid palt');
+            // --features=fwid,palt,vpal: [13=0@-107,42+776|15=1@-96,27+809|14=2@-60,43+880|11=3@0,100+1000], the y
+            // placements of vpal without its y advances
+            const features = { fwid: true, palt: true, vpal: true };
+            assertShape(shapeText(cidKeyedFont, 'AVO\u{4E00}', { features }),
+                { ...fullWidth, advances: [776, 809, 880, 1000], offsets: [[-107, 42], [-96, 27], [-60, 43], [0, 100]] }, 'fwid palt vpal');
+            assert.deepStrictEqual(cidKeyedFont.shape('AVO\u{4E00}', { features }).map(({ yAdvance }) => yAdvance), [0, 0, 0, 0]);
+        });
+
+        it('applies the GPOS vert of a CJK font, a format 1 subtable with x and y placements', function() {
+            // TestCFF1-CIDKeyed-subset.otf, --features=vert -u 31B4: [10=0@800,1000+600], the y advance 0; -u 31B4: [10=0+600]
+            assertShape(shapeText(cidKeyedFont, '\u{31B4}', { features: { vert: true } }),
+                { glyphs: [10], clusters: [0], advances: [600], offsets: [[800, 1000]] });
+            assert.strictEqual(cidKeyedFont.shape('\u{31B4}', { features: { vert: true } })[0].yAdvance, 0);
+        });
+
+        it('applies the case of a Latin font with its GSUB substitutions', function() {
+            // AbrilFatface-Regular.otf, --features=case -u 0028,0048,0029,002D,005B,0040,005D:
+            // [77=0@0,40+351|27=1+749|78=2@0,40+351|132=3+352|75=4@0,40+329|19=5+879|76=6@0,40+328]
+            assertShape(shapeText(abrilFont, '(H)-[@]', { features: { case: true } }), {
+                glyphs: [77, 27, 78, 132, 75, 19, 76],
+                clusters: [0, 1, 2, 3, 4, 5, 6],
+                advances: [351, 749, 351, 352, 329, 879, 328],
+                offsets: [[0, 40], [0, 0], [0, 40], [0, 0], [0, 40], [0, 0], [0, 40]]
+            });
+        });
+
+        it('applies the variation deltas of the VariationIndex tables of the trak lookups of a variable font', function() {
+            // TestTracking3.ttf with the trak feature (its required feature) of its single adjustment lookups 1, 2 and 3 only,
+            // extension lookups of format 1 subtables with VariationIndex tables for the x placement and the x advance; lookup
+            // 0, a chained context, left out (fontTools), saved as trak-single.ttf: -u 0041,0056,0054,006F,0020,0061 with the
+            // kern table pairs A V -152 and T o -113
+            trackingFont.tables.gpos.features[0].feature.lookupListIndexes = [1, 2, 3];
+            const glyphs = { glyphs: [36, 57, 55, 82, 3, 68], clusters: [0, 1, 2, 3, 4, 5] };
+            // [36=0+1290|57=1@-76,0+1290|55=2+1137|82=3@-113,0+1026|3=4+569|68=5+1139]
+            assertShape(shapeText(trackingFont, 'AVTo a'), {
+                ...glyphs,
+                advances: [1290, 1290, 1137, 1026, 569, 1139],
+                offsets: [[0, 0], [-76, 0], [0, 0], [-113, 0], [0, 0], [0, 0]]
+            }, 'default');
+            // --variations=TRAK=1: [36=0@-409,0+2518|57=1@-485,0+2518|55=2@-409,0+2365|82=3@-522,0+2254|3=4@-409,0+1797|68=5@-409,0+2367]
+            assertShape(shapeText(trackingFont, 'AVTo a', { variation: { TRAK: 1 } }), {
+                ...glyphs,
+                advances: [2518, 2518, 2365, 2254, 1797, 2367],
+                offsets: [[-409, 0], [-485, 0], [-409, 0], [-522, 0], [-409, 0], [-409, 0]]
+            }, 'TRAK 1');
+            // --variations=TRAK=-0.3: [36=0@31,0+1136|57=1@-45,0+1136|55=2@31,0+983|82=3@-82,0+872|3=4@31,0+415|68=5@31,0+985]
+            assertShape(shapeText(trackingFont, 'AVTo a', { variation: { TRAK: -0.3 } }), {
+                ...glyphs,
+                advances: [1136, 1136, 983, 872, 415, 985],
+                offsets: [[31, 0], [-45, 0], [31, 0], [-82, 0], [31, 0], [31, 0]]
+            }, 'TRAK -0.3');
+            // --variations=TRAK=0.5,TRKS=1: the space of lookup 1, [36=0@-204,0+1905|57=1@-280,0+1905|55=2@-204,0+1752|
+            // 82=3@-317,0+1641|3=4@-2252,0+3232|68=5@-204,0+1754]
+            assertShape(shapeText(trackingFont, 'AVTo a', { variation: { TRAK: 0.5, TRKS: 1 } }), {
+                ...glyphs,
+                advances: [1905, 1905, 1752, 1641, 3232, 1754],
+                offsets: [[-204, 0], [-280, 0], [-204, 0], [-317, 0], [-2252, 0], [-204, 0]]
+            }, 'TRAK 0.5 TRKS 1');
         });
     });
 

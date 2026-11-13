@@ -460,13 +460,15 @@ Parser.prototype.parseDeviceTable = function() {
  * Parse a list of GPOS valueRecords
  * https://docs.microsoft.com/en-us/typography/opentype/spec/gpos#value-record
  * valueFormat and valueCount are read from the stream.
+ * subtableStart is the absolute offset of the subtable the device offsets are
+ * relative to (see parseValueRecord).
  */
-Parser.prototype.parseValueRecordList = function() {
+Parser.prototype.parseValueRecordList = function(subtableStart) {
     const valueFormat = this.parseUShort();
     const valueCount = this.parseUShort();
     const values = new Array(valueCount);
     for (let i = 0; i < valueCount; i++) {
-        values[i] = this.parseValueRecord(valueFormat);
+        values[i] = this.parseValueRecord(valueFormat, subtableStart);
     }
     return values;
 };

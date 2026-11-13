@@ -1239,6 +1239,60 @@ describe('font.mjs', function() {
             assert.strictEqual(formatShape(pairFont.shape('ca', { features: { blwm: false } })), '[7=0+500|5=1+500]');
         });
 
+        it('applies the single adjustments of the features, the y advance of their value records for vertical text only', function() {
+            // TestSingleAdjustment.ttf, --features=case -u 0048: [5=0@10,20+570], pos H <10 20 -30 40>;, --features=vpal
+            // -u 0056: [7=0@0,50+600], pos V <0 50 0 -100>;, the y advances 0
+            const singleFont = loadSync('./test/fonts/TestSingleAdjustment.ttf');
+            assert.deepStrictEqual(singleFont.shape('H', { features: { case: true } }), [
+                { glyph: singleFont.charToGlyph('H'), start: 0, end: 1, xAdvance: 570, yAdvance: 0, xOffset: 10, yOffset: 20 }
+            ]);
+            assert.deepStrictEqual(singleFont.shape('V', { features: { vpal: true } }), [
+                { glyph: singleFont.charToGlyph('V'), start: 0, end: 1, xAdvance: 600, yAdvance: 0, xOffset: 0, yOffset: 50 }
+            ]);
+        });
+
+        it('applies the single adjustments of the kern feature with the kerning option, which getKerningValue leaves out', function() {
+            // TestSingleAdjustment.ttf, -u 0062,0063,0064: [9=0+485|10=1+490|11=2+460], --features=-kern
+            // [9=0+500|10=1+500|11=2+500]
+            const singleFont = loadSync('./test/fonts/TestSingleAdjustment.ttf');
+            assert.strictEqual(formatShape(singleFont.shape('bcd')), '[9=0+485|10=1+490|11=2+460]');
+            assert.strictEqual(formatShape(singleFont.shape('bcd', { kerning: false })), '[9=0+500|10=1+500|11=2+500]');
+            assert.strictEqual(singleFont.getAdvanceWidth('bcd', 1000), 1435);
+            assert.strictEqual(singleFont.getAdvanceWidth('bcd', 1000, { kerning: false }), 1500);
+            // the b -15 of the extension lookup 5, the c -10 of the plain lookup 6, the alef +10 -20 of the format 2
+            // lookup 7 of hebr
+            const glyph = character => singleFont.charToGlyph(character);
+            assert.strictEqual(singleFont.getKerningValue(glyph('b'), glyph('c')), 0);
+            assert.strictEqual(singleFont.getKerningValue(glyph('c'), glyph('d')), 0);
+            assert.strictEqual(singleFont.getKerningValue(glyph('\u{5D0}'), glyph('\u{5D1}')), 0);
+        });
+
+        it('applies the single adjustments of a right-to-left run of a text in the order of the text, its glyphs in visual order', function() {
+            // TestPairPositioning.ttf with a single adjustment lookup (format 2) in kern, pos b <0 0 -25 0>; alef
+            // <10 0 -20 0>; dal <-5 0 30 0>; reh <0 15 -10 0>; (fontTools), saved as kern-single.ttf: the left-to-right
+            // run b, -u 0062: [6=0+475], then the right-to-left run dal reh alef, -u 062F,0631,0627:
+            // [11=2@10,30+220|13=1@-100,15+290|12=0@-5,0+530], with the pairs reh alef and dal reh of kern
+            const singleFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+            const gpos = singleFont.tables.gpos;
+            const glyphIndex = character => singleFont.charToGlyphIndex(character);
+            gpos.lookups.push({
+                lookupType: 1,
+                lookupFlag: 0,
+                subtables: [{
+                    posFormat: 2,
+                    coverage: { format: 1, glyphs: [glyphIndex('b'), glyphIndex('ا'), glyphIndex('د'), glyphIndex('ر')] },
+                    values: [
+                        { xPlacement: 0, yPlacement: 0, xAdvance: -25 },
+                        { xPlacement: 10, yPlacement: 0, xAdvance: -20 },
+                        { xPlacement: -5, yPlacement: 0, xAdvance: 30 },
+                        { xPlacement: 0, yPlacement: 15, xAdvance: -10 }
+                    ]
+                }]
+            });
+            gpos.features.find(({ tag }) => tag === 'kern').feature.lookupListIndexes.push(gpos.lookups.length - 1);
+            assert.strictEqual(formatShape(singleFont.shape('bدرا')), '[6=0+475|11=3@10,30+220|13=2@-100,15+290|12=1@-5,0+530]');
+        });
+
         it('applies the GPOS lookups of mset to the Arabic runs only, a default GSUB feature of the Arabic shaper', function() {
             // pos beh alef -30; pos a c -30; in mset: -u 0628,0627 [11=1+300|18=0+470], with --features=-mset
             // [11=1+300|18=0+500]
@@ -1652,6 +1706,24 @@ describe('font.mjs', function() {
             }
             const warning = lookupType => `[opentype.js] GPOS lookupType: ${lookupType} is not yet supported, lookup skipped`;
             assert.deepStrictEqual(warnings, [warning(4), warning(4), warning(3), warning(4), warning(5), warning(6)]);
+        });
+
+        it('applies the single adjustment lookups without a warning', function() {
+            // TestSingleAdjustment.ttf: single adjustment lookups only (lookup type 1, the lookup 5 in an extension
+            // lookup), --features=case -u 0048: [5=0@10,20+570], -u 0062: [9=0+485]
+            const warnings = [];
+            const consoleWarn = console.warn;
+            console.warn = message => warnings.push(message);
+            try {
+                const singleFont = loadSync('./test/fonts/TestSingleAdjustment.ttf');
+                const features = { case: true, cpsp: true, palt: true, halt: true, vpal: true, lfbd: true, ss01: true };
+                singleFont.shape('ABCHOVabcdo\u{301}\u{300}\u{5D1}\u{5D0}', { features });
+                assert.strictEqual(formatShape(singleFont.shape('H', { features: { case: true } })), '[5=0@10,20+570]');
+                assert.strictEqual(formatShape(singleFont.shape('b')), '[9=0+485]');
+            } finally {
+                console.warn = consoleWarn;
+            }
+            assert.deepStrictEqual(warnings, []);
         });
     });
 

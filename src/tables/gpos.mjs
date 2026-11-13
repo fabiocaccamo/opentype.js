@@ -12,17 +12,20 @@ const subtableParsers = new Array(10);         // subtableParsers[0] is unused
 subtableParsers[1] = function parseLookup1() {
     const start = this.offset + this.relativeOffset;
     const posformat = this.parseUShort();
+    // device offsets of the value records are relative to the SinglePos subtable
     if (posformat === 1) {
+        const coverage = this.parsePointer(Parser.coverage);
+        const valueFormat = this.parseUShort();
         return {
             posFormat: 1,
-            coverage: this.parsePointer(Parser.coverage),
-            value: this.parseValueRecord()
+            coverage: coverage,
+            value: this.parseValueRecord(valueFormat, start)
         };
     } else if (posformat === 2) {
         return {
             posFormat: 2,
             coverage: this.parsePointer(Parser.coverage),
-            values: this.parseValueRecordList()
+            values: this.parseValueRecordList(start)
         };
     }
     check.assert(false, '0x' + start.toString(16) + ': GPOS lookup type 1 format must be 1 or 2.');
