@@ -174,6 +174,11 @@ TestSingleAdjustment.ttf
     Public domain (CC0 1.0 Universal)
     https://creativecommons.org/publicdomain/zero/1.0/
 
+TestSpaceFallback.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-space-fallback-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 TestSVGgradientTransform.otf
 TestSVGgzip.otf
 TestSVGmultiGlyphs.otf

@@ -147,18 +147,82 @@ export function getCharScriptExtensions(char) {
  * @return {boolean}
  */
 export function isVariationSequenceSelector(char) {
+    if (isVariationSelector(char)) {
+        return true;
+    }
     if (char === null) {
         return false;
     }
     const charCode = char.codePointAt(0);
-    return (
-        // Mongolian Variation Selectors
-        (charCode >= 0x180B && charCode <= 0x180D) ||
-        // Generic Variation Selectors
-        (charCode >= 0xFE00 && charCode <= 0xFE0F) ||
-        // Ideographic Variation Sequences
-        (charCode >= 0xE0100 && charCode <= 0xE01EF)
-    );
+    // Mongolian free variation selectors
+    return charCode >= 0x180B && charCode <= 0x180D;
+}
+
+/**
+ * Check if a char is a variation selector for the normalization of HarfBuzz (hb_unicode_funcs_t::is_variation_selector,
+ * hb-unicode.hh of HarfBuzz 11.3.2): one of the variation selectors 1 to 16 or of the supplement, not the Mongolian
+ * free variation selectors, which HarfBuzz leaves to the Arabic shaper
+ * @param {string|null} char a single char
+ * @return {boolean}
+ */
+export function isVariationSelector(char) {
+    if (char === null) {
+        return false;
+    }
+    const charCode = char.codePointAt(0);
+    return (charCode >= 0xFE00 && charCode <= 0xFE0F) || (charCode >= 0xE0100 && charCode <= 0xE01EF);
+}
+
+/**
+ * The space types of HarfBuzz (hb_unicode_funcs_t::space_t, hb-unicode.hh of HarfBuzz 11.3.2), with its values: the
+ * advance that a space a font has not takes with the glyph of U+0020 SPACE (see getDefaultGlyphAdvance in
+ * position.mjs). The value of EM_n is n: 1/n em.
+ */
+export const SPACE_TYPES = Object.freeze({
+    NOT_SPACE: 0,
+    EM: 1,
+    EM_2: 2,
+    EM_3: 3,
+    EM_4: 4,
+    EM_5: 5,
+    EM_6: 6,
+    EM_16: 16,
+    FOUR_EM_18: 17,
+    SPACE: 18,
+    FIGURE: 19,
+    PUNCTUATION: 20,
+    NARROW: 21
+});
+
+// the spaces of the Zs general category that can use the glyph of U+0020, and their space type, like
+// hb_unicode_funcs_t::space_fallback_type of HarfBuzz 11.3.2 (U+1680 OGHAM SPACE MARK cannot)
+const SPACE_FALLBACK_TYPES = new Map([
+    [0x0020, SPACE_TYPES.SPACE],
+    [0x00A0, SPACE_TYPES.SPACE],
+    [0x2000, SPACE_TYPES.EM_2],
+    [0x2001, SPACE_TYPES.EM],
+    [0x2002, SPACE_TYPES.EM_2],
+    [0x2003, SPACE_TYPES.EM],
+    [0x2004, SPACE_TYPES.EM_3],
+    [0x2005, SPACE_TYPES.EM_4],
+    [0x2006, SPACE_TYPES.EM_6],
+    [0x2007, SPACE_TYPES.FIGURE],
+    [0x2008, SPACE_TYPES.PUNCTUATION],
+    [0x2009, SPACE_TYPES.EM_5],
+    [0x200A, SPACE_TYPES.EM_16],
+    [0x202F, SPACE_TYPES.NARROW],
+    [0x205F, SPACE_TYPES.FOUR_EM_18],
+    [0x3000, SPACE_TYPES.EM]
+]);
+
+/**
+ * The space type of a char that a font without its glyph can draw with the glyph of U+0020 SPACE, like
+ * hb_unicode_funcs_t::space_fallback_type of HarfBuzz (see SPACE_TYPES)
+ * @param {string} char a single char
+ * @return {number} SPACE_TYPES.NOT_SPACE for the other chars
+ */
+export function getSpaceFallbackType(char) {
+    return SPACE_FALLBACK_TYPES.get(char.codePointAt(0)) || SPACE_TYPES.NOT_SPACE;
 }
 
 // the scripts of the chars that take the script of the text around them: Common, Inherited and Unknown

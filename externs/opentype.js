@@ -61,6 +61,14 @@ opentype.Font.prototype.charToGlyph = function(c) {};
  * the value 255 (a random alternate, from the random numbers of HarfBuzz from the start of each script run), and the
  * direction features of the script of each run (rtla and rtlm in a run of a right-to-left script such as Arabic or
  * Hebrew, ltra and ltrm in the other runs).
+ * A character is mapped to the glyph of the cmap, with the fallbacks of HarfBuzz for a character the font has no
+ * glyph for: a space (U+00A0, U+2000 to U+200A, U+202F, U+205F, U+3000, not U+1680) takes the glyph of U+0020, with
+ * the advance of its kind of space in opentype.Font.prototype.shape, and U+2011 the glyph of U+2010; the GSUB
+ * features then apply to these glyphs. A space or U+2011 followed by a variation selector (U+FE00 to U+FE0F,
+ * U+E0100 to U+E01EF) keeps the glyph of the cmap (.notdef without a glyph for the variation sequence), like
+ * HarfBuzz; a Mongolian free variation selector (U+180B to U+180D, U+180F) after it keeps the fallbacks, like
+ * HarfBuzz. Not yet the canonical decomposition of HarfBuzz before them (e.g. U+2001 to the glyph of U+2003), nor
+ * .notdef for a space followed by combining marks and then a variation selector, like HarfBuzz.
  * @param  {string} s
  * @param  {Object=} options
  * @return {opentype.Glyph[]}
@@ -137,15 +145,19 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
  * the script of the run, the same ones as in GSUB (see stringToGlyphs), and abvm, blwm, curs, dist, kern (with
  * options.kerning), mark and mkmk, with options.features, and the required feature of the GPOS language system (its
  * ReqFeatureIndex) whatever options.features; their lookups apply in lookup list order, to each run in the order of
- * the text, extension lookups included. The single adjustments (lookup type 1) are applied with their value
- * record, the pair adjustments (lookup type 2) with their two value records, the cursive attachments (lookup type
- * 3) and the mark attachments (lookup types 4, 5 and 6) with their anchors (with the VariationIndex deltas of a
- * variable font): a mark is drawn on the glyph before it that is not a mark (at the anchor of the ligature
- * component it follows), or on the mark before it of the same glyph, and the offsets of an attached glyph follow
- * the glyph it is attached to; the contextual positionings (lookup types 7 and 8, formats 1, 2 and 3, e.g. the
- * contextual kerning of kern) apply, like HarfBuzz, the lookups of the first rule that matches at a glyph, at its
- * input glyphs, nested up to 64 levels and at most 1024 nested lookups by glyph of a run (16384 at least). Not yet
- * like HarfBuzz: a mark after the second glyph of a multiple substitution attaches to that glyph when the subtable
+ * the text, extension lookups included. Like HarfBuzz, the glyph of U+0020 that draws a space the font has not (see
+ * stringToGlyphs), and the glyphs the GSUB features replace it with but a ligature, take the advance of its kind of
+ * space before GPOS: 1/n em (rounded like HarfBuzz) for U+2000 to U+2006, U+2009, U+200A and U+3000, 4/18 em for
+ * U+205F, the advance of the first digit for U+2007, of the period or else of the comma for U+2008, half the advance
+ * of the glyph for U+202F, the advance of the glyph for U+00A0. The single adjustments (lookup type 1) are applied
+ * with their value record, the pair adjustments (lookup type 2) with their two value records, the cursive
+ * attachments (lookup type 3) and the mark attachments (lookup types 4, 5 and 6) with their anchors (with the
+ * VariationIndex deltas of a variable font): a mark is drawn on the glyph before it that is not a mark (at the anchor
+ * of the ligature component it follows), or on the mark before it of the same glyph, and the offsets of an attached
+ * glyph follow the glyph it is attached to; the contextual positionings (lookup types 7 and 8, formats 1, 2 and 3,
+ * e.g. the contextual kerning of kern) apply, like HarfBuzz, the lookups of the first rule that matches at a glyph,
+ * at its input glyphs, nested up to 64 levels and at most 1024 nested lookups by glyph of a run (16384 at least). Not
+ * yet like HarfBuzz: a mark after the second glyph of a multiple substitution attaches to that glyph when the subtable
  * covers it, otherwise to nothing, where HarfBuzz attaches it to the first glyph of the substitution.
  * Without a GPOS kern feature for the script and language, the kern table applies like in HarfBuzz, in visual order,
  * the value of a pair split between its two glyphs, each glyph kerned with the next glyph that is not a GDEF mark;

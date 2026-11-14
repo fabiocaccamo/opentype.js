@@ -3,12 +3,14 @@ import { readFileSync } from 'fs';
 import { Font, Glyph, Path, parse } from '../src/opentype.mjs';
 import {
     DEFAULT_POSITIONING_FEATURES,
+    getDefaultGlyphAdvance,
     MarkAdvanceZeroing,
     getMarkAdvanceZeroing,
     getMarkLigatureComponentIndex,
     areMarksOfSameGlyph,
     positionGlyphRun
 } from '../src/position.mjs';
+import { SPACE_TYPES } from '../src/char.mjs';
 import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
 import { replaceTextGlyphs } from './testutil.mjs';
 import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
@@ -1030,6 +1032,71 @@ describe('position.mjs', function() {
             assert.strictEqual(areMarksOfSameGlyph({ ligatureId, ligatureComponentCount: 2 }, undefined), true);
             assert.strictEqual(areMarksOfSameGlyph(undefined, { ligatureId, ligatureComponentCount: 2 }), true);
             assert.strictEqual(areMarksOfSameGlyph({ ligatureId: otherLigatureId, ligatureComponent: 1 }, { ligatureId, ligatureComponentCount: 2 }), true);
+        });
+    });
+
+    // TestSpaceFallback.ttf, built by test/generate-space-fallback-font.py (2048 units per em, a space of 501, one of
+    // 1100 and no zero, comma of 520 and no period): each value is the advance of the space a font without its glyph
+    // draws with the glyph of U+0020, from hb-shape --no-glyph-names --cluster-level=1 <font> -u <code point>
+    describe('getDefaultGlyphAdvance', function() {
+        let font;
+        let spaceGlyph;
+
+        before(function() {
+            font = loadFont('../TestSpaceFallback.ttf');
+            spaceGlyph = font.glyphs.get(font.charToGlyphIndex(' '));
+        });
+
+        it('gives the advance of the glyph to a glyph of no space type and of the SPACE type', function() {
+            // -u 0041: [5=0+1300]; -u 00A0: [1=0+501]
+            assert.strictEqual(getDefaultGlyphAdvance(font, font.glyphs.get(font.charToGlyphIndex('A')), SPACE_TYPES.NOT_SPACE), 1300);
+            assert.strictEqual(getDefaultGlyphAdvance(font, spaceGlyph, SPACE_TYPES.SPACE), 501);
+        });
+
+        it('gives 1/n em to the EM_n types, rounded like HarfBuzz, and 4/18 em truncated to FOUR_EM_18', function() {
+            // -u 3000: [1=0+2048]; 2002: 1024; 2004: 683; 2005: 512; 2009: 410; 2006: 341; 200A: 128; 205F: 455
+            const expectedAdvances = [
+                [SPACE_TYPES.EM, 2048], [SPACE_TYPES.EM_2, 1024], [SPACE_TYPES.EM_3, 683], [SPACE_TYPES.EM_4, 512],
+                [SPACE_TYPES.EM_5, 410], [SPACE_TYPES.EM_6, 341], [SPACE_TYPES.EM_16, 128], [SPACE_TYPES.FOUR_EM_18, 455]
+            ];
+            for (const [spaceType, advance] of expectedAdvances) {
+                assert.strictEqual(getDefaultGlyphAdvance(font, spaceGlyph, spaceType), advance, `space type ${spaceType}`);
+            }
+        });
+
+        it('gives FIGURE the advance of the first digit the font has, PUNCTUATION the one of the period or else of the comma', function() {
+            // -u 2007: [1=0+1100], the advance of one; -u 2008: [1=0+520], the advance of comma
+            assert.strictEqual(getDefaultGlyphAdvance(font, spaceGlyph, SPACE_TYPES.FIGURE), 1100);
+            assert.strictEqual(getDefaultGlyphAdvance(font, spaceGlyph, SPACE_TYPES.PUNCTUATION), 520);
+        });
+
+        it('gives FIGURE and PUNCTUATION the advance of the glyph in a font without digits, period and comma', function() {
+            // TestPairPositioning.ttf, a space of 250: -u 2007: [1=0+250]; -u 2008: [1=0+250]
+            const pairFont = loadFont('../TestPairPositioning.ttf');
+            const pairSpaceGlyph = pairFont.glyphs.get(pairFont.charToGlyphIndex(' '));
+            assert.strictEqual(getDefaultGlyphAdvance(pairFont, pairSpaceGlyph, SPACE_TYPES.FIGURE), 250);
+            assert.strictEqual(getDefaultGlyphAdvance(pairFont, pairSpaceGlyph, SPACE_TYPES.PUNCTUATION), 250);
+        });
+
+        it('gives NARROW half the advance of the glyph, truncated', function() {
+            // -u 202F: [1=0+250]
+            assert.strictEqual(getDefaultGlyphAdvance(font, spaceGlyph, SPACE_TYPES.NARROW), 250);
+        });
+
+        it('reads the advances of the glyph and of the digit at the variation', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=800 Changa-VariableFont_wght.ttf: -u 0020:
+            // [659=0+200]; -u 2007: [659=0+675]; -u 202F: [659=0+100]
+            const variableFont = loadFont('../Changa-VariableFont_wght.ttf');
+            const variableSpaceGlyph = variableFont.glyphs.get(variableFont.charToGlyphIndex(' '));
+            const variation = { wght: 800 };
+            assert.strictEqual(getDefaultGlyphAdvance(variableFont, variableSpaceGlyph, SPACE_TYPES.SPACE, variation), 200);
+            assert.strictEqual(getDefaultGlyphAdvance(variableFont, variableSpaceGlyph, SPACE_TYPES.FIGURE, variation), 675);
+            assert.strictEqual(getDefaultGlyphAdvance(variableFont, variableSpaceGlyph, SPACE_TYPES.NARROW, variation), 100);
+        });
+
+        it('throws on a space type that is not one of SPACE_TYPES', function() {
+            assert.throws(() => getDefaultGlyphAdvance(font, spaceGlyph, 7), /Unknown space type: 7/);
+            assert.throws(() => getDefaultGlyphAdvance(font, spaceGlyph, undefined), /Unknown space type: undefined/);
         });
     });
 
