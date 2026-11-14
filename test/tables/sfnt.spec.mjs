@@ -5,6 +5,7 @@ import { parse } from '../../src/opentype.mjs';
 import name from '../../src/tables/name.mjs';
 import sfnt from '../../src/tables/sfnt.mjs';
 import { encode } from '../../src/types.mjs';
+import { readSfntFile, getSpecificationCheckSum } from '../testutil.mjs';
 
 function encodeAndParseTable(table, parser) {
     const bytes = encode.TABLE(table);
@@ -171,6 +172,109 @@ describe('tables/sfnt.mjs', function () {
                 .filter(field => field.name.startsWith('advanceWidth_'))
                 .map(field => field.value);
             assert.deepEqual(advanceWidths, [500, 250, 600, 720, 300, 813, 0]);
+        });
+    });
+
+    describe('makeSfntTable', function () {
+        it('writes the binary search fields of fontTools getSearchRange in the table directory of font.toArrayBuffer', function () {
+            // [numTables, searchRange, entrySelector, rangeShift] of fontTools 4.63.0 getSearchRange(numTables, 16)
+            const cases = [
+                [new Font({...defaultFont}), [10, 128, 3, 32]],
+                [parse(readFileSync('./test/fonts/TestGDEF-Blocklisted.ttf')), [11, 128, 3, 48]],
+            ];
+            for (const [sourceFont, expected] of cases) {
+                const file = readSfntFile(new Uint8Array(sourceFont.toArrayBuffer()));
+                assert.deepStrictEqual([file.numTables, file.searchRange, file.entrySelector, file.rangeShift], expected);
+            }
+        });
+
+        it('writes the binary search fields of fontTools getSearchRange for an empty table directory', function () {
+            // fontTools 4.63.0 getSearchRange(0, 16) is (16, 0, 0)
+            const header = encode.TABLE(sfnt.make([]));
+            assert.deepStrictEqual(Array.from(header.slice(4, 12)), [0, 0, 0, 16, 0, 0, 0, 0]);
+        });
+    });
+
+    describe('computeCheckSum', function () {
+        it('sums the big-endian uint32 values of the bytes modulo 2^32, the last one zero padded', function () {
+            assert.equal(sfnt.computeCheckSum(new Uint8Array([0x01, 0x02, 0x03, 0x04, 0x05])), 0x06020304);
+            assert.equal(sfnt.computeCheckSum(new Uint8Array([0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x02])), 1);
+        });
+
+        it('keeps every bit of the sum of a table larger than 8 MB', function () {
+            // 3 * 2^20 values 0xFFFFFFFF: their sum modulo 2^32 is 2^32 - 3 * 2^20
+            const bytes = new Uint8Array(12 * 1024 * 1024).fill(0xFF);
+            assert.equal(sfnt.computeCheckSum(bytes), 0xFFD00000);
+            assert.equal(sfnt.computeCheckSum(bytes), getSpecificationCheckSum(bytes));
+        });
+    });
+
+    describe('encodeFile', function () {
+        const tagBytes = tag => Array.from(tag, character => character.charCodeAt(0));
+        const makeTable = (tag, length, firstByte = 1) => ({
+            tag,
+            bytes: Uint8Array.from({ length }, (_, index) => (firstByte + index) & 0xFF || 1),
+        });
+
+        it('writes the sfnt version, the number of tables and the binary search fields of fontTools getSearchRange', function () {
+            // [numTables, searchRange, entrySelector, rangeShift] of fontTools 4.63.0 getSearchRange(numTables, 16)
+            const expected = [
+                [0, 16, 0, 0], [1, 16, 0, 0], [2, 32, 1, 0], [3, 32, 1, 16], [4, 64, 2, 0], [5, 64, 2, 16],
+                [15, 128, 3, 112], [16, 256, 4, 0], [17, 256, 4, 16], [32, 512, 5, 0],
+            ];
+            for (const [numTables, searchRange, entrySelector, rangeShift] of expected) {
+                const tables = Array.from({ length: numTables }, (_, index) => makeTable('t' + String(index).padStart(3, '0'), 4));
+                const file = readSfntFile(new Uint8Array(sfnt.encodeFile('OTTO', tables)));
+                assert.deepStrictEqual(
+                    [file.sfntVersion, file.numTables, file.searchRange, file.entrySelector, file.rangeShift],
+                    ['OTTO', numTables, searchRange, entrySelector, rangeShift]
+                );
+            }
+        });
+
+        it('sorts the table records by tag and copies each table 4-byte aligned with zero padding', function () {
+            // byte order of the tags: uppercase before lowercase, the space before the letters
+            const tables = [makeTable('post', 5), makeTable('OS/2', 3, 7), makeTable('CFF ', 1, 9), makeTable('CFF2', 4, 11), makeTable('cmap', 6, 13)];
+            const bytes = new Uint8Array(sfnt.encodeFile(String.fromCharCode(0, 1, 0, 0), tables));
+            const file = readSfntFile(bytes);
+            assert.equal(file.sfntVersion, String.fromCharCode(0, 1, 0, 0));
+            assert.deepStrictEqual(file.records.map(record => record.tag), ['CFF ', 'CFF2', 'OS/2', 'cmap', 'post']);
+            assert.deepStrictEqual(file.records.map(record => [record.offset, record.length]), [[92, 1], [96, 4], [100, 3], [104, 6], [112, 5]]);
+            assert.equal(bytes.length, 120);
+            for (const record of file.records) {
+                const table = tables.find(candidate => candidate.tag === record.tag);
+                assert.deepStrictEqual(file.tables[record.tag], table.bytes);
+                assert.ok(bytes.subarray(record.offset + record.length, (record.offset + record.length + 3) & ~3).every(byte => byte === 0));
+                assert.equal(record.checkSum, getSpecificationCheckSum(table.bytes));
+            }
+            assert.deepStrictEqual(Array.from(bytes.subarray(12, 16)), tagBytes('CFF '));
+        });
+
+        it('computes the checksum of the head table with checkSumAdjustment set to 0, then head.checkSumAdjustment', function () {
+            const head = makeTable('head', 54, 0x80);
+            const headBytes = head.bytes.slice();
+            const bytes = new Uint8Array(sfnt.encodeFile('OTTO', [makeTable('name', 7), head, makeTable('cmap', 9, 3)]));
+            const file = readSfntFile(bytes);
+            const headRecord = file.records.find(record => record.tag === 'head');
+            const headWithoutAdjustment = headBytes.slice();
+            headWithoutAdjustment.fill(0, 8, 12);
+            assert.equal(headRecord.checkSum, getSpecificationCheckSum(headWithoutAdjustment));
+            assert.deepStrictEqual([...file.tables.head.subarray(0, 8), ...file.tables.head.subarray(12)], [...headBytes.subarray(0, 8), ...headBytes.subarray(12)]);
+            // the checksum of the whole file is 0xB1B0AFBA (OpenType specification, head table)
+            assert.equal(getSpecificationCheckSum(bytes), 0xB1B0AFBA);
+            assert.deepStrictEqual(head.bytes, headBytes, 'the bytes of the table are not changed');
+        });
+
+        it('copies the tables of a file without a head table', function () {
+            const tables = [makeTable('name', 7), makeTable('cmap', 9, 3)];
+            const file = readSfntFile(new Uint8Array(sfnt.encodeFile('OTTO', tables)));
+            assert.deepStrictEqual(file.tables.name, tables[0].bytes);
+            assert.deepStrictEqual(file.tables.cmap, tables[1].bytes);
+        });
+
+        it('throws an error for two tables with the same tag, and for a head table too short for checkSumAdjustment', function () {
+            assert.throws(() => sfnt.encodeFile('OTTO', [makeTable('cmap', 4), makeTable('name', 4), makeTable('cmap', 8)]), /Duplicate table cmap/);
+            assert.throws(() => sfnt.encodeFile('OTTO', [makeTable('head', 11)]), /The head table is too short to hold checkSumAdjustment/);
         });
     });
 });

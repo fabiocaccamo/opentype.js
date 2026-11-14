@@ -143,6 +143,24 @@ const font = opentype.parse(Module.decompress(await buffer));
 ```
 </details>
 
+### Removing tables from a font file
+
+`opentype.removeTables(buffer, tableTags)` returns the bytes of a font file without some of its tables, as a plain sfnt file (an `ArrayBuffer`), e.g. to register a color font without its color tables with the [CSS Font Loading API](https://developer.mozilla.org/docs/Web/API/FontFace), with exactly the same advances and shaping:
+
+```js
+const buffer = await fetch('/fonts/my-color-font.woff2').then(res => res.arrayBuffer());
+const bytes = opentype.removeTables(buffer, ['SVG ', 'COLR', 'CPAL', 'sbix', 'CBDT', 'CBLC']);
+const fontFace = new FontFace('My Color Font Outlines', bytes);
+document.fonts.add(await fontFace.load());
+```
+
+* `buffer`: the bytes of a TrueType or CFF sfnt (`.ttf`, `.otf`), WOFF or WOFF2 file, as by `opentype.parse()`. Font collections (`ttcf`) are not supported and throw an error, like an unknown signature, a truncated file, two tables with the same tag or a WOFF table whose lengths do not match its data.
+* `tableTags`: the tags of the tables to remove, each one a string of 4 printable ASCII characters (with the trailing space of `'SVG '` and `'CFF '`), or a `TypeError` is thrown. A tag the font does not have is ignored.
+
+The result has the sfnt version of the input (`0x00010000`, `'true'`, `'typ1'` or `'OTTO'`) and every other table byte for byte: decompressed for a WOFF or WOFF2 file, with the transformed `glyf`, `loca` and `hmtx` tables of a WOFF2 file reconstructed by the WOFF2 decoder of `opentype.parse()` (each glyph padded to 4 bytes, like the reference decoder of Google that the browsers use). No table is parsed or written again: only the table directory (sorted by tag), the zero padding of the tables to 4 bytes, their checksums and `head.checkSumAdjustment` are computed. The `DSIG` table is always left out, like the WOFF2 encoders and the subsetters of fontTools and HarfBuzz do, since its signature does not match the new file (the browsers ignore it). A required table (`head`, `maxp`, `hhea`, `hmtx`, `cmap`, `name`, `post`, `OS/2`, `glyf` and `loca`, `CFF ` or `CFF2`) can be removed too, but the result may then not load. The `buffer` is not changed.
+
+The function reads the whole file (and decompresses it): call it once per font file and reuse its result, which can back any number of `FontFace` objects (e.g. one for each instance of a variable font).
+
 ### Craft a font
 
 It is also possible to craft a Font from scratch by defining each glyph bézier paths.

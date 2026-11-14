@@ -885,3 +885,14 @@ opentype.loadSync = function(url) {};
  * @return {opentype.Font}
  */
 opentype.parse = function(buffer, opt) {};
+
+/**
+ * The bytes of a TrueType or CFF sfnt, WOFF or WOFF2 font file without the tables of tableTags, as a plain sfnt file
+ * with every other table byte for byte (decompressed), but DSIG; a font collection, an unknown signature, a truncated
+ * file, two tables with the same tag or a WOFF table whose lengths do not match its data throws an Error, a tag that is
+ * not a string of 4 printable ASCII characters a TypeError.
+ * @param  {ArrayBuffer} buffer
+ * @param  {Array<string>} tableTags
+ * @return {ArrayBuffer}
+ */
+opentype.removeTables = function(buffer, tableTags) {};

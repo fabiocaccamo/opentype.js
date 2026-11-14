@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'fs';
 import { brotliCompressSync } from 'zlib';
 import { parse } from '../src/opentype.mjs';
 import { parseWOFF2TableEntries } from '../src/woff2.mjs';
+import { readSfntFile } from './testutil.mjs';
 
 const FONTS_DIR = './test/fonts';
 const WOFF2_DIR = FONTS_DIR + '/woff2';
@@ -113,16 +114,7 @@ const KNOWN_TAGS = ['cmap', 'head', 'hhea', 'hmtx', 'maxp', 'name', 'OS/2', 'pos
 
 // the tables of a TTF/OTF file: { tag: Uint8Array }
 function readSfntTables(path) {
-    const bytes = new Uint8Array(readFileSync(path));
-    const view = new DataView(bytes.buffer);
-    const tables = {};
-    for (let i = 0; i < view.getUint16(4); i += 1) {
-        const entry = 12 + i * 16;
-        const tag = String.fromCharCode(...bytes.subarray(entry, entry + 4));
-        const offset = view.getUint32(entry + 8);
-        tables[tag] = bytes.slice(offset, offset + view.getUint32(entry + 12));
-    }
-    return tables;
+    return readSfntFile(new Uint8Array(readFileSync(path))).tables;
 }
 
 /**

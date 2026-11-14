@@ -29,6 +29,11 @@ import gvar from './gvar.mjs';
 import gasp from './gasp.mjs';
 import svg from './svg.mjs';
 
+const SFNT_HEADER_SIZE = 12;
+const SFNT_TABLE_RECORD_SIZE = 16;
+const HEAD_CHECKSUM_ADJUSTMENT_OFFSET = 8;
+const CHECKSUM_ADJUSTMENT_BASE = 0xB1B0AFBA;
+
 function log2(v) {
     return Math.log(v) / Math.log(2) | 0;
 }
@@ -42,14 +47,109 @@ function computeCheckSum(bytes) {
         // M.CHARARRAY encoding non-ASCII strings with full Unicode codepoints.
         // Uint8Array (used for file output) truncates to 8 bits, so we must do the
         // same here to produce a checksum that matches the actual file bytes.
-        sum += (
+        const word = (
             ((bytes[i]     || 0) & 0xFF) << 24 |
             ((bytes[i + 1] || 0) & 0xFF) << 16 |
             ((bytes[i + 2] || 0) & 0xFF) << 8  |
             ((bytes[i + 3] || 0) & 0xFF)
         ) >>> 0;
+        // modulo 2^32 at every word: past 2^53 the sum of a table larger than 8 MB would lose bits
+        sum = (sum + word) >>> 0;
     }
-    return sum >>> 0;
+    return sum;
+}
+
+/**
+ * The fields of the table directory for a binary search of its records
+ * (fontTools getSearchRange: rangeShift is 0 for an empty directory)
+ * @param {number} numTables
+ * @return {{searchRange: number, entrySelector: number, rangeShift: number}}
+ */
+function getTableDirectorySearchFields(numTables) {
+    const entrySelector = numTables > 0 ? log2(numTables) : 0;
+    const searchRange = SFNT_TABLE_RECORD_SIZE * Math.pow(2, entrySelector);
+    const rangeShift = Math.max(0, numTables * SFNT_TABLE_RECORD_SIZE - searchRange);
+    return { searchRange, entrySelector, rangeShift };
+}
+
+function compareTableTags(table1, table2) {
+    if (table1.tag < table2.tag) {
+        return -1;
+    }
+    if (table1.tag > table2.tag) {
+        return 1;
+    }
+    return 0;
+}
+
+function writeTag(view, offset, tag) {
+    for (let i = 0; i < 4; i += 1) {
+        view.setUint8(offset + i, tag.charCodeAt(i));
+    }
+}
+
+/**
+ * Encodes an sfnt font file from the bytes of its tables, copied as they are: the table records sorted by tag, each
+ * table 4-byte aligned with zero padding, the checksums of the tables and head.checkSumAdjustment computed (the checksum
+ * of the head table with checkSumAdjustment set to 0, as the OpenType specification requires)
+ * @param {string} sfntVersion - the tag of the sfnt version: '\0\x01\0\0', 'true', 'typ1' or 'OTTO'
+ * @param {Array<{tag: string, bytes: Uint8Array}>} tables - one table per tag, in any order
+ * @return {ArrayBuffer}
+ */
+function encodeSfntFile(sfntVersion, tables) {
+    const sortedTables = tables.slice().sort(compareTableTags);
+    for (let i = 1; i < sortedTables.length; i += 1) {
+        if (sortedTables[i].tag === sortedTables[i - 1].tag) {
+            throw new Error('Duplicate table ' + sortedTables[i].tag);
+        }
+    }
+
+    const directoryLength = SFNT_HEADER_SIZE + SFNT_TABLE_RECORD_SIZE * sortedTables.length;
+    const tableOffsets = [];
+    let fileLength = directoryLength;
+    for (const table of sortedTables) {
+        tableOffsets.push(fileLength);
+        fileLength += (table.bytes.length + 3) & ~3;
+    }
+
+    const bytes = new Uint8Array(fileLength);
+    const view = new DataView(bytes.buffer);
+    const { searchRange, entrySelector, rangeShift } = getTableDirectorySearchFields(sortedTables.length);
+    writeTag(view, 0, sfntVersion);
+    view.setUint16(4, sortedTables.length);
+    view.setUint16(6, searchRange);
+    view.setUint16(8, entrySelector);
+    view.setUint16(10, rangeShift);
+
+    let fileCheckSum = 0;
+    let headOffset = -1;
+    for (let i = 0; i < sortedTables.length; i += 1) {
+        const table = sortedTables[i];
+        const offset = tableOffsets[i];
+        bytes.set(table.bytes, offset);
+        if (table.tag === 'head') {
+            if (table.bytes.length < HEAD_CHECKSUM_ADJUSTMENT_OFFSET + 4) {
+                throw new Error('The head table is too short to hold checkSumAdjustment');
+            }
+            headOffset = offset;
+            view.setUint32(offset + HEAD_CHECKSUM_ADJUSTMENT_OFFSET, 0);
+        }
+        const checkSum = computeCheckSum(bytes.subarray(offset, offset + table.bytes.length));
+        const recordOffset = SFNT_HEADER_SIZE + SFNT_TABLE_RECORD_SIZE * i;
+        writeTag(view, recordOffset, table.tag);
+        view.setUint32(recordOffset + 4, checkSum);
+        view.setUint32(recordOffset + 8, offset);
+        view.setUint32(recordOffset + 12, table.bytes.length);
+        fileCheckSum = (fileCheckSum + checkSum) >>> 0;
+    }
+
+    // the tables are 4-byte aligned and zero padded: the checksum of the file is the sum of the one of the directory
+    // and the ones of the tables
+    fileCheckSum = (fileCheckSum + computeCheckSum(bytes.subarray(0, directoryLength))) >>> 0;
+    if (headOffset !== -1) {
+        view.setUint32(headOffset + HEAD_CHECKSUM_ADJUSTMENT_OFFSET, (CHECKSUM_ADJUSTMENT_BASE - fileCheckSum) >>> 0);
+    }
+    return bytes.buffer;
 }
 
 function makeTableRecord(tag, checkSum, offset, length) {
@@ -71,10 +171,7 @@ function makeSfntTable(tables) {
     ]);
     sfnt.tables = tables;
     sfnt.numTables = tables.length;
-    const highestPowerOf2 = Math.pow(2, log2(sfnt.numTables));
-    sfnt.searchRange = 16 * highestPowerOf2;
-    sfnt.entrySelector = log2(highestPowerOf2);
-    sfnt.rangeShift = sfnt.numTables * 16 - sfnt.searchRange;
+    Object.assign(sfnt, getTableDirectorySearchFields(sfnt.numTables));
 
     const recordFields = [];
     const tableFields = [];
@@ -399,7 +496,7 @@ function fontToSfntTable(font) {
     let checkSumAdjusted = false;
     for (let i = 0; i < tableFields.length; i += 1) {
         if (tableFields[i].name === 'head table') {
-            tableFields[i].value.checkSumAdjustment = (0xB1B0AFBA - checkSum) >>> 0;
+            tableFields[i].value.checkSumAdjustment = (CHECKSUM_ADJUSTMENT_BASE - checkSum) >>> 0;
             checkSumAdjusted = true;
             break;
         }
@@ -412,4 +509,6 @@ function fontToSfntTable(font) {
     return sfntTable;
 }
 
-export default { make: makeSfntTable, fontToTable: fontToSfntTable, computeCheckSum };
+export { SFNT_HEADER_SIZE, SFNT_TABLE_RECORD_SIZE };
+
+export default { make: makeSfntTable, fontToTable: fontToSfntTable, computeCheckSum, encodeFile: encodeSfntFile };
