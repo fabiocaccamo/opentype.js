@@ -16,6 +16,8 @@ import {
 } from './lookup-flags-font.mjs';
 import { readFileSync } from 'fs';
 import { getFeatureLookupTables } from './testutil.mjs';
+import { createIgnorableMatching, AUTO_JOINER_FLAGS } from '../src/layout.mjs';
+import { DEFAULT_IGNORABLE_TYPES } from '../src/char.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
 // the result of a contextual rule that matches: the substitutions of its nested lookups in the order they apply, and the
@@ -1716,6 +1718,72 @@ describe('featureQuery.mjs', function() {
             assert.deepStrictEqual(featureQuery.getFeature({ tag: 'rlig', script: 'arab' }).lookupListIndexes, [0]);
             assert.deepStrictEqual(font.stringToGlyphIndexes('\u{62F}'), [dalAlternate]);
             assert.deepStrictEqual(font.stringToGlyphIndexes('\u{62F}', { features: { rlig: false } }), [dal]);
+        });
+    });
+
+    describe('the default ignorables of the nested lookups', function() {
+        // TestDefaultIgnorables.ttf, built by test/generate-default-ignorables-font.py: 2 a, 3 b, 8 uni200D, 16 a.alt,
+        // 18 zwj.visible, 19 a_b; ss02: sub a' lookup ALT_A lookup LIGA_ALT_A_B (sub a by a.alt, sub a.alt b by a_b); ss03:
+        // sub a' lookup ALT_A lookup LIGA_ALT_A_B uni200D' lookup ZWJ_VISIBLE b' (sub uni200D by zwj.visible), the record
+        // of the zero width joiner first; the glyphs b a U+200D b, matched at the a:
+        // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --features=-liga,+<feature> TestDefaultIgnorables.ttf
+        // -u 0062,0061,200D,0062
+        const { NOT_IGNORABLE, ZERO_WIDTH_JOINER } = DEFAULT_IGNORABLE_TYPES;
+        let ignorablesFont;
+
+        before(function() {
+            ignorablesFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf');
+        });
+
+        // the substitution of the lookup of a feature at the a of b a U+200D b
+        function substituteAtA(featureTag) {
+            const query = new FeatureQuery(ignorablesFont);
+            const [lookupTable] = getFeatureLookupTables(query, query.getFeature({ tag: featureTag, script: 'latn' }));
+            const ignorableMatching = createIgnorableMatching(
+                [NOT_IGNORABLE, NOT_IGNORABLE, ZERO_WIDTH_JOINER, NOT_IGNORABLE], false, AUTO_JOINER_FLAGS
+            );
+            const action = query.lookupSubstitution(lookupTable, new ContextParams([3, 2, 8, 3], 1), featureTag, () => 1, ignorableMatching);
+            return action.substitution;
+        }
+
+        it('skips the default ignorables of the context after the glyph a nested lookup applied at, like HarfBuzz', function() {
+            // ss02: [3=0+500|19=1+800|1=1+0], the ligature a_b across the zero width joiner after the a.alt of the first record
+            assert.deepStrictEqual(substituteAtA('ss02'), contextualMatch([
+                nestedSubstitution(0, 11, 16), nestedSubstitution(0, 41, { ligGlyph: 19, componentOffsets: [2] })
+            ], 0));
+        });
+
+        it('does not skip a default ignorable that a previous record substituted, like HarfBuzz', function() {
+            // ss03: [3=0+500|16=1+520|18=2+200|3=3+500], no ligature across the zero width joiner the first record substituted
+            assert.deepStrictEqual(substituteAtA('ss03'), contextualMatch([
+                nestedSubstitution(1, 11, 18), nestedSubstitution(0, 11, 16)
+            ], 3));
+        });
+
+        it('keeps the joiner flags of the contextual lookup in the records after a substitution, like HarfBuzz', function() {
+            // the font of test/lookup-flags-font.mjs with lookup ALT_LAM { sub lam by lam.init; } ALT_LAM; lookup LIG_LAM_ALEF {
+            // sub lam.init alef by lam_alef; } LIG_LAM_ALEF; feature F { sub lam' lookup ALT_LAM lookup LIG_LAM_ALEF; } F; in
+            // arab (fontTools feaLib, the same glyph names, no space glyph): hb-shape --shapers=ot --cluster-level=1
+            // --features=+F nested-F.ttf -u 0644,200D,0627 [alef=1+500|lam.init=0+500] for calt, whose lookups do not skip the
+            // zero width joiner in an Arabic run, [lam_alef=0+500] for ss01. The glyphs are compared in glyph index order: the
+            // fork lays them out in the order of the text, the zero width joiner ending the right-to-left sentence (see the
+            // known failure of the zero width non-joiner in test/bidi.spec.mjs)
+            const { lam, alef, lam_alef: lamAlef } = glyphIndexes;
+            const lamInitial = glyphIndexes['lam.init'];
+            const contextLookup = {
+                lookupType: 5,
+                lookupFlag: 0,
+                subtables: [{
+                    substFormat: 3,
+                    coverages: createCoverages([lam]),
+                    lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 0 }, { sequenceIndex: 0, lookupListIndex: 1 }]
+                }]
+            };
+            const lookups = [createSingleLookup([lam], [lamInitial]), createLigatureLookup(lamInitial, [alef], lamAlef), contextLookup];
+            const shapeInFeature = featureTag => createLookupFlagsFont({ gsub: createLayoutTable('arab', featureTag, [2], lookups) })
+                .stringToGlyphIndexes('\u{644}\u{200D}\u{627}', { features: { [featureTag]: true } });
+            assert.deepStrictEqual(shapeInFeature('calt').sort((indexA, indexB) => indexA - indexB), [alef, lamInitial]);
+            assert.deepStrictEqual(shapeInFeature('ss01'), [lamAlef]);
         });
     });
 });

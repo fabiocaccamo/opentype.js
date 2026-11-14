@@ -503,8 +503,22 @@ Tokenizer.prototype.runContextCheck = function(contextParams) {
     }
 };
 
+// the char a lone surrogate becomes, like the replacement code point of a buffer of HarfBuzz (hb_buffer_add_utf16)
+const REPLACEMENT_CHARACTER = '\u{FFFD}';
+
 /**
- * The characters of a text, a code point each, with the UTF-16 offset of each one in the text (its cluster)
+ * Check if a char of a text is a lone surrogate, a high or a low surrogate that is not part of a surrogate pair
+ * @param {string} char a single char of the iteration of a string
+ * @returns {boolean}
+ */
+function isLoneSurrogate(char) {
+    const codeUnit = char.charCodeAt(0);
+    return char.length === 1 && codeUnit >= 0xD800 && codeUnit <= 0xDFFF;
+}
+
+/**
+ * The characters of a text, a code point each, with the UTF-16 offset of each one in the text (its cluster). Like
+ * HarfBuzz (hb_buffer_add_utf16), a lone surrogate is U+FFFD REPLACEMENT CHARACTER, with the offset of its code unit.
  * @param {string} text
  * @returns {Array<{char: string, cluster: number}>}
  */
@@ -512,7 +526,7 @@ function getTextCharacters(text) {
     const characters = [];
     let cluster = 0;
     for (const char of text) {
-        characters.push({ char, cluster });
+        characters.push({ char: isLoneSurrogate(char) ? REPLACEMENT_CHARACTER : char, cluster });
         cluster += char.length;
     }
     return characters;

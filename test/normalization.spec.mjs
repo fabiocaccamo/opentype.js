@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import { parse } from '../src/opentype.mjs';
 import { normalizeCharacters } from '../src/normalization.mjs';
 import { getTextCharacters } from '../src/tokenizer.mjs';
-import { SPACE_TYPES } from '../src/char.mjs';
+import { DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from '../src/char.mjs';
 import { HarfBuzzShaper } from '../src/layout.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
 
@@ -28,6 +28,7 @@ import { itFailsUntilFixed } from './regression/helpers.mjs';
 // the default shaper, and --trace (the buffer of 'start table GSUB') for the Indic and Khmer shapers, which reorder the
 // glyphs after the normalization
 describe('normalization.mjs', function() {
+    const { NOT_IGNORABLE } = DEFAULT_IGNORABLE_TYPES;
     let font;
 
     before(function() {
@@ -318,9 +319,9 @@ describe('normalization.mjs', function() {
         it('gives the characters after the normalization, with their modified combining classes', function() {
             // U+00C0 decomposed, the shadda (27 for HarfBuzz) moved before its grave (230): -u 00C0,0651: [2=0|26=0|13=0]
             assert.deepStrictEqual(normalizeCharacters(font, getTextCharacters('\u{C0}\u{651}'), HarfBuzzShaper.DEFAULT, false), [
-                { char: 'A', cluster: 0, glyphIndex: 2, spaceFallbackType: SPACE_TYPES.NOT_SPACE, combiningClass: 0 },
-                { char: '\u{651}', cluster: 0, glyphIndex: 26, spaceFallbackType: SPACE_TYPES.NOT_SPACE, combiningClass: 27 },
-                { char: '\u{300}', cluster: 0, glyphIndex: 13, spaceFallbackType: SPACE_TYPES.NOT_SPACE, combiningClass: 230 }
+                { char: 'A', cluster: 0, glyphIndex: 2, spaceFallbackType: SPACE_TYPES.NOT_SPACE, combiningClass: 0, defaultIgnorableType: NOT_IGNORABLE },
+                { char: '\u{651}', cluster: 0, glyphIndex: 26, spaceFallbackType: SPACE_TYPES.NOT_SPACE, combiningClass: 27, defaultIgnorableType: NOT_IGNORABLE },
+                { char: '\u{300}', cluster: 0, glyphIndex: 13, spaceFallbackType: SPACE_TYPES.NOT_SPACE, combiningClass: 230, defaultIgnorableType: NOT_IGNORABLE }
             ]);
         });
 
@@ -521,5 +522,56 @@ describe('normalization.mjs', function() {
                 // -u 1100,1161: [51=0]
                 assert.deepStrictEqual(normalize('\u{1100}\u{1161}', HarfBuzzShaper.HANGUL), [[51, 0]]);
             });
+    });
+
+    describe('normalizeCharacters, the variation selectors and the default ignorables', function() {
+        // TestDefaultIgnorables.ttf, built by test/generate-default-ignorables-font.py: glyphs 1 space, 2 a, 3 b, 9
+        // acutecomb, 16 a.alt; its cmap format 14 has b U+FE00 (default), a U+FE01 (a.alt) and a U+180B (a.fvs, 17).
+        // The references are the glyphs and the clusters of hb-shape after GSUB, which change no glyph of these texts,
+        // run in test/fonts: hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --no-positions --remove-default-ignorables
+        // TestDefaultIgnorables.ttf -u <code points> (the selectors that stay are removed, see hb_ot_hide_default_ignorables)
+        const { NOT_IGNORABLE, IGNORABLE, HIDDEN } = DEFAULT_IGNORABLE_TYPES;
+        let ignorablesFont;
+
+        before(function() {
+            ignorablesFont = parse(readFileSync('./test/fonts/TestDefaultIgnorables.ttf'));
+        });
+
+        function normalizeIgnorables(text) {
+            return normalizeCharacters(ignorablesFont, getTextCharacters(text), HarfBuzzShaper.DEFAULT, false)
+                .map(character => [character.glyphIndex, character.cluster, character.defaultIgnorableType]);
+        }
+
+        it('maps a character and a variation selector to the glyph of their variation sequence, the selector consumed in its cluster', function() {
+            // a default sequence, the glyph of b: -u 0062,FE00: [3=0]; a non default sequence: -u 0061,FE01: [16=0]
+            assert.deepStrictEqual(normalizeIgnorables('b\u{FE00}'), [[3, 0, NOT_IGNORABLE]]);
+            assert.deepStrictEqual(normalizeIgnorables('a\u{FE01}'), [[16, 0, NOT_IGNORABLE]]);
+        });
+
+        it('keeps a selector without a sequence for the character before it, and the selectors after a sequence, as default ignorables', function() {
+            // -u 0061,FE02: [2=0], without --remove-default-ignorables [2=0|1=1]; -u 0061,FE01,FE01: [16=0], without it
+            // [16=0|1=2]; -u 0062,FE01: [3=0], a selector that has sequences with other characters only
+            assert.deepStrictEqual(normalizeIgnorables('a\u{FE02}'), [[2, 0, NOT_IGNORABLE], [0, 1, IGNORABLE]]);
+            assert.deepStrictEqual(normalizeIgnorables('a\u{FE01}\u{FE01}'), [[16, 0, NOT_IGNORABLE], [0, 2, IGNORABLE]]);
+            assert.deepStrictEqual(normalizeIgnorables('b\u{FE01}'), [[3, 0, NOT_IGNORABLE], [0, 1, IGNORABLE]]);
+        });
+
+        it('does not read the cmap format 14 for a Mongolian free variation selector, a hidden default ignorable', function() {
+            // is_variation_selector of HarfBuzz leaves out U+180B to U+180D: -u 0061,180B: [2=0], not a.fvs
+            assert.deepStrictEqual(normalizeIgnorables('a\u{180B}'), [[2, 0, NOT_IGNORABLE], [0, 1, HIDDEN]]);
+        });
+
+        it('unhides a combining grapheme joiner that kept no mark from being reordered, like HarfBuzz', function() {
+            // after the reorder round of _hb_ot_shape_normalize (https://github.com/harfbuzz/harfbuzz/issues/554): a U+034F
+            // whose next character has the combining class 0, or a class not lower than the character before it
+            assert.deepStrictEqual(normalizeIgnorables('a\u{34F}b').map(([, , ignorableType]) => ignorableType), [NOT_IGNORABLE, IGNORABLE, NOT_IGNORABLE]);
+            assert.deepStrictEqual(normalizeIgnorables('a\u{301}\u{34F}\u{301}').map(([, , ignorableType]) => ignorableType), [NOT_IGNORABLE, NOT_IGNORABLE, IGNORABLE, NOT_IGNORABLE]);
+            // b (0) after U+0301 (230): the next class 0 unhides it, whatever the class before it
+            assert.deepStrictEqual(normalizeIgnorables('a\u{301}\u{34F}b').map(([, , ignorableType]) => ignorableType), [NOT_IGNORABLE, NOT_IGNORABLE, IGNORABLE, NOT_IGNORABLE]);
+            // U+0316 (220) after U+0301 (230): the joiner kept it from moving before the acute, it stays hidden
+            assert.deepStrictEqual(normalizeIgnorables('a\u{301}\u{34F}\u{316}').map(([, , ignorableType]) => ignorableType), [NOT_IGNORABLE, NOT_IGNORABLE, HIDDEN, NOT_IGNORABLE]);
+            // nor between two characters, last in the text
+            assert.deepStrictEqual(normalizeIgnorables('a\u{34F}').map(([, , ignorableType]) => ignorableType), [NOT_IGNORABLE, HIDDEN]);
+        });
     });
 });

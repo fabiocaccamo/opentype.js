@@ -10,7 +10,7 @@ import {
     areMarksOfSameGlyph,
     positionGlyphRun
 } from '../src/position.mjs';
-import { SPACE_TYPES } from '../src/char.mjs';
+import { DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from '../src/char.mjs';
 import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
 import { replaceTextGlyphs } from './testutil.mjs';
 import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
@@ -933,6 +933,190 @@ describe('position.mjs', function() {
         });
     });
 
+    describe('positionGlyphRun, the default ignorables', function() {
+        // TestDefaultIgnorables.ttf (see test/generate-default-ignorables-font.py): 0 .notdef (500), 2 a, 3 b, 9 acutecomb;
+        // kern: pos a b -50; mark: acutecomb on a. The glyph of a default ignorable is the one of the cmap, .notdef for
+        // U+200C and U+200D, until Font.shape hides it with the space glyph after GPOS (hb_ot_hide_default_ignorables):
+        // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 [--remove-default-ignorables] TestDefaultIgnorables.ttf
+        const { NOT_IGNORABLE, ZERO_WIDTH_NON_JOINER, ZERO_WIDTH_JOINER } = DEFAULT_IGNORABLE_TYPES;
+        let ignorablesFont;
+
+        before(function() {
+            ignorablesFont = loadFont('../TestDefaultIgnorables.ttf');
+        });
+
+        it('kerns a pair across a default ignorable, whose advance and offsets are set to 0', function() {
+            // -u 0061,200C,0062: [2=0+450|1=1+0|3=2+500]
+            const defaultIgnorableTypes = [NOT_IGNORABLE, ZERO_WIDTH_NON_JOINER, NOT_IGNORABLE];
+            assert.strictEqual(positionGlyphs(ignorablesFont, [2, 0, 3], { defaultIgnorableTypes }), '2+450|0+0|3+500');
+        });
+
+        it('searches the second glyph of a pair only from a glyph the subtable covers, like HarfBuzz', function() {
+            // -u 0062,200C (64 times),0061,0062: [3=0+500|1=1+0|...|1=64+0|2=65+450|3=66+500]; like PairPosFormat1::apply of
+            // HarfBuzz, the b and the zero width non-joiners, which the kern subtable does not cover, start no search for
+            // the second glyph, so that the a after them is read as often whatever the length of the run
+            const positionCountingFirstLetterReads = ignorableCount => {
+                const glyphs = [3].concat(new Array(ignorableCount).fill(0), [2, 3]);
+                const defaultIgnorableTypes = [NOT_IGNORABLE].concat(
+                    new Array(ignorableCount).fill(ZERO_WIDTH_NON_JOINER), [NOT_IGNORABLE, NOT_IGNORABLE]
+                );
+                const letterKey = String(ignorableCount + 1);
+                let letterReads = 0;
+                const countingGlyphs = new Proxy(glyphs, {
+                    get(target, property, receiver) {
+                        if (property === letterKey) {
+                            letterReads++;
+                        }
+                        return Reflect.get(target, property, receiver);
+                    }
+                });
+                const positions = positionGlyphs(ignorablesFont, countingGlyphs, { defaultIgnorableTypes });
+                return { positions, letterReads };
+            };
+            const shortRun = positionCountingFirstLetterReads(1);
+            const longRun = positionCountingFirstLetterReads(64);
+            assert.strictEqual(longRun.positions, ['3+500'].concat(new Array(64).fill('0+0'), ['2+450', '3+500']).join('|'));
+            assert.strictEqual(longRun.letterReads, shortRun.letterReads);
+        });
+
+        it('sets the advance and the offsets of a default ignorable that a lookup moved to 0, like HarfBuzz', function() {
+            // TestDefaultIgnorables.ttf with the GPOS of lookup KERN { pos a b -50; } KERN; lookup MOVE { pos uni00AD <20 30 40
+            // 0>; } MOVE; feature kern { lookup KERN; lookup MOVE; } kern; (fontTools feaLib), saved as moved.ttf:
+            // -u 0061,00AD,0062 [2=0+450|1=1+0|3=2+500], the soft hyphen without its adjustment
+            const movedFont = loadFont('../TestDefaultIgnorables.ttf');
+            const gpos = movedFont.tables.gpos;
+            const softHyphen = movedFont.charToGlyphIndex('\u{AD}');
+            gpos.lookups.push({
+                lookupType: 1,
+                lookupFlag: 0,
+                subtables: [{ posFormat: 1, coverage: { format: 1, glyphs: [softHyphen] }, valueFormat: 7, value: { xPlacement: 20, yPlacement: 30, xAdvance: 40 } }]
+            });
+            const kernFeature = gpos.features.find(featureRecord => featureRecord.tag === 'kern').feature;
+            kernFeature.lookupListIndexes = kernFeature.lookupListIndexes.concat([gpos.lookups.length - 1]);
+            const { IGNORABLE } = DEFAULT_IGNORABLE_TYPES;
+            const defaultIgnorableTypes = [NOT_IGNORABLE, IGNORABLE, NOT_IGNORABLE];
+            assert.strictEqual(positionGlyphs(movedFont, [2, softHyphen, 3], { defaultIgnorableTypes }), `2+450|${softHyphen}+0|3+500`);
+        });
+
+        it('keeps the positions of the default ignorables that are removed, like HarfBuzz', function() {
+            // --remove-default-ignorables -u 0061,200C,0301: [2=0+500|9=2@-750,0+0], the mark moved back over the advance of
+            // the .notdef of the zero width non-joiner, which Font.shape then removes
+            const defaultIgnorableTypes = [NOT_IGNORABLE, ZERO_WIDTH_NON_JOINER, NOT_IGNORABLE];
+            assert.strictEqual(
+                positionGlyphs(ignorablesFont, [2, 0, 9], { defaultIgnorableTypes, removesDefaultIgnorables: true }), '2+500|0+500|9@-750,0+0'
+            );
+            // -u 0061,200C,0301: [2=0+500|1=1+0|9=2@-250,0+0]
+            assert.strictEqual(positionGlyphs(ignorablesFont, [2, 0, 9], { defaultIgnorableTypes }), '2+500|0+0|9@-250,0+0');
+        });
+
+        it('attaches a mark across a zero width joiner with the lookups of the features that skip it only', function() {
+            // -u 0061,200D,0301: [2=0+500|1=1+0|9=2+0], mark skips no zero width joiner (F_MANUAL_ZWJ); the mark-to-base lookup
+            // also in kern (fontTools), which skips it, attaches the acute when mark is off, --features=-mark:
+            // [2=0+500|1=1+0|9=2@-250,0+0], not when both features have it: [2=0+500|1=1+0|9=2+0]
+            const defaultIgnorableTypes = [NOT_IGNORABLE, ZERO_WIDTH_JOINER, NOT_IGNORABLE];
+            assert.strictEqual(positionGlyphs(ignorablesFont, [2, 0, 9], { defaultIgnorableTypes }), '2+500|0+0|9+0');
+            const kernMarkFont = loadFont('../TestDefaultIgnorables.ttf');
+            const features = kernMarkFont.tables.gpos.features;
+            const markLookupIndexes = features.find(featureRecord => featureRecord.tag === 'mark').feature.lookupListIndexes;
+            const kernFeature = features.find(featureRecord => featureRecord.tag === 'kern').feature;
+            kernFeature.lookupListIndexes = kernFeature.lookupListIndexes.concat(markLookupIndexes);
+            assert.strictEqual(
+                positionGlyphs(kernMarkFont, [2, 0, 9], { defaultIgnorableTypes, featureTags: ['kern'] }), '2+500|0+0|9@-250,0+0'
+            );
+            assert.strictEqual(positionGlyphs(kernMarkFont, [2, 0, 9], { defaultIgnorableTypes, featureTags: ['kern', 'mark'] }), '2+500|0+0|9+0');
+        });
+
+        it('attaches a mark with each mark-to-base lookup of a run by its own joiner flags', function() {
+            // TestDefaultIgnorables.ttf with a copy of the mark-to-base lookup of mark appended to the LookupList and to kern
+            // (fontTools), saved as two-mark-lookups.ttf: -u 0061,200D,0301 [2=0+500|1=1+0|9=2@-250,0+0], the lookup of mark
+            // does not skip the zero width joiner (F_MANUAL_ZWJ), the copy in kern then does
+            const twoLookupsFont = loadFont('../TestDefaultIgnorables.ttf');
+            const gpos = twoLookupsFont.tables.gpos;
+            const markLookupIndexes = gpos.features.find(featureRecord => featureRecord.tag === 'mark').feature.lookupListIndexes;
+            const kernFeature = gpos.features.find(featureRecord => featureRecord.tag === 'kern').feature;
+            gpos.lookups.push(Object.assign({}, gpos.lookups[markLookupIndexes[0]]));
+            kernFeature.lookupListIndexes = kernFeature.lookupListIndexes.concat([gpos.lookups.length - 1]);
+            const defaultIgnorableTypes = [NOT_IGNORABLE, ZERO_WIDTH_JOINER, NOT_IGNORABLE];
+            assert.strictEqual(
+                positionGlyphs(twoLookupsFont, [2, 0, 9], { defaultIgnorableTypes, featureTags: ['kern', 'mark'] }), '2+500|0+0|9@-250,0+0'
+            );
+        });
+
+        it('skips the zero width joiner in the lookups of the required feature whatever its tag, like HarfBuzz', function() {
+            // TestDefaultIgnorables.ttf with its kern feature tagged mark (fontTools), saved as gpos-kern-as-mark.ttf:
+            // --features=-liga -u 0061,200D,0062 [2=0+500|1=1+0|3=2+500], the pair of mark does not skip the zero width joiner
+            // (F_MANUAL_ZWJ); the same feature made the ReqFeatureIndex of each language system and taken out of its
+            // FeatureIndex, saved as gpos-required-mark.ttf: [2=0+450|1=1+0|3=2+500], hb_ot_map_builder_t::compile adds the
+            // lookups of the required feature with auto_zwnj and auto_zwj
+            const defaultIgnorableTypes = [NOT_IGNORABLE, ZERO_WIDTH_JOINER, NOT_IGNORABLE];
+            const loadKernAsMarkFont = () => {
+                const font = loadFont('../TestDefaultIgnorables.ttf');
+                const kernFeatureIndex = font.tables.gpos.features.findIndex(featureRecord => featureRecord.tag === 'kern');
+                font.tables.gpos.features[kernFeatureIndex].tag = 'mark';
+                return { font, kernFeatureIndex };
+            };
+            const enabledMark = loadKernAsMarkFont();
+            assert.strictEqual(positionGlyphs(enabledMark.font, [2, 0, 3], { defaultIgnorableTypes }), '2+500|0+0|3+500');
+            const requiredMark = loadKernAsMarkFont();
+            for (const scriptRecord of requiredMark.font.tables.gpos.scripts) {
+                const defaultLangSys = scriptRecord.script.defaultLangSys;
+                defaultLangSys.reqFeatureIndex = requiredMark.kernFeatureIndex;
+                defaultLangSys.featureIndexes = defaultLangSys.featureIndexes.filter(featureIndex => featureIndex !== requiredMark.kernFeatureIndex);
+            }
+            assert.strictEqual(positionGlyphs(requiredMark.font, [2, 0, 3], { defaultIgnorableTypes }), '2+450|0+0|3+500');
+        });
+
+        it('kerns the pairs of the kern table across a default ignorable, from it only at the start of the run, like HarfBuzz', function() {
+            // TestDefaultIgnorables.ttf without GPOS, with the kern table a b -50, uni00AD b -100 (fontTools), saved as
+            // ignorables-kern-table.ttf: -u 0061,00AD,0062 [2=0+475|1=1+0|3=2@-25,0+475], no pair from the soft hyphen, the
+            // same with U+034F; -u 00AD,0062 [1=0+0|3=1@-50,0+450], the pair of the first glyph of the run
+            const kernTableFont = loadFont('../TestDefaultIgnorables.ttf');
+            kernTableFont.tables.gpos = undefined;
+            kernTableFont.kerningPairs = { '2,3': -50, '7,3': -100 };
+            for (const text of ['a\u{AD}b', 'a\u{34F}b']) {
+                assertShape(shapeText(kernTableFont, text), {
+                    glyphs: [2, 1, 3], clusters: [0, 1, 2], advances: [475, 0, 475], offsets: [[0, 0], [0, 0], [-25, 0]]
+                }, text);
+            }
+            assertShape(shapeText(kernTableFont, '\u{AD}b'), { glyphs: [1, 3], clusters: [0, 1], advances: [0, 450], offsets: [[0, 0], [-50, 0]] });
+        });
+    });
+
+    describe('the default ignorables in a right-to-left run', function() {
+        // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 [--remove-default-ignorables] <font> -u <code points>
+        const sentenceReason = 'arabicSentenceEndCheck (src/features/arab/contextCheck/arabicSentence.mjs): a default ignorable ' +
+            'ends the arabic sentence, so the letters around it are laid out in two right-to-left runs, from left to right, each ' +
+            'one positioned and its default ignorables removed on its own (point 26, the bidi algorithm)';
+        let arabicFont;
+        let ignorablesFont;
+
+        before(function() {
+            arabicFont = loadFont('../Scheherazade-Bold.ttf');
+            ignorablesFont = loadFont('../TestDefaultIgnorables.ttf');
+        });
+
+        itFailsUntilFixed('attaches a haraka after a soft hyphen to the letter before it, like HarfBuzz', sentenceReason, function() {
+            // Scheherazade-Bold.ttf -u 0628,00AD,064E: [1075=2@619,-380+0|3=1+0|373=0+1505], the same with U+034F and U+FE00
+            assertShape(shapeText(arabicFont, '\u{628}\u{AD}\u{64E}'), {
+                glyphs: [1075, 3, 373], clusters: [2, 1, 0], advances: [0, 0, 1505], offsets: [[619, -380], [0, 0], [0, 0]]
+            });
+        });
+
+        itFailsUntilFixed('kerns a pair across a soft hyphen, like HarfBuzz', sentenceReason, function() {
+            // Scheherazade-Bold.ttf -u 0644,00AD,0627: [1341=2+564|3=1+0|1330=0@-51,0+451]
+            assertShape(shapeText(arabicFont, '\u{644}\u{AD}\u{627}'), {
+                glyphs: [1341, 3, 1330], clusters: [2, 1, 0], advances: [564, 0, 451], offsets: [[0, 0], [0, 0], [-51, 0]]
+            });
+        });
+
+        itFailsUntilFixed('merges the cluster of a removed word joiner into the letter on its left, like HarfBuzz', sentenceReason, function() {
+            // TestDefaultIgnorables.ttf --remove-default-ignorables -u 0627,2060,0627: [10=1+300|10=0+300]
+            assertShape(shapeText(ignorablesFont, '\u{627}\u{2060}\u{627}', { removeDefaultIgnorables: true }), {
+                glyphs: [10, 10], clusters: [1, 0], ends: [3, 1], advances: [300, 300]
+            });
+        });
+    });
+
     describe('getMarkAdvanceZeroing', function() {
         // TestMarkAttachment.ttf (a mark with an advance of 100, ss01 adds 40 to it) with the script record DFLT of GSUB
         // renamed to the tag of the script (fontTools), -u 0061,0323 --features=+ss01: the advance of the mark is 0 after
@@ -1184,18 +1368,37 @@ describe('position.mjs', function() {
             assert.strictEqual(positionMarkText('a\u{301}', { featureTags: ['ss14'] }), '2+500|10+0');
         });
 
-        itFailsUntilFixed('attaches a mark after a default ignorable to the base before it, like HarfBuzz',
-            'getMarkBaseIndexes (src/position.mjs): the glyph of the soft hyphen U+00AD, which the font has not, is the base ' +
-            'of the acute, .notdef drawn with its advance, which MARK_TO_BASE does not cover, so the acute is not attached; ' +
-            'HarfBuzz skips the default ignorables but U+200D when it looks for the base of a mark and hides them with the ' +
-            'space glyph and an advance of 0 (hb_ot_hide_default_ignorables)',
-            function() {
-                // -u 0061,00AD,0301: [2=0+500|1=1+0|10=2@-250,20+0], the acute on the a, the same with U+200C and U+034F;
-                // -u 0061,200D,0301: [2=0+500|1=1+0|10=2+0], the acute not attached
-                assertShape(shapeText(markFont, 'a\u{AD}\u{301}'), {
-                    glyphs: [2, 1, 10], clusters: [0, 1, 2], advances: [500, 0, 0], offsets: [[0, 0], [0, 0], [-250, 20]]
-                });
+        it('attaches a mark after a default ignorable to the base before it, like HarfBuzz', function() {
+            // -u 0061,00AD,0301: [2=0+500|1=1+0|10=2@-250,20+0], the acute on the a, the same with U+200C and U+034F;
+            // -u 0061,200D,0301: [2=0+500|1=1+0|10=2+0], the acute not attached
+            assertShape(shapeText(markFont, 'a\u{AD}\u{301}'), {
+                glyphs: [2, 1, 10], clusters: [0, 1, 2], advances: [500, 0, 0], offsets: [[0, 0], [0, 0], [-250, 20]]
             });
+        });
+
+        it('joins a cursive attachment across a default ignorable, like HarfBuzz', function() {
+            // -u 0078,00AD,0079: [6=0+450|1=1+0|7=2@-30,100+470], the same with U+200C and U+200D, which curs skips;
+            // -u 0078,0079: [6=0+450|7=1@-30,100+470]
+            for (const text of ['x\u{AD}y', 'x\u{200C}y', 'x\u{200D}y']) {
+                assertShape(shapeText(markFont, text), {
+                    glyphs: [6, 1, 7], clusters: [0, 1, 2], advances: [450, 0, 470], offsets: [[0, 0], [0, 0], [-30, 100]]
+                }, text);
+            }
+        });
+
+        it('attaches a mark to the mark before it across a default ignorable but the zero width joiner, like HarfBuzz', function() {
+            // -u 0061,0301,00AD,0301: [2=0+500|10=1@-250,20+0|1=2+0|10=3@-250,270+0], the second acute on the first one, the
+            // same with U+200C; -u 0061,0301,200D,0301: [2=0+500|10=1@-250,20+0|1=2+0|10=3+0], mkmk does not skip it
+            // (F_MANUAL_ZWJ), nor mark
+            for (const text of ['a\u{301}\u{AD}\u{301}', 'a\u{301}\u{200C}\u{301}']) {
+                assertShape(shapeText(markFont, text), {
+                    glyphs: [2, 10, 1, 10], clusters: [0, 1, 2, 3], advances: [500, 0, 0, 0], offsets: [[0, 0], [-250, 20], [0, 0], [-250, 270]]
+                }, text);
+            }
+            assertShape(shapeText(markFont, 'a\u{301}\u{200D}\u{301}'), {
+                glyphs: [2, 10, 1, 10], clusters: [0, 1, 2, 3], advances: [500, 0, 0, 0], offsets: [[0, 0], [-250, 20], [0, 0], [0, 0]]
+            });
+        });
 
         itFailsUntilFixed('attaches the glyph of a spacing character that a mark-to-base lookup ignoring marks covers, without the glyph classes of GDEF, like HarfBuzz',
             'isMarkIgnoredWithoutGlyphClasses (src/layout.mjs): every glyph the subtable covers is taken as a mark, where HarfBuzz ' +
@@ -2037,18 +2240,13 @@ describe('position.mjs', function() {
             assert.strictEqual(positionContextualText('a\u{301}', 'cv05'), '5+500|14+0');
         });
 
-        itFailsUntilFixed('matches the context of a contextual positioning across a default ignorable, like HarfBuzz',
-            'getNotIgnoredGlyphPositions (src/layout.mjs): the soft hyphen U+00AD, which the font has not, is .notdef in the ' +
-            'input of the rule T a\' b\' x, which then does not match, drawn with its advance; HarfBuzz skips the default ' +
-            'ignorables when it matches the backtrack, the input and the lookahead of a contextual rule, and hides them with ' +
-            'the space glyph and an advance of 0 (hb_ot_hide_default_ignorables)',
-            function() {
-                // pos T a' lookup TIGHTEN b' x; --features=-kern,+ss04 -u 0054,0061,00AD,0062,0078:
-                // [3=0+600|5=1+460|1=2+0|6=3+500|13=4+500], the a tightened as without the soft hyphen
-                assertShape(shapeText(contextualFont, 'Ta\u{AD}bx', { features: { kern: false, ss04: true } }), {
-                    glyphs: [3, 5, 1, 6, 13], clusters: [0, 1, 2, 3, 4], advances: [600, 460, 0, 500, 500]
-                });
+        it('matches the context of a contextual positioning across a default ignorable, like HarfBuzz', function() {
+            // pos T a' lookup TIGHTEN b' x; --features=-kern,+ss04 -u 0054,0061,00AD,0062,0078:
+            // [3=0+600|5=1+460|1=2+0|6=3+500|13=4+500], the a tightened as without the soft hyphen
+            assertShape(shapeText(contextualFont, 'Ta\u{AD}bx', { features: { kern: false, ss04: true } }), {
+                glyphs: [3, 5, 1, 6, 13], clusters: [0, 1, 2, 3, 4], advances: [600, 460, 0, 500, 500]
             });
+        });
     });
 
     describe('the contextual positionings with lookup records past the LookupList', function() {

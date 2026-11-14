@@ -13,11 +13,11 @@ import { LayerManager } from './layers.mjs';
 import { SVGImageManager } from './svgimages.mjs';
 import { VariationManager } from './variation.mjs';
 import HintingTrueType from './hintingtt.mjs';
-import Bidi, { getScriptRunShaper } from './bidi.mjs';
+import Bidi, { getScriptRunShaper, getClusterRanges } from './bidi.mjs';
 import {
     ARABIC_FORM_TAGS, getEnabledFeatureTags, getDirectionFeatureTags, isDefaultFeatureInMap
 } from './features/featureValues.mjs';
-import { getCharTextScript, SPACE_TYPES } from './char.mjs';
+import { getCharTextScript, DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from './char.mjs';
 import { normalizeCharacters } from './normalization.mjs';
 import {
     getOpenTypeScriptTags, getChosenScriptTag, getHarfBuzzShaper, memoizeByScriptTags, selectScriptTag
@@ -245,12 +245,15 @@ Font.prototype.updateFeatures = function (options) {
  * Note that there is no strict one-to-one mapping between characters and
  * glyphs, so the list of returned glyph indexes can be larger or smaller than the
  * length of the given string.
+ * The indexes are the ones of the glyphs of stringToGlyphs(), the default ignorables hidden with the index of the
+ * glyph of U+0020 SPACE or removed as described there; no glyph is loaded (see the lowMemory option of parse).
  * @param  {string}
  * @param  {GlyphRenderOptions} [options]
  * @return {number[]}
  */
 Font.prototype.stringToGlyphIndexes = function(s, options) {
-    return this._createBidi(options).getTextGlyphs(s);
+    const glyphClusters = this._createBidi(options).getTextGlyphClusters(s);
+    return hideDefaultIgnorables(this, glyphClusters, s.length, options).map(glyphCluster => glyphCluster.index);
 };
 
 /**
@@ -310,30 +313,40 @@ Font.prototype._createBidi = function(options) {
  * (its cluster), like the clusters of HarfBuzz (cluster level 1): a ligature represents all its component
  * characters, and the glyphs between its components (e.g. the marks its lookup skips) are in its cluster; each
  * glyph of a multiple substitution represents the characters of the glyph it replaces; a character represented
- * by no glyph of its own (e.g. a variation selector) belongs to the cluster of the glyph before it. Like the
- * normalization of HarfBuzz (see stringToGlyphs): the characters a character is decomposed into are in its cluster, a
- * base and the mark composed with it are one cluster, and a mark put before other marks is in one cluster with them.
- * The glyphs are the ones (and in the same order) returned by stringToGlyphs().
+ * by no glyph of its own (e.g. the variation selector of a variation sequence of the cmap) belongs to the cluster of
+ * the glyph before it. Like the normalization of HarfBuzz (see stringToGlyphs): the characters a character is
+ * decomposed into are in its cluster, a base and the mark composed with it are one cluster, and a mark put before other
+ * marks is in one cluster with them. A default ignorable that the space glyph hides has its own cluster (but in a
+ * ligature that skipped it); a removed one merges its cluster like HarfBuzz (see stringToGlyphs).
+ * The glyphs are the ones (and in the same order) returned by stringToGlyphs(), and the ones of Font.shape.
  * @param  {string} s
  * @param  {GlyphRenderOptions} [options]
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number}>} the glyphs, with the UTF-16 range
  * [start, end) of their characters in the text (text.slice(start, end) are the characters of the glyph)
  */
 Font.prototype.stringToGlyphClusters = function(s, options) {
-    return this._stringToDirectionalGlyphClusters(s, options).map(({ glyph, start, end }) => ({ glyph, start, end }));
+    const glyphClusters = this._createBidi(options).getTextGlyphClusters(s);
+    const notdef = this.glyphs.get(0);
+    return hideDefaultIgnorables(this, glyphClusters, s.length, options).map(({ index, start, end }) => ({
+        glyph: this.glyphs.get(index) || notdef,
+        start,
+        end
+    }));
 };
 
 /**
- * Convert the given text to a list of glyph clusters (see stringToGlyphClusters), each one with the direction of
- * its run.
+ * Convert the given text to a list of glyph clusters, each one with the direction of its run, before the default
+ * ignorables are hidden (see hideDefaultIgnorables).
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options]
- * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean, scriptRun: Object,
- * ligatureProperties: Object|undefined, spaceType: number}>} the glyphs in visual order, rightToLeft for the glyphs of
- * a right-to-left run, scriptRun the script run of the glyph, ligatureProperties what the ligature substitutions
- * recorded about the glyph (see Bidi.getTextGlyphClusters), spaceType the space type of the advance of the glyph
- * (see getDefaultGlyphAdvance in position.mjs): like _hb_ot_shape_fallback_spaces of HarfBuzz, the space fallback type
- * of its character (see normalizeCharacters in normalization.mjs), NOT_SPACE for a ligated glyph
+ * @return {Array<{glyph: opentype.Glyph, index: number|null, cluster: number, start: number, end: number,
+ * rightToLeft: boolean, scriptRun: Object, ligatureProperties: Object|undefined, spaceType: number,
+ * defaultIgnorableType: number}>} the glyphs in visual order, with their glyph index (see Bidi.getTextGlyphClusters),
+ * the cluster of their token, rightToLeft for the glyphs of a right-to-left run, scriptRun the script run of the
+ * glyph, ligatureProperties what the ligature substitutions recorded about the glyph, spaceType the space type of the
+ * advance of the glyph (see getDefaultGlyphAdvance in position.mjs): like _hb_ot_shape_fallback_spaces of HarfBuzz, the
+ * space fallback type of its character (see normalizeCharacters in normalization.mjs), NOT_SPACE for a ligated glyph,
+ * and the kind of default ignorable of the glyph (see DEFAULT_IGNORABLE_TYPES in char.mjs)
  * @private
  */
 Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
@@ -341,14 +354,121 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
     const notdef = this.glyphs.get(0);
     return clusters.map(cluster => ({
         glyph: this.glyphs.get(cluster.index) || notdef,
+        index: cluster.index,
+        cluster: cluster.cluster,
         start: cluster.start,
         end: cluster.end,
         rightToLeft: cluster.rightToLeft,
         scriptRun: cluster.scriptRun,
         ligatureProperties: cluster.ligatureProperties,
-        spaceType: cluster.isLigated ? SPACE_TYPES.NOT_SPACE : cluster.spaceFallbackType
+        spaceType: cluster.isLigated ? SPACE_TYPES.NOT_SPACE : cluster.spaceFallbackType,
+        defaultIgnorableType: cluster.defaultIgnorableType
     }));
 };
+
+/**
+ * The glyph index of U+0020 SPACE, the invisible glyph that hides the default ignorables, like
+ * hb_ot_hide_default_ignorables of HarfBuzz; none when the font has not it, or with the removeDefaultIgnorables option
+ * (see GlyphRenderOptions) of the options or else of the defaultRenderOptions of the font, which then removes them
+ * @param  {opentype.Font} font
+ * @param  {GlyphRenderOptions} [options]
+ * @return {number|undefined}
+ */
+function getInvisibleGlyphIndex(font, options) {
+    if (Object.assign({}, font.defaultRenderOptions, options).removeDefaultIgnorables) {
+        return undefined;
+    }
+    const spaceGlyphIndex = font.charToGlyphIndex(' ');
+    return spaceGlyphIndex > 0 ? spaceGlyphIndex : undefined;
+}
+
+/**
+ * Remove glyphs of a run and merge their clusters, like delete_glyphs_inplace of HarfBuzz in a buffer: the cluster of a
+ * removed glyph survives when the glyph after it has the same cluster; otherwise, after a kept glyph of a larger
+ * cluster (in a right-to-left run), that glyph and the kept glyphs of its cluster before it take the cluster of the
+ * removed glyph, and before the first kept glyph of the run, the glyphs after it of its cluster or of the cluster of
+ * the next glyph take the smallest of the two clusters (merge_clusters). A cluster that no kept glyph has any more
+ * joins the cluster before it in the text (see getClusterRanges in bidi.mjs).
+ * @param  {Array<{cluster: number}>} glyphClusters - the glyphs of the run, in visual order
+ * @param  {function(Object): boolean} isRemoved - whether to remove a glyph
+ * @return {Array<{position: number, cluster: number}>} the position in glyphClusters of each kept glyph, with its
+ * cluster
+ */
+function removeGlyphClusters(glyphClusters, isRemoved) {
+    const clusters = glyphClusters.map(glyphCluster => glyphCluster.cluster);
+    const keptPositions = [];
+    for (let i = 0; i < glyphClusters.length; i++) {
+        if (!isRemoved(glyphClusters[i])) {
+            keptPositions.push(i);
+            continue;
+        }
+        const cluster = clusters[i];
+        if (i + 1 < clusters.length && clusters[i + 1] === cluster) {
+            continue;
+        }
+        if (keptPositions.length) {
+            const previousCluster = clusters[keptPositions[keptPositions.length - 1]];
+            if (cluster < previousCluster) {
+                for (let keptIndex = keptPositions.length - 1; keptIndex >= 0 && clusters[keptPositions[keptIndex]] === previousCluster; keptIndex--) {
+                    clusters[keptPositions[keptIndex]] = cluster;
+                }
+            }
+            continue;
+        }
+        if (i + 1 < clusters.length) {
+            const nextCluster = clusters[i + 1];
+            const mergedCluster = Math.min(cluster, nextCluster);
+            for (let nextPosition = i + 1; nextPosition < clusters.length && clusters[nextPosition] === nextCluster; nextPosition++) {
+                clusters[nextPosition] = mergedCluster;
+            }
+        }
+    }
+    return keptPositions.map(position => ({ position, cluster: clusters[position] }));
+}
+
+/**
+ * Hide the default ignorables of a text after its positioning, like hb_ot_hide_default_ignorables of HarfBuzz (see
+ * DEFAULT_IGNORABLE_TYPES in char.mjs): the glyphs that are still the glyphs of default ignorables (not substituted by
+ * GSUB) become the glyph of U+0020 SPACE in their own cluster, Font.shape having set their positions to 0; without that
+ * glyph, or with the removeDefaultIgnorables option, they are removed, their clusters merged within their run like the
+ * glyphs of a buffer of HarfBuzz (see removeGlyphClusters and getGlyphRuns). A text without default ignorables keeps
+ * its glyphs.
+ * @param  {opentype.Font} font
+ * @param  {Array<{index: number|null, cluster: number, start: number, end: number, rightToLeft: boolean,
+ * scriptRun: Object, defaultIgnorableType: number}>} glyphClusters - in visual order (see Bidi.getTextGlyphClusters)
+ * @param  {number} textLength
+ * @param  {GlyphRenderOptions} [options]
+ * @return {Array<{position: number, index: number|null, start: number, end: number, isHidden: boolean}>} the glyphs
+ * left, in visual order, with their position in glyphClusters, their glyph index, the UTF-16 range of their cluster
+ * and whether they hide a default ignorable with the glyph of U+0020 SPACE
+ */
+function hideDefaultIgnorables(font, glyphClusters, textLength, options) {
+    const isDefaultIgnorable = glyphCluster => glyphCluster.defaultIgnorableType !== DEFAULT_IGNORABLE_TYPES.NOT_IGNORABLE;
+    const toVisibleGlyph = ({ index, start, end }, position) => ({ position, index, start, end, isHidden: false });
+    if (!glyphClusters.some(isDefaultIgnorable)) {
+        return glyphClusters.map(toVisibleGlyph);
+    }
+    const invisibleGlyphIndex = getInvisibleGlyphIndex(font, options);
+    if (invisibleGlyphIndex !== undefined) {
+        return glyphClusters.map((glyphCluster, position) => {
+            const visibleGlyph = toVisibleGlyph(glyphCluster, position);
+            if (!isDefaultIgnorable(glyphCluster)) {
+                return visibleGlyph;
+            }
+            return { ...visibleGlyph, index: invisibleGlyphIndex, isHidden: true };
+        });
+    }
+    const keptClusters = getGlyphRuns(glyphClusters).flatMap(runPositions => {
+        const runGlyphClusters = runPositions.map(position => glyphClusters[position]);
+        return removeGlyphClusters(runGlyphClusters, isDefaultIgnorable)
+            .map(({ position, cluster }) => ({ position: runPositions[position], cluster }));
+    });
+    const clusterRanges = getClusterRanges(keptClusters.map(keptCluster => keptCluster.cluster), textLength);
+    return keptClusters.map(({ position, cluster }) => ({
+        ...toVisibleGlyph(glyphClusters[position], position),
+        ...clusterRanges.get(cluster)
+    }));
+}
 
 /**
  * Convert the given text to a list of Glyph objects.
@@ -372,6 +492,24 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
  * Hebrew shaper composes the Hebrew presentation forms in a font without a mark feature (e.g. U+05E9 and U+05C1 into
  * U+FB2A). Not yet the U+25CC DOTTED CIRCLE of the Indic and USE shapers, nor the decomposition of the Khmer split
  * vowel signs into U+17C1 and themselves of the Khmer shaper (see normalizeCharacters).
+ * Like HarfBuzz, a character followed by a variation selector (U+FE00 to U+FE0F, U+E0100 to U+E01EF) takes the glyph
+ * of their variation sequence in the cmap format 14 before GSUB, the selector consumed in its cluster (the glyph of the
+ * character for a default sequence); a selector without a sequence for the character before it, and the other
+ * selectors after it, stay as default ignorables; a Mongolian free variation selector (U+180B to U+180D) is a default
+ * ignorable the cmap format 14 is never read for, left to the GSUB of the font. A lone surrogate is U+FFFD REPLACEMENT
+ * CHARACTER. Like HarfBuzz, the default ignorables (the Default_Ignorable_Code_Point of Unicode, e.g. U+00AD SOFT
+ * HYPHEN, U+200B to U+200F, U+2060 WORD JOINER, U+FEFF, the variation selectors and the tags, but U+115F, U+1160,
+ * U+3164, U+FFA0 and U+1BCA0 to U+1BCA3) take the glyph of the cmap through GSUB (.notdef without one), whose lookups
+ * skip them when they match the other glyphs of a rule or of a ligature (U+200C ZERO WIDTH NON-JOINER is not skipped in
+ * the input of a rule nor in a ligature, nor in the backtrack and the lookahead of the features of the Indic shaper,
+ * nukt to haln, see INDIC_MANUAL_JOINERS_FEATURE_TAGS in featureValues.mjs; U+200D ZERO WIDTH JOINER is not skipped
+ * in the input of these features, nor of ccmp, locl, the Arabic forms, rlig, calt, liga, clig and mset with the Arabic
+ * shaper, see ARABIC_MANUAL_ZERO_WIDTH_JOINER_FEATURE_TAGS; the hidden ones, U+034F COMBINING GRAPHEME JOINER, the
+ * Mongolian free variation selectors and the tags, are skipped nowhere by GSUB, but a U+034F that keeps no mark from
+ * being reordered, which is skipped like the others), then the ones GSUB did not substitute are hidden with the glyph
+ * of U+0020 SPACE, which Font.shape gives an advance of 0, each one in its own cluster; they are removed in a font
+ * without that glyph, or with the removeDefaultIgnorables option (see GlyphRenderOptions), their clusters merged
+ * within their script run, like hb_ot_hide_default_ignorables of HarfBuzz in a buffer.
  * @param  {string}
  * @param  {GlyphRenderOptions} [options]
  * @return {opentype.Glyph[]}
@@ -566,11 +704,10 @@ function getGlyphRuns(glyphClusters) {
  * @param  {Font} font
  * @param  {GlyphRenderOptions} options
  * @param  {string[]} scriptTags - the OpenType script tags of the run (see getScriptRunShaper)
- * @param  {string|undefined} gsubScriptTag - the script HarfBuzz chose in GSUB for the run (see getChosenScriptTag)
+ * @param  {string} shaper - the shaper of the features of the run (see getScriptRunShaper)
  * @return {string[]}
  */
-function getPositioningFeatureTags(font, options, scriptTags, gsubScriptTag) {
-    const shaper = getScriptRunShaper(scriptTags, gsubScriptTag);
+function getPositioningFeatureTags(font, options, scriptTags, shaper) {
     const shaperFeature = font.defaultRenderOptions.features.find(feature => feature.script === shaper);
     const shaperTags = shaperFeature ? shaperFeature.tags.filter(tag => !ARABIC_FORM_TAGS.includes(tag)) : [];
     const defaultTags = shaperTags.concat(getDirectionFeatureTags(scriptTags), DEFAULT_POSITIONING_FEATURES);
@@ -713,6 +850,13 @@ function getPositioningFeatureTags(font, options, scriptTags, gsubScriptTag) {
  *                                  (not yet the GPOS feature variations, see Font.shape) and the outlines drawn by
  *                                  getPath, getPaths, draw and drawPoints (e.g. `{ wght: 700 }`), the current variation
  *                                  of the font if omitted
+ * @property {boolean} [removeDefaultIgnorables=false] - whether to remove the glyphs of the default ignorables (e.g.
+ *                                                    U+200D ZERO WIDTH JOINER, U+00AD SOFT HYPHEN, a variation selector
+ *                                                    without a variation sequence in the cmap), merging their clusters,
+ *                                                    like the HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES of HarfBuzz
+ *                                                    (hb-shape --remove-default-ignorables), rather than hide them with
+ *                                                    the glyph of U+0020 SPACE and an advance of 0 (see stringToGlyphs and
+ *                                                    Font.shape)
  * @property {boolean} [hinting=false] - whether to apply font hinting to the outlines
  * @property {integer} [usePalette=0] For COLR/CPAL fonts, the zero-based index of the color palette to use. (Use `Font.palettes.get()` to get the available palettes)
  * @property {boolean} [drawLayers=true] For COLR/CPAL fonts, this can be turned to false in order to draw the fallback glyphs instead
@@ -809,21 +953,36 @@ Font.prototype.defaultRenderOptions = {
  * covers it, otherwise to nothing, where HarfBuzz attaches it to the first glyph of the substitution; in a font
  * without a GPOS table (e.g. a font with the kern table only, with or without GDEF), its default, Arabic and Hebrew
  * shapers place each mark over or under its base (its fallback mark positioning), where the mark is drawn at the
- * pen position; the default ignorables (e.g. U+200D ZERO WIDTH JOINER, U+00AD SOFT HYPHEN), which HarfBuzz skips in
- * the GPOS and kern table pairs, in the backtrack, the input and the lookahead of the contextual rules of GPOS and
- * GSUB, and when it looks for the base of a mark, and hides with an advance of 0, are drawn with their glyph (.notdef
- * without one) and their advance, no pair and no contextual rule matches across them, and a mark after one of them but
- * U+200D (e.g. U+00AD, U+200C, U+034F) is not attached to the base before it; the GPOS lookups of the Arabic forms
+ * pen position; the GPOS lookups of the Arabic forms
  * (isol, init, medi, fina), which HarfBuzz applies at the glyphs of each form only, apply only when the features
  * option enables them, then at every glyph like a feature that the user of HarfBuzz enables; the GPOS feature
  * variations (the FeatureVariations of the GPOS table), which HarfBuzz applies like the GSUB ones, are not applied
  * yet: the lookups of a GPOS feature are the ones of its FeatureList record at every variation; nor the GSUB lookups
  * of abvm, blwm, curs, dist, kern (with the kerning option), mark and mkmk, which HarfBuzz looks up in GSUB too.
+ * Like HarfBuzz, the default ignorables (see stringToGlyphs) are skipped in the GPOS pairs, the kern table pairs, the
+ * cursive attachments, the input, the backtrack and the lookahead of the contextual positionings, and when a mark
+ * looks for its base or the mark before it, but U+200D ZERO WIDTH JOINER in the lookups of mark and mkmk (e.g. an acute
+ * after U+00AD or U+200C attaches to the base before it, not after U+200D); after GPOS their advances and offsets are
+ * set to 0 and they are drawn with the glyph of U+0020 SPACE, in their own clusters, removed without that glyph; with
+ * the removeDefaultIgnorables option they are removed and keep their positions until then, like
+ * hb-shape --remove-default-ignorables (the offset of a mark attached across one still has its advance).
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options] - features, kerning, script, language and variation
  * @return {GlyphPosition[]}
  */
 Font.prototype.shape = function(text, options) {
+    return this._shapeGlyphs(text, options).map(shapedGlyph => shapedGlyph.glyphPosition);
+};
+
+/**
+ * Shape a text like Font.shape, with whether each glyph hides a default ignorable with the glyph of U+0020 SPACE (see
+ * hideDefaultIgnorables)
+ * @param  {string} text
+ * @param  {GlyphRenderOptions} [options]
+ * @return {Array<{glyphPosition: GlyphPosition, isHidden: boolean}>}
+ * @private
+ */
+Font.prototype._shapeGlyphs = function(text, options) {
     options = Object.assign({}, this.defaultRenderOptions, options);
     const glyphClusters = this._stringToDirectionalGlyphClusters(text, options);
     const glyphPositions = glyphClusters.map(({ glyph, start, end, spaceType }) => ({
@@ -839,6 +998,7 @@ Font.prototype.shape = function(text, options) {
         const firstCluster = glyphClusters[clusterIndexes[0]];
         const scriptTags = firstCluster.scriptRun.scriptTags;
         const gsubScriptTag = getChosenScriptTag(this.substitution, scriptTags);
+        const shaper = getScriptRunShaper(scriptTags, gsubScriptTag);
         positionGlyphRun(
             this.position,
             clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].glyph.index),
@@ -847,14 +1007,24 @@ Font.prototype.shape = function(text, options) {
                 rightToLeft: firstCluster.rightToLeft,
                 script: selectScriptTag(this.position, scriptTags),
                 language: options.language,
-                featureTags: getPositioningFeatureTags(this, options, scriptTags, gsubScriptTag),
+                featureTags: getPositioningFeatureTags(this, options, scriptTags, shaper),
                 variation: options.variation,
                 markAdvanceZeroing: getMarkAdvanceZeroing(scriptTags, gsubScriptTag),
-                ligatureProperties: clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].ligatureProperties)
+                ligatureProperties: clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].ligatureProperties),
+                shaper,
+                defaultIgnorableTypes: clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].defaultIgnorableType),
+                removesDefaultIgnorables: Boolean(options.removeDefaultIgnorables)
             }
         );
     }
-    return glyphPositions;
+    return hideDefaultIgnorables(this, glyphClusters, text.length, options).map(({ position, index, start, end, isHidden }) => ({
+        glyphPosition: Object.assign(glyphPositions[position], {
+            glyph: isHidden ? this.glyphs.get(index) : glyphPositions[position].glyph,
+            start,
+            end
+        }),
+        isHidden
+    }));
 };
 
 /**
@@ -862,7 +1032,9 @@ Font.prototype.shape = function(text, options) {
  * The callback gets `(glyph, x, y, fontSize, options)`.
  * The glyphs and their positions are the ones of Font.shape: x is the pen position plus the x offset of the glyph,
  * y the baseline minus its y offset (the y axis of the callback goes down, like a canvas), each one scaled to the
- * font size, and the pen moves by the x advance of the glyph and by the letterSpacing or the tracking option.
+ * font size, and the pen moves by the x advance of the glyph and by the letterSpacing or the tracking option, but after
+ * the glyph that hides a default ignorable (see stringToGlyphs), which adds no spacing to the text (e.g. the variation
+ * selector of an emoji presentation sequence without a variation sequence in the cmap).
  * @param {string} text - The text to apply.
  * @param  {number} [x=0] - Horizontal position of the beginning of the text.
  * @param  {number} [y=0] - Vertical position of the *baseline* of the text.
@@ -877,10 +1049,13 @@ Font.prototype.forEachGlyph = function(text, x, y, fontSize, options, callback) 
     fontSize = fontSize !== undefined ? fontSize : 72;
     options = Object.assign({}, this.defaultRenderOptions, options);
     const fontScale = 1 / this.unitsPerEm * fontSize;
-    for (const glyphPosition of this.shape(text, options)) {
+    for (const { glyphPosition, isHidden } of this._shapeGlyphs(text, options)) {
         callback.call(this, glyphPosition.glyph, x + glyphPosition.xOffset * fontScale, y - glyphPosition.yOffset * fontScale, fontSize, options);
         x += glyphPosition.xAdvance * fontScale;
 
+        if (isHidden) {
+            continue;
+        }
         if (options.letterSpacing) {
             x += options.letterSpacing * fontSize;
         } else if (options.tracking) {

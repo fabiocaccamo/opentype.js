@@ -85,13 +85,23 @@ opentype.Font.prototype.charToGlyph = function(c) {};
  * U+E01EF) take the glyphs of the cmap, without decompositions nor these fallbacks, but they can still be composed
  * (e.g. e U+0301 U+FE00 into U+00E9), like HarfBuzz: a space or U+2011 the font has not is drawn with .notdef (e.g.
  * U+00A0 U+0301 U+FE00), and a character followed directly by the selector takes the glyph of its variation sequence
- * after GSUB when cmap 14 has one; a Mongolian free variation selector (U+180B to U+180D, U+180F) keeps the
- * fallbacks, like HarfBuzz. Not yet the decomposition of the Thai sara am, the jamo and syllables of the Hangul
- * shaper of HarfBuzz composed and decomposed by the glyphs of the font, the reorder hook of its Hebrew shaper, the
- * reordering of its Indic, Khmer, Myanmar and USE shapers, the U+25CC DOTTED CIRCLE its Indic and USE shapers insert
- * between an independent vowel and a vowel sign that must not follow it (preprocess_text_vowel_constraints), the
- * decomposition of the Khmer split vowel signs into U+17C1 and themselves of its Khmer shaper, nor the glyph of a
- * variation sequence before GSUB.
+ * in cmap 14 before GSUB, the selector consumed in its cluster; a Mongolian free variation selector (U+180B to
+ * U+180D) keeps the fallbacks and is never looked up in cmap 14, like HarfBuzz. A lone surrogate is U+FFFD. Like
+ * HarfBuzz, the default ignorables (e.g. U+00AD, U+034F, U+200B to U+200F, U+2060, U+FEFF, the variation selectors
+ * without a sequence, the tags) keep the glyph of the cmap (.notdef without one) through GSUB, whose lookups skip
+ * them when they match the other glyphs of a rule or of a ligature (but U+200C in the input of a rule and in a
+ * ligature, and also in the backtrack and the lookahead of the features of the Indic shaper, nukt, akhn, rphf, rkrf,
+ * pref, blwf, abvf, half, pstf, vatu, cjct, init, pres, abvs, blws, psts and haln; U+200D in the input of these
+ * features, and of ccmp, locl, the Arabic forms, rlig, calt, liga, clig and mset with the Arabic shaper; the hidden
+ * ones, U+034F, the Mongolian free variation selectors and the tags, are skipped nowhere by GSUB, but a U+034F that
+ * keeps no mark from being reordered), then the ones GSUB did not substitute are hidden with the glyph of U+0020,
+ * with an advance of 0 in opentype.Font.prototype.shape, in their own clusters, or removed, their clusters merged
+ * within their script run like HarfBuzz, in a font without that glyph or with options.removeDefaultIgnorables. Not
+ * yet the decomposition of the Thai sara am, the jamo and syllables of the Hangul shaper of HarfBuzz composed and
+ * decomposed by the glyphs of the font, the reorder hook of its Hebrew shaper, the reordering of its Indic, Khmer,
+ * Myanmar and USE shapers, the U+25CC DOTTED CIRCLE its Indic and USE shapers insert between an independent vowel and
+ * a vowel sign that must not follow it (preprocess_text_vowel_constraints), nor the decomposition of the Khmer split
+ * vowel signs into U+17C1 and themselves of its Khmer shaper.
  * @param  {string} s
  * @param  {Object=} options
  * @return {opentype.Glyph[]}
@@ -105,7 +115,10 @@ opentype.Font.prototype.stringToGlyphs = function(s, options) {};
  * each glyph of a multiple substitution has the range of the glyph it replaces;
  * the characters a character is decomposed into have its range, a base and the
  * mark composed with it share a range, and so does a mark put before other marks
- * with them (see stringToGlyphs).
+ * with them (see stringToGlyphs); a hidden default ignorable has its own range,
+ * a removed one merges its range with a neighbouring glyph of its script run,
+ * like HarfBuzz (see stringToGlyphs). The glyphs and the ranges are the ones of
+ * opentype.Font.prototype.shape.
  * @param  {string} s
  * @param  {Object=} options
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number}>}
@@ -203,15 +216,17 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
  * is DFLT or latn, or mymr for Myanmar); without a GPOS table the x offset of a mark of a left-to-right run moves
  * back by the advance it loses. Not yet like HarfBuzz: in a font without a GPOS table (e.g. a font with the kern
  * table only, with or without GDEF), its default, Arabic and Hebrew shapers place each mark over or under its base
- * (its fallback mark positioning), where the mark is drawn at the pen position; the default ignorables (e.g. U+200D,
- * U+00AD), which HarfBuzz skips in the GPOS and kern table pairs, in the backtrack, the input and the lookahead of the
- * contextual rules of GPOS and GSUB, and when it looks for the base of a mark, and hides with an advance of 0, are
- * drawn with their glyph and their advance, no pair and no contextual rule matches across them, and a mark after one of
- * them but U+200D (e.g. U+00AD, U+200C, U+034F) is not attached to the base before it; the GPOS lookups of the
- * Arabic forms, which HarfBuzz applies at the glyphs of each form only, apply only when options.features enables
- * them, at every glyph; the GPOS feature variations (the FeatureVariations of the GPOS table) are not applied yet, the
- * lookups of a GPOS feature are the ones of its FeatureList record at every variation; nor the GSUB lookups of abvm,
- * blwm, curs, dist, kern (with options.kerning), mark and mkmk, which HarfBuzz looks up in GSUB too.
+ * (its fallback mark positioning), where the mark is drawn at the pen position; the GPOS lookups of the Arabic
+ * forms, which HarfBuzz applies at the glyphs of each form only, apply only when options.features enables them, at
+ * every glyph; the GPOS feature variations (the FeatureVariations of the GPOS table) are not applied yet, the lookups
+ * of a GPOS feature are the ones of its FeatureList record at every variation; nor the GSUB lookups of abvm, blwm,
+ * curs, dist, kern (with options.kerning), mark and mkmk, which HarfBuzz looks up in GSUB too.
+ * Like HarfBuzz, the default ignorables (see stringToGlyphs) are skipped in the GPOS and kern table pairs, the
+ * cursive attachments, the input, the backtrack and the lookahead of the contextual positionings, and when a mark
+ * looks for its base or the mark before it, but U+200D in the lookups of mark and mkmk; then their advances and
+ * offsets are set to 0 and they are drawn with the glyph of U+0020 in their own clusters, removed without that glyph.
+ * With options.removeDefaultIgnorables they are removed and keep their positions until then, like hb-shape
+ * --remove-default-ignorables (the offset of a mark attached across one still has its advance).
  * @param  {string} text
  * @param  {Object=} options
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number, xAdvance: number, yAdvance: number, xOffset: number, yOffset: number}>}
@@ -223,7 +238,8 @@ opentype.Font.prototype.shape = function(text, options) {};
  * The callback gets `(glyph, x, y, fontSize, options)`.
  * The glyphs and their positions are the ones of opentype.Font.prototype.shape: x is the pen position plus the
  * x offset of the glyph, y the baseline minus its y offset (the y axis of the callback goes down), both scaled
- * to the font size; the pen moves by the x advance of the glyph and by options.letterSpacing or options.tracking.
+ * to the font size; the pen moves by the x advance of the glyph and by options.letterSpacing or options.tracking,
+ * but after a glyph that hides a default ignorable (see opentype.Font.prototype.stringToGlyphs).
  * @param  {string} text
  * @param  {number} x - Horizontal position of the beginning of the text.
  * @param  {number} y - Vertical position of the *baseline* of the text.

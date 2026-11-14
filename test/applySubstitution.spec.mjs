@@ -7,6 +7,7 @@ import applySubstitution, {
     getTokenGlyphIndexes,
     getTokenLigatureProperties,
     getTokenLigatedGlyphs,
+    getTokenDefaultIgnorableType,
     getGlyphSequence,
     applyLookupToTokens,
     getFeaturesLookups,
@@ -28,6 +29,8 @@ import {
     multipleCLookup,
     subAcuteBLookup
 } from './lookup-flags-font.mjs';
+import { AUTO_JOINER_FLAGS } from '../src/layout.mjs';
+import { DEFAULT_IGNORABLE_TYPES } from '../src/char.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
 
 /**
@@ -78,9 +81,23 @@ describe('applySubstitution.mjs', function() {
             tokens[0].setState('calt', [glyphA, acute]);
             tokens[1].setState('deleted', true);
             assert.deepStrictEqual(getGlyphSequence(tokens), {
-                glyphIndexes: [glyphA, acute, glyphC], glyphTokens: [tokens[0], tokens[0], tokens[2]], gdef: undefined,
-                savedTokenStates: new Map()
+                glyphIndexes: [glyphA, acute, glyphC], glyphTokens: [tokens[0], tokens[0], tokens[2]], ignorableTypes: [0, 0, 0],
+                gdef: undefined, savedTokenStates: new Map()
             });
+        });
+
+        it('gives each glyph the kind of default ignorable of its token, until a substitution replaces its glyph', function() {
+            // like _hb_glyph_info_is_default_ignorable of HarfBuzz, false for a glyph of HB_OT_LAYOUT_GLYPH_PROPS_SUBSTITUTED
+            const { NOT_IGNORABLE, ZERO_WIDTH_JOINER } = DEFAULT_IGNORABLE_TYPES;
+            const tokens = tokenize('abc');
+            tokens[1].defaultIgnorableType = ZERO_WIDTH_JOINER;
+            assert.strictEqual(getTokenDefaultIgnorableType(tokens[0]), NOT_IGNORABLE);
+            assert.strictEqual(getTokenDefaultIgnorableType(tokens[1]), ZERO_WIDTH_JOINER);
+            const glyphSequence = getGlyphSequence(tokens);
+            assert.deepStrictEqual(glyphSequence.ignorableTypes, [NOT_IGNORABLE, ZERO_WIDTH_JOINER, NOT_IGNORABLE]);
+            applySubstitution(action(21, [glyphA, acute]), glyphSequence, 1);
+            assert.deepStrictEqual(glyphSequence.ignorableTypes, [NOT_IGNORABLE, NOT_IGNORABLE, NOT_IGNORABLE, NOT_IGNORABLE]);
+            assert.strictEqual(getTokenDefaultIgnorableType(tokens[1]), NOT_IGNORABLE);
         });
 
         it('keeps the GDEF table of the layout, for the glyph classes of the ligature substitutions', function() {
@@ -918,6 +935,31 @@ describe('applySubstitution.mjs', function() {
             assert.deepStrictEqual(tokens.slice(0, 3).map(getTokenLigatedGlyphs), [[], [], []]);
         });
 
+        it('gives a default ignorable that the lookup substituted back its kind of default ignorable', function() {
+            // the glyph c mapped to U+00AD: DOUBLE0 to DOUBLE12 as above, then lookup LAST { sub a by a a a a; sub c by b; }
+            // LAST;, which substitutes the soft hyphen before it grows the glyphs past the maximum. The soft hyphen as it
+            // was before LAST, a default ignorable that the font without a space glyph removes, is the contract of the fork,
+            // not the output of HarfBuzz, which keeps the glyph it replaced in place: hb-shape --shapers=ot
+            // --no-glyph-names --cluster-level=1 overflow.ttf -u 00AD,0061 gives 2=0 and 8192 1=1
+            const { IGNORABLE } = DEFAULT_IGNORABLE_TYPES;
+            const lookups = createDoublingLookups(13).concat([createMultipleLookup([glyphA, glyphC], [[glyphA, glyphA, glyphA, glyphA], [glyphB]])]);
+            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'liga', getLookupIndexes(0, lookups.length), lookups) });
+            const query = new FeatureQuery(font);
+            const tokens = tokenize('ca');
+            tokens[0].defaultIgnorableType = IGNORABLE;
+            query.startScriptRun(['ltra', 'ltrm'], tokens.length);
+            for (const lookupTable of lookups) {
+                applyLookupToTokens(query, lookupTable, 'liga', tokens);
+            }
+            assert.ok(query.isMaxGlyphCountExceeded);
+            assert.deepStrictEqual(describeTokens(tokens.slice(0, 1)), [[[glyphC], 0]]);
+            assert.strictEqual(getTokenDefaultIgnorableType(tokens[0]), IGNORABLE);
+            font.glyphs.get(glyphC).addUnicode(0xAD);
+            const glyphs = font.stringToGlyphIndexes('\u{AD}a');
+            assert.strictEqual(glyphs.length, 8192);
+            assert.ok(glyphs.every(glyph => glyph === glyphA));
+        });
+
         it('gives a token back the ligature properties it had before a ligature of one component of the lookup', function() {
             // a contextual rule applies a ligature of ff alone (a GDEF ligature glyph, given a ligature id, with no cluster
             // to merge), then a multiple substitution past the maximum: DOUBLE0 to DOUBLE12 as above, then lookup CONTEXT {
@@ -1126,11 +1168,11 @@ describe('applySubstitution.mjs', function() {
         it('adds the lookups of the required feature to the lookups of the features, with its tag', function() {
             const query = createRequiredFeatureQuery();
             assert.deepStrictEqual(getFeaturesLookups(query, ['liga'], 'latn', undefined, true), [
-                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false },
-                { lookupTable: lookups[1], tag: 'ss05', isEnabledFeatureLookup: false, isRequiredFeatureLookup: true }
+                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false, joinerFlags: AUTO_JOINER_FLAGS },
+                { lookupTable: lookups[1], tag: 'ss05', isEnabledFeatureLookup: false, isRequiredFeatureLookup: true, joinerFlags: AUTO_JOINER_FLAGS }
             ]);
             assert.deepStrictEqual(getFeaturesLookups(query, ['liga'], 'latn'), [
-                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false }
+                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false, joinerFlags: AUTO_JOINER_FLAGS }
             ]);
         });
 
@@ -1142,9 +1184,32 @@ describe('applySubstitution.mjs', function() {
             gsub.scripts[0].script.defaultLangSys.reqFeatureIndex = 1;
             const query = new FeatureQuery(createLookupFlagsFont({ gsub }));
             assert.deepStrictEqual(getFeaturesLookups(query, ['liga'], 'latn', undefined, true), [
-                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false },
-                { lookupTable: lookups[1], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: true }
+                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false, joinerFlags: AUTO_JOINER_FLAGS },
+                { lookupTable: lookups[1], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: true, joinerFlags: AUTO_JOINER_FLAGS }
             ]);
+        });
+
+        it('skips the joiners in the lookups of the required feature whatever its tag, not in the ones of an enabled feature, like HarfBuzz', function() {
+            // TestDefaultIgnorables.ttf with its liga tagged rlig and made the ReqFeatureIndex of each language system
+            // (fontTools): hb-shape --shapers=ot --no-glyph-names --cluster-level=1 -u 062F,200D,0627, out of the FeatureIndex
+            // [1=0+0|14=0+650], the dal_alef ligature across the zero width joiner (hb_ot_map_builder_t::compile adds the
+            // lookups of the required feature with auto_zwnj and auto_zwj); also in the FeatureIndex [10=2+300|1=1+0|11=0+400],
+            // no ligature: the rlig of the Arabic shaper does not skip it (F_MANUAL_ZWJ)
+            const gsub = createScriptsLayoutTable({ arab: [['rlig', [1]]] }, lookups);
+            gsub.features.push({ tag: 'rlig', feature: { featureParams: 0, lookupListIndexes: [1] } });
+            gsub.scripts[0].script.defaultLangSys.reqFeatureIndex = 1;
+            const query = new FeatureQuery(createLookupFlagsFont({ gsub }));
+            query.startScriptRun(['rtla', 'rtlm'], 3, 'arab');
+            assert.deepStrictEqual(getFeaturesLookups(query, [], 'arab', undefined, true), [
+                { lookupTable: lookups[1], tag: 'rlig', isEnabledFeatureLookup: false, isRequiredFeatureLookup: true, joinerFlags: AUTO_JOINER_FLAGS }
+            ]);
+            assert.deepStrictEqual(getFeaturesLookups(query, ['rlig'], 'arab', undefined, true), [{
+                lookupTable: lookups[1],
+                tag: 'rlig',
+                isEnabledFeatureLookup: true,
+                isRequiredFeatureLookup: true,
+                joinerFlags: { autoZeroWidthNonJoiner: true, autoZeroWidthJoiner: false }
+            }]);
         });
 
         it('applies the lookups of the required feature with rvrn when its tag is not enabled, like HarfBuzz', function() {
@@ -1168,9 +1233,9 @@ describe('applySubstitution.mjs', function() {
             const gsub = createScriptsLayoutTable({ latn: [['ccmp', [2, 1]], ['liga', [1, 0, 1, 9]]] }, lookups);
             const query = new FeatureQuery(createLookupFlagsFont({ gsub }));
             assert.deepStrictEqual(getFeaturesLookups(query, ['ccmp', 'liga', 'calt'], 'latn'), [
-                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false },
-                { lookupTable: lookups[1], tag: 'ccmp', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false },
-                { lookupTable: lookups[2], tag: 'ccmp', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false }
+                { lookupTable: lookups[0], tag: 'liga', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false, joinerFlags: AUTO_JOINER_FLAGS },
+                { lookupTable: lookups[1], tag: 'ccmp', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false, joinerFlags: AUTO_JOINER_FLAGS },
+                { lookupTable: lookups[2], tag: 'ccmp', isEnabledFeatureLookup: true, isRequiredFeatureLookup: false, joinerFlags: AUTO_JOINER_FLAGS }
             ]);
         });
 

@@ -9,6 +9,7 @@ import {
     getTokenGlyphIndexes,
     getTokenLigatureProperties,
     getTokenLigatedGlyphs,
+    getTokenDefaultIgnorableType,
     applyFeaturesToTokens,
     getRequiredFeatureStage,
     REQUIRED_VARIATION_ALTERNATES_TAG
@@ -27,8 +28,6 @@ import arabicSentenceCheck from './features/arab/contextCheck/arabicSentence.mjs
 import arabicPresentationForms from './features/arab/arabicPresentationForms.mjs';
 import latinFeatures from './features/latn/latinFeatures.mjs';
 import thaiFeatures from './features/thai/thaiFeatures.mjs';
-import unicodeVariationSequenceCheck from './features/unicode/contextCheck/variationSequenceCheck.mjs';
-import unicodeVariationSequences from './features/unicode/variationSequences.mjs';
 
 /**
  * Create Bidi. features
@@ -60,11 +59,9 @@ Bidi.prototype.setText = function (text) {
 /**
  * Store essential context checks:
  * arabic sentence check for adjusting arabic layout
- * unicode variation sequence check for applying the variation sequences
  */
 Bidi.prototype.contextChecks = ({
-    arabicSentenceCheck,
-    unicodeVariationSequenceCheck
+    arabicSentenceCheck
 });
 
 /**
@@ -83,7 +80,6 @@ function registerContextChecker(checkId) {
  */
 function tokenizeText() {
     registerContextChecker.call(this, 'arabicSentence');
-    registerContextChecker.call(this, 'unicodeVariationSequence');
     return this.tokenizer.tokenizeCharacters(this.characters);
 }
 
@@ -164,8 +160,8 @@ Bidi.prototype.registerModifier = function (modifierId, condition, modifier) {
 
 /**
  * Register the normalizer of the text, which maps its characters to their glyphs: the characters of each script run
- * become the characters it gives, each one with its glyph, its spaceFallbackType and its cluster, the ones of its
- * token (the glyphIndex state modifier)
+ * become the characters it gives, each one with its glyph, its spaceFallbackType, its defaultIgnorableType and its
+ * cluster, the ones of its token (the glyphIndex state modifier)
  * @param {function} normalizer a function of the characters of a script run, each one with its cluster (see
  * getTextCharacters in tokenizer.mjs), and of the OpenType script tags of the run (see getCharacterScriptRuns), that
  * returns its characters with their glyphs (see normalizeCharacters in normalization.mjs)
@@ -175,6 +171,7 @@ Bidi.prototype.registerNormalizer = function (normalizer) {
     this.registerModifier('glyphIndex', null, (token, contextParams) => {
         const character = this.characters[contextParams.index];
         token.spaceFallbackType = character.spaceFallbackType;
+        token.defaultIgnorableType = character.defaultIgnorableType;
         return character.glyphIndex;
     });
 };
@@ -404,7 +401,7 @@ function applyScriptRunFeatures(run, getRunShaper) {
     const script = selectScriptTag(this.query.font.substitution, run.scriptTags);
     const directionTags = getDirectionFeatureTags(run.scriptTags);
     const tags = getScriptRunFeatureTags.call(this, shaper, directionTags);
-    this.query.startScriptRun(directionTags, run.tokens.length);
+    this.query.startScriptRun(directionTags, run.tokens.length, shaper);
     switch (shaper) {
         case 'arab':
             applyArabicFeatures.call(this, run.tokens, script, tags, directionTags);
@@ -417,14 +414,6 @@ function applyScriptRunFeatures(run, getRunShaper) {
             break;
         default:
             latinFeatures.call(this, run.tokens, script, tags);
-    }
-}
-
-function applyUnicodeVariationSequences() {
-    const ranges = this.tokenizer.getContextRanges('unicodeVariationSequence');
-    for(let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        unicodeVariationSequences.call(this, range);
     }
 }
 
@@ -449,9 +438,6 @@ Bidi.prototype.applyFeaturesToContexts = function () {
     }
     if (this.checkContextReady('arabicSentence')) {
         reverseArabicSentences.call(this);
-    }
-    if (this.checkContextReady('unicodeVariationSequence')) {
-        applyUnicodeVariationSequences.call(this);
     }
 };
 
@@ -507,50 +493,63 @@ function getTokenVisualGlyphs(token) {
 }
 
 /**
- * Get the glyph indexes of the text in visual order: each glyph of a multiple substitution its own (see
- * getTokenVisualGlyphs), none for a deleted token
- * @param {string} text an input text
- * @returns {number[]}
+ * The UTF-16 range of the characters of each cluster of a text, like the monotone clusters of HarfBuzz: a cluster
+ * starts at its value, the UTF-16 offset of its first character, and ends where the next cluster of the text starts,
+ * so the characters of no glyph (e.g. ligature components) belong to the cluster before them in the text, and the
+ * characters before the first cluster to the first cluster
+ * @param {number[]} clusters the clusters of the glyphs of the text, in any order
+ * @param {number} textLength
+ * @returns {Map<number, {start: number, end: number}>} the range of each cluster
  */
-Bidi.prototype.getTextGlyphs = function (text) {
-    this.processText(text);
-    return this.tokenizer.tokens
-        .filter(token => !token.state.deleted)
-        .flatMap(token => getTokenVisualGlyphs.call(this, token).map(glyph => glyph.index));
-};
+function getClusterRanges(clusters, textLength) {
+    const clusterStarts = Array.from(new Set(clusters)).sort((startA, startB) => startA - startB);
+    return new Map(clusterStarts.map((start, index) => [start, {
+        start: index === 0 ? 0 : start,
+        end: index + 1 < clusterStarts.length ? clusterStarts[index + 1] : textLength
+    }]));
+}
 
 /**
  * Get each glyph of the text, with the range of the characters it represents (its cluster), like the
- * monotone clusters of HarfBuzz: a cluster ends where the next cluster of the text
- * starts, so the characters of the deleted tokens (e.g. ligature components, variation selectors) belong to
- * the cluster before them in the text (the first cluster for the ones before it). The glyphs of a multiple
- * substitution have the cluster of their token, a ligature merges the clusters of its components and of the
- * glyphs between them.
+ * monotone clusters of HarfBuzz (see getClusterRanges): the characters of the deleted tokens (e.g. ligature
+ * components, variation selectors of a variation sequence of the cmap) belong to the cluster before them in the text
+ * (the first cluster for the ones before it). The glyphs of a multiple substitution have the cluster of their token, a
+ * ligature merges the clusters of its components and of the glyphs between them.
  * @param {string} text an input text
- * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean, scriptRun: Object,
- * ligatureProperties: LigatureProperties|undefined, isLigated: boolean, spaceFallbackType: number|undefined}>} glyph
- * indexes in visual order (see getTextGlyphs), with the UTF-16 range [start, end) of their characters in the text,
- * whether their run is laid out from right to left (the arabic sentences, in reverse order of the text), the script
- * run of their token, with its OpenType script tags (scriptRun.scriptTags, see getTokenScriptRuns), the ligature
- * properties of the glyph (see getTokenLigatureProperties), whether it is ligated (see getTokenLigatedGlyphs) and the
- * spaceFallbackType of its token, which the glyphIndex modifier sets (see registerNormalizer)
+ * @returns {Array<{index: number, cluster: number, start: number, end: number, rightToLeft: boolean, scriptRun: Object,
+ * ligatureProperties: LigatureProperties|undefined, isLigated: boolean, spaceFallbackType: number|undefined,
+ * defaultIgnorableType: number}>} glyph indexes in visual order, each glyph of a multiple substitution its own and none
+ * for a deleted token (see getTokenVisualGlyphs), with the cluster of their token
+ * and the UTF-16 range [start, end) of its characters in the text, whether their run is laid out from right to left
+ * (the arabic sentences, in reverse order of the text), the script run of their token, with its OpenType script tags
+ * (scriptRun.scriptTags, see getTokenScriptRuns), the ligature properties of the glyph (see
+ * getTokenLigatureProperties), whether it is ligated (see getTokenLigatedGlyphs), the spaceFallbackType of its token,
+ * which the glyphIndex modifier sets (see registerNormalizer), and whether it is the glyph of a default ignorable (see
+ * getTokenDefaultIgnorableType), which Font.shape hides
  */
 Bidi.prototype.getTextGlyphClusters = function (text) {
     this.processText(text);
     const glyphTokens = this.tokenizer.tokens.filter(token => !token.state.deleted);
-    const clusterStarts = Array.from(new Set(glyphTokens.map(token => token.cluster))).sort((startA, startB) => startA - startB);
-    const clusterRanges = new Map(clusterStarts.map((start, index) => [start, {
-        start: index === 0 ? 0 : start,
-        end: index + 1 < clusterStarts.length ? clusterStarts[index + 1] : text.length
-    }]));
+    const clusterRanges = getClusterRanges(glyphTokens.map(token => token.cluster), text.length);
     const clusters = [];
     for (const token of glyphTokens) {
-        const { start, end } = clusterRanges.get(token.cluster);
+        const cluster = token.cluster;
+        const { start, end } = clusterRanges.get(cluster);
         const rightToLeft = this.rightToLeftTokens.has(token);
         const scriptRun = this.tokenScriptRuns.get(token);
+        const defaultIgnorableType = getTokenDefaultIgnorableType(token);
         for (const { index, ligatureProperties, isLigated } of getTokenVisualGlyphs.call(this, token)) {
             clusters.push({
-                index, start, end, rightToLeft, scriptRun, ligatureProperties, isLigated, spaceFallbackType: token.spaceFallbackType
+                index,
+                cluster,
+                start,
+                end,
+                rightToLeft,
+                scriptRun,
+                ligatureProperties,
+                isLigated,
+                spaceFallbackType: token.spaceFallbackType,
+                defaultIgnorableType
             });
         }
     }
@@ -558,4 +557,4 @@ Bidi.prototype.getTextGlyphClusters = function (text) {
 };
 
 export default Bidi;
-export { getScriptRunShaper };
+export { getScriptRunShaper, getClusterRanges };

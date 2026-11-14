@@ -212,6 +212,65 @@ export function isVariationSelector(char) {
 }
 
 /**
+ * The kinds of default ignorable chars of the unicode props of HarfBuzz (_hb_glyph_info_set_unicode_props,
+ * hb-ot-layout.hh of HarfBuzz 11.3.2), which tell when a lookup skips their glyph (see createIgnorableMatching in
+ * layout.mjs): U+200C ZERO WIDTH NON-JOINER, U+200D ZERO WIDTH JOINER, the hidden ones (U+034F COMBINING GRAPHEME
+ * JOINER, the Mongolian free variation selectors U+180B to U+180D, the tags U+E0020 to U+E007F), and the other ones
+ */
+export const DEFAULT_IGNORABLE_TYPES = Object.freeze({
+    NOT_IGNORABLE: 0,
+    IGNORABLE: 1,
+    ZERO_WIDTH_NON_JOINER: 2,
+    ZERO_WIDTH_JOINER: 3,
+    HIDDEN: 4
+});
+
+// the default ignorable code points of HarfBuzz (hb_unicode_funcs_t::is_default_ignorable, hb-unicode.hh of HarfBuzz
+// 11.3.2), as [first, last] ranges: the Default_Ignorable_Code_Point of Unicode but the Hangul fillers U+115F,
+// U+1160, U+3164 and U+FFA0, drawn with spacing glyphs, and U+1BCA0 to U+1BCA3
+const DEFAULT_IGNORABLE_RANGES = [
+    [0x00AD, 0x00AD], [0x034F, 0x034F], [0x061C, 0x061C], [0x17B4, 0x17B5], [0x180B, 0x180E], [0x200B, 0x200F],
+    [0x202A, 0x202E], [0x2060, 0x206F], [0xFE00, 0xFE0F], [0xFEFF, 0xFEFF], [0xFFF0, 0xFFF8], [0x1D173, 0x1D17A],
+    [0xE0000, 0xE0FFF]
+];
+
+// the default ignorables HarfBuzz hides (UPROPS_MASK_HIDDEN): U+034F COMBINING GRAPHEME JOINER, the Mongolian free
+// variation selectors and the tags
+const HIDDEN_DEFAULT_IGNORABLE_RANGES = [[0x034F, 0x034F], [0x180B, 0x180D], [0xE0020, 0xE007F]];
+
+/**
+ * Check if a code point is in one of [first, last] ranges
+ * @param {number} codePoint
+ * @param {Array<number[]>} ranges
+ * @return {boolean}
+ */
+function isInCodePointRanges(codePoint, ranges) {
+    return ranges.some(([first, last]) => codePoint >= first && codePoint <= last);
+}
+
+/**
+ * The kind of default ignorable of a char, like the unicode props of HarfBuzz (see DEFAULT_IGNORABLE_TYPES)
+ * @param {string} char a single char
+ * @return {number} DEFAULT_IGNORABLE_TYPES.NOT_IGNORABLE for a char that is not a default ignorable of HarfBuzz
+ */
+export function getDefaultIgnorableType(char) {
+    const codePoint = char.codePointAt(0);
+    if (codePoint < DEFAULT_IGNORABLE_RANGES[0][0] || !isInCodePointRanges(codePoint, DEFAULT_IGNORABLE_RANGES)) {
+        return DEFAULT_IGNORABLE_TYPES.NOT_IGNORABLE;
+    }
+    if (codePoint === 0x200C) {
+        return DEFAULT_IGNORABLE_TYPES.ZERO_WIDTH_NON_JOINER;
+    }
+    if (codePoint === 0x200D) {
+        return DEFAULT_IGNORABLE_TYPES.ZERO_WIDTH_JOINER;
+    }
+    if (isInCodePointRanges(codePoint, HIDDEN_DEFAULT_IGNORABLE_RANGES)) {
+        return DEFAULT_IGNORABLE_TYPES.HIDDEN;
+    }
+    return DEFAULT_IGNORABLE_TYPES.IGNORABLE;
+}
+
+/**
  * The space types of HarfBuzz (hb_unicode_funcs_t::space_t, hb-unicode.hh of HarfBuzz 11.3.2), with its values: the
  * advance that a space a font has not takes with the glyph of U+0020 SPACE (see getDefaultGlyphAdvance in
  * position.mjs). The value of EM_n is n: 1/n em.

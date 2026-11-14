@@ -7,6 +7,7 @@ import {
     getCharScript,
     getCharScriptExtensions,
     getCharTextScript,
+    getDefaultIgnorableType,
     getModifiedCombiningClass,
     getScriptRuns,
     getSpaceFallbackType,
@@ -15,6 +16,7 @@ import {
     isUnicodeMark,
     isVariationSelector,
     isVariationSequenceSelector,
+    DEFAULT_IGNORABLE_TYPES,
     SPACE_TYPES
 } from '../src/char.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
@@ -150,6 +152,41 @@ describe('char.mjs', function() {
                 assert.equal(isVariationSelector(char), false, char.codePointAt(0).toString(16));
             }
             assert.equal(isVariationSelector(null), false);
+        });
+    });
+
+    describe('getDefaultIgnorableType', function() {
+        const { NOT_IGNORABLE, IGNORABLE, ZERO_WIDTH_NON_JOINER, ZERO_WIDTH_JOINER, HIDDEN } = DEFAULT_IGNORABLE_TYPES;
+
+        it('gives the default ignorables of HarfBuzz, the Default_Ignorable_Code_Point of Unicode but the Hangul fillers and U+1BCA0 to U+1BCA3', function() {
+            // the Default_Ignorable_Code_Point ranges of DerivedCoreProperties.txt (Unicode 16.0.0) that
+            // hb_unicode_funcs_t::is_default_ignorable keeps (hb-unicode.hh of HarfBuzz 11.3.2), at their ends
+            const ignorableCodePoints = [
+                0x00AD, 0x061C, 0x17B4, 0x17B5, 0x180E, 0x200B, 0x200E, 0x200F, 0x202A, 0x202E, 0x2060, 0x206F, 0xFE00, 0xFE0F,
+                0xFEFF, 0xFFF0, 0xFFF8, 0x1D173, 0x1D17A, 0xE0000, 0xE001F, 0xE0080, 0xE0100, 0xE01EF, 0xE0FFF
+            ];
+            for (const codePoint of ignorableCodePoints) {
+                assert.equal(getDefaultIgnorableType(String.fromCodePoint(codePoint)), IGNORABLE, codePoint.toString(16));
+            }
+            // the Default_Ignorable_Code_Point that HarfBuzz draws (U+115F, U+1160, U+3164, U+FFA0, U+1BCA0 to U+1BCA3), and
+            // other chars around the ranges
+            const notIgnorableCodePoints = [
+                0x0020, 0x00AC, 0x034E, 0x115F, 0x1160, 0x180A, 0x180F, 0x200A, 0x2010, 0x3164, 0xFE10, 0xFFA0, 0xFFF9, 0x1BCA0,
+                0x1BCA3, 0x1D172, 0xE1000
+            ];
+            for (const codePoint of notIgnorableCodePoints) {
+                assert.equal(getDefaultIgnorableType(String.fromCodePoint(codePoint)), NOT_IGNORABLE, codePoint.toString(16));
+            }
+        });
+
+        it('tells the zero width joiners and the hidden default ignorables apart, like the unicode props of HarfBuzz', function() {
+            // _hb_glyph_info_set_unicode_props (hb-ot-layout.hh of HarfBuzz 11.3.2): UPROPS_MASK_Cf_ZWNJ, UPROPS_MASK_Cf_ZWJ, and
+            // UPROPS_MASK_HIDDEN for the Mongolian free variation selectors, the tags and U+034F COMBINING GRAPHEME JOINER
+            assert.equal(getDefaultIgnorableType('\u{200C}'), ZERO_WIDTH_NON_JOINER);
+            assert.equal(getDefaultIgnorableType('\u{200D}'), ZERO_WIDTH_JOINER);
+            for (const char of ['\u{34F}', '\u{180B}', '\u{180C}', '\u{180D}', '\u{E0020}', '\u{E0067}', '\u{E007F}']) {
+                assert.equal(getDefaultIgnorableType(char), HIDDEN, char.codePointAt(0).toString(16));
+            }
         });
     });
 

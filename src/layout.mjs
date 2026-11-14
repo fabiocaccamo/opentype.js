@@ -2,6 +2,7 @@
 // utility methods to manipulate common layout tables (GPOS, GSUB, GDEF...)
 
 import check from './check.mjs';
+import { DEFAULT_IGNORABLE_TYPES } from './char.mjs';
 
 function searchTag(arr, tag) {
     /* jshint bitwise: false */
@@ -527,50 +528,144 @@ function isGlyphIgnoredByLookup(gdef, lookupTable, glyphIndex) {
 }
 
 /**
- * The position of the first glyph of a sequence after a position (before it with a step of -1) that a lookup does
- * not ignore (see isGlyphIgnoredByLookup).
+ * How the lookups of a feature skip U+200C ZERO WIDTH NON-JOINER and U+200D ZERO WIDTH JOINER, like the auto_zwnj and
+ * auto_zwj of a lookup of the map of HarfBuzz (see getLookupJoinerFlags in features/featureValues.mjs)
+ * @typedef JoinerFlags
+ * @type Object
+ * @property {boolean} autoZeroWidthNonJoiner - whether a GSUB lookup skips the zero width non-joiners in the backtrack
+ * and the lookahead of its rules
+ * @property {boolean} autoZeroWidthJoiner - whether a lookup skips the zero width joiners in the input of its rules and
+ * ligatures, and in the pairs and the attachments of GPOS
+ */
+
+// the joiner flags of the lookups of the features of HarfBuzz but a few (F_MANUAL_ZWNJ and F_MANUAL_ZWJ), and of the
+// required feature: both joiners skipped
+const AUTO_JOINER_FLAGS = Object.freeze({ autoZeroWidthNonJoiner: true, autoZeroWidthJoiner: true });
+
+/**
+ * The default ignorables a lookup skips when it matches glyphs, like the matcher_t of the skipping iterators of
+ * HarfBuzz (hb-ot-layout-gsubgpos.hh of HarfBuzz 11.3.2), see createIgnorableMatching
+ * @typedef IgnorableMatching
+ * @type Object
+ * @property {number[]} ignorableTypes - the kind of default ignorable of each glyph of the context (see
+ * DEFAULT_IGNORABLE_TYPES in char.mjs), the ones of a substituted glyph NOT_IGNORABLE
+ * @property {boolean} isPositioning - whether the lookup is a GPOS lookup
+ * @property {JoinerFlags} joinerFlags - the joiner flags of the lookup
+ * @property {function(number): boolean} isSkippedInInput - whether the lookup may skip the glyph at a position of the
+ * context in the input of a rule or of a ligature, and as the second glyph of a pair, the glyph a mark or a cursive
+ * attachment attaches to
+ * @property {function(number): boolean} isSkippedInContext - whether the lookup may skip the glyph at a position of the
+ * context in the backtrack and the lookahead of a rule
+ */
+
+/**
+ * Whether a lookup may skip a glyph of a kind of default ignorable, like matcher_t::may_skip of HarfBuzz
+ * @param {number|undefined} ignorableType - see DEFAULT_IGNORABLE_TYPES in char.mjs, undefined for no glyph
+ * @param {{zeroWidthNonJoiner: boolean, zeroWidthJoiner: boolean, hidden: boolean}} skippedJoiners - whether the
+ * lookup skips the zero width non-joiners, the zero width joiners and the hidden default ignorables
+ * @returns {boolean}
+ */
+function isIgnorableTypeSkipped(ignorableType, skippedJoiners) {
+    switch (ignorableType) {
+        case DEFAULT_IGNORABLE_TYPES.IGNORABLE:
+            return true;
+        case DEFAULT_IGNORABLE_TYPES.ZERO_WIDTH_NON_JOINER:
+            return skippedJoiners.zeroWidthNonJoiner;
+        case DEFAULT_IGNORABLE_TYPES.ZERO_WIDTH_JOINER:
+            return skippedJoiners.zeroWidthJoiner;
+        case DEFAULT_IGNORABLE_TYPES.HIDDEN:
+            return skippedJoiners.hidden;
+        default:
+            return false;
+    }
+}
+
+/**
+ * The default ignorables a lookup skips when it matches the glyphs of a context, like matcher_t::init of HarfBuzz: in
+ * the input, the zero width non-joiners in GPOS only, the zero width joiners with the autoZeroWidthJoiner flag of the
+ * lookup; in the backtrack and the lookahead, the zero width non-joiners in GPOS and with the autoZeroWidthNonJoiner
+ * flag, the zero width joiners always; the hidden default ignorables in GPOS only; the other default ignorables
+ * always. Like HarfBuzz, a default ignorable that the lookup may skip is matched when it matches the glyph of the rule
+ * there (e.g. the zero width joiner that is a component of a ligature of emoji), skipped otherwise (see
+ * findNextGlyphPosition).
+ * @param {number[]} ignorableTypes - see IgnorableMatching
+ * @param {boolean} isPositioning - whether the lookup is a GPOS lookup
+ * @param {JoinerFlags} joinerFlags
+ * @returns {IgnorableMatching}
+ */
+function createIgnorableMatching(ignorableTypes, isPositioning, joinerFlags) {
+    const inputJoiners = {
+        zeroWidthNonJoiner: isPositioning, zeroWidthJoiner: joinerFlags.autoZeroWidthJoiner, hidden: isPositioning
+    };
+    const contextJoiners = {
+        zeroWidthNonJoiner: isPositioning || joinerFlags.autoZeroWidthNonJoiner, zeroWidthJoiner: true, hidden: isPositioning
+    };
+    return {
+        ignorableTypes,
+        isPositioning,
+        joinerFlags,
+        isSkippedInInput: position => isIgnorableTypeSkipped(ignorableTypes[position], inputJoiners),
+        isSkippedInContext: position => isIgnorableTypeSkipped(ignorableTypes[position], contextJoiners)
+    };
+}
+
+// the matching of a context without default ignorables
+const NO_IGNORABLE_MATCHING = createIgnorableMatching([], false, AUTO_JOINER_FLAGS);
+
+// the isSkippedIgnorable of a lookup that skips no default ignorable (see findNextGlyphPosition)
+const isNeverSkipped = () => false;
+
+/**
+ * The position of the next glyph of a sequence that a lookup matches after a position (before it with a step of -1),
+ * like the next and prev of the skipping iterators of HarfBuzz: a glyph the lookup ignores (see
+ * isGlyphIgnoredByLookup) is skipped; a glyph that matches is the one; a default ignorable the lookup may skip is
+ * skipped; any other glyph ends the search.
  * @param {object|undefined} gdef - the GDEF table of the font
  * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
  * @param {number[]} glyphs - glyph indexes, each glyph of a multiple substitution a glyph of its own
  * @param {number} position - the position the search starts from, excluded
  * @param {number} step - 1 for the next glyph, -1 for the previous one
+ * @param {function(number): boolean} isSkippedIgnorable - whether the glyph at a position is a default ignorable the
+ * lookup may skip (see IgnorableMatching)
+ * @param {function(number, any): boolean} [matchesItem] - whether a glyph index matches the item (see RuleSequence),
+ * the first glyph that is not skipped if omitted
+ * @param {any} [item] - the item of a rule or of a ligature to match
  * @returns {number} -1 if there is none
  */
-function findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphs, position, step) {
+function findNextGlyphPosition(gdef, lookupTable, glyphs, position, step, isSkippedIgnorable, matchesItem, item) {
     for (let i = position + step; i >= 0 && i < glyphs.length; i += step) {
-        if (!isGlyphIgnoredByLookup(gdef, lookupTable, glyphs[i])) {
+        if (isGlyphIgnoredByLookup(gdef, lookupTable, glyphs[i])) {
+            continue;
+        }
+        if (matchesItem && matchesItem(glyphs[i], item)) {
             return i;
         }
+        if (isSkippedIgnorable(i)) {
+            continue;
+        }
+        return matchesItem ? -1 : i;
     }
     return -1;
 }
 
 /**
- * The positions of the glyphs of a sequence that a lookup does not ignore, after a position (before it with a step
- * of -1), at most count of them (see findNextNotIgnoredGlyphPosition).
+ * The position of the first glyph of a sequence after a position (before it with a step of -1) that a lookup does
+ * not ignore (see isGlyphIgnoredByLookup), nor skip as a default ignorable (see findNextGlyphPosition).
  * @param {object|undefined} gdef - the GDEF table of the font
  * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable
  * @param {number[]} glyphs - glyph indexes, each glyph of a multiple substitution a glyph of its own
  * @param {number} position - the position the search starts from, excluded
- * @param {number} step - 1 for the next glyphs, -1 for the previous ones
- * @param {number} count
- * @returns {number[]} fewer than count positions when the sequence ends before
+ * @param {number} step - 1 for the next glyph, -1 for the previous one
+ * @param {function(number): boolean} [isSkippedIgnorable] - whether the glyph at a position is a default ignorable the
+ * lookup may skip (see IgnorableMatching), none if omitted
+ * @returns {number} -1 if there is none
  */
-function getNotIgnoredGlyphPositions(gdef, lookupTable, glyphs, position, step, count) {
-    const positions = [];
-    let nextPosition = position;
-    while (positions.length < count) {
-        nextPosition = findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphs, nextPosition, step);
-        if (nextPosition < 0) {
-            break;
-        }
-        positions.push(nextPosition);
-    }
-    return positions;
+function findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphs, position, step, isSkippedIgnorable = isNeverSkipped) {
+    return findNextGlyphPosition(gdef, lookupTable, glyphs, position, step, isSkippedIgnorable);
 }
 
 /**
- * A sequence of a contextual rule (its backtrack, its input or its lookahead).
+ * A sequence of a contextual rule (its backtrack, its input or its lookahead), or the components of a ligature.
  * @typedef RuleSequence
  * @type Object
  * @property {Array} items - glyph indexes, glyph classes or coverage tables, in the order they are matched
@@ -580,6 +675,35 @@ function getNotIgnoredGlyphPositions(gdef, lookupTable, glyphs, position, step, 
 const matchesGlyphIndex = (glyphIndex, expectedGlyphIndex) => glyphIndex === expectedGlyphIndex;
 const matchesCoverage = (glyphIndex, coverage) => getCoverageIndex(coverage, glyphIndex) >= 0;
 const EMPTY_SEQUENCE = { items: [], matchesItem: matchesGlyphIndex };
+
+/**
+ * Match a sequence of a rule or of a ligature from the glyph after a position (the glyph before it with a step of -1),
+ * each item at the next glyph that the lookup matches there (see findNextGlyphPosition), like match_input,
+ * match_backtrack and match_lookahead of HarfBuzz.
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the rule
+ * @param {number[]} glyphIndexes - the glyphs of the context
+ * @param {number} position - the position the sequence starts after
+ * @param {number} step - 1 for an input or a lookahead, -1 for a backtrack
+ * @param {RuleSequence} sequence
+ * @param {function(number): boolean} [isSkippedIgnorable] - whether the glyph at a position is a default ignorable the
+ * lookup may skip (see IgnorableMatching), none if omitted
+ * @returns {number[]|null} the positions of the matched glyphs, null if the sequence does not match
+ */
+function matchGlyphSequence(gdef, lookupTable, glyphIndexes, position, step, sequence, isSkippedIgnorable = isNeverSkipped) {
+    const positions = [];
+    let nextPosition = position;
+    for (const item of sequence.items) {
+        nextPosition = findNextGlyphPosition(
+            gdef, lookupTable, glyphIndexes, nextPosition, step, isSkippedIgnorable, sequence.matchesItem, item
+        );
+        if (nextPosition < 0) {
+            return null;
+        }
+        positions.push(nextPosition);
+    }
+    return positions;
+}
 
 /**
  * The class of a glyph in a class definition table of a contextual subtable.
@@ -601,53 +725,31 @@ function getGlyphClassMatcher(classDef) {
 }
 
 /**
- * Match a sequence of a contextual rule on the glyphs that a lookup does not ignore, from the glyph after a position
- * (the glyph before it with a step of -1).
- * @param {object|undefined} gdef - the GDEF table of the font
- * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the rule
- * @param {number[]} glyphIndexes - the glyphs of the context
- * @param {number} position - the position the sequence starts after
- * @param {number} step - 1 for an input or a lookahead, -1 for a backtrack
- * @param {RuleSequence} sequence
- * @returns {number[]|null} the positions of the matched glyphs, null if the sequence does not match
- */
-function matchRuleSequence(gdef, lookupTable, glyphIndexes, position, step, sequence) {
-    const items = sequence.items;
-    const positions = getNotIgnoredGlyphPositions(gdef, lookupTable, glyphIndexes, position, step, items.length);
-    if (positions.length < items.length) {
-        return null;
-    }
-    for (let i = 0; i < items.length; i++) {
-        if (!sequence.matchesItem(glyphIndexes[positions[i]], items[i])) {
-            return null;
-        }
-    }
-    return positions;
-}
-
-/**
  * Match a contextual rule at a glyph, on the glyphs that the lookup does not ignore, like HarfBuzz: the input glyphs
  * from the glyph after it, the lookahead from the glyph after the last input glyph, the backtrack from the glyph before
- * it. The glyph itself, the first glyph of the input, is matched by the caller.
+ * it, each sequence skipping the default ignorables of its kind (see createIgnorableMatching). The glyph itself, the
+ * first glyph of the input, is matched by the caller.
  * @param {object|undefined} gdef - the GDEF table of the font
  * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the rule
  * @param {number[]} glyphIndexes - the glyphs of the context
  * @param {number} index - the position of the glyph
  * @param {{backtrack: RuleSequence, input: RuleSequence, lookahead: RuleSequence}} rule - the input without its first
  * glyph
+ * @param {IgnorableMatching} ignorableMatching - the default ignorables of the context
  * @returns {number[]|null} the positions of the input glyphs, the glyph first, null if the rule does not match
  */
-function matchContextRule(gdef, lookupTable, glyphIndexes, index, rule) {
-    const inputPositions = matchRuleSequence(gdef, lookupTable, glyphIndexes, index, 1, rule.input);
+function matchContextRule(gdef, lookupTable, glyphIndexes, index, rule, ignorableMatching) {
+    const { isSkippedInInput, isSkippedInContext } = ignorableMatching;
+    const inputPositions = matchGlyphSequence(gdef, lookupTable, glyphIndexes, index, 1, rule.input, isSkippedInInput);
     if (!inputPositions) {
         return null;
     }
     inputPositions.unshift(index);
     const lastInputPosition = inputPositions[inputPositions.length - 1];
-    if (!matchRuleSequence(gdef, lookupTable, glyphIndexes, lastInputPosition, 1, rule.lookahead)) {
+    if (!matchGlyphSequence(gdef, lookupTable, glyphIndexes, lastInputPosition, 1, rule.lookahead, isSkippedInContext)) {
         return null;
     }
-    if (!matchRuleSequence(gdef, lookupTable, glyphIndexes, index, -1, rule.backtrack)) {
+    if (!matchGlyphSequence(gdef, lookupTable, glyphIndexes, index, -1, rule.backtrack, isSkippedInContext)) {
         return null;
     }
     return inputPositions;
@@ -670,11 +772,12 @@ function matchContextRule(gdef, lookupTable, glyphIndexes, index, rule) {
  * @param {object[]|undefined} ruleSet - the rules, none if undefined
  * @param {function(object): {backtrack: RuleSequence, input: RuleSequence, lookahead: RuleSequence}} getRuleSequences -
  * the sequences of a rule, its input without its first glyph
+ * @param {IgnorableMatching} ignorableMatching - the default ignorables of the context
  * @returns {ContextRuleMatch|null}
  */
-function matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, getRuleSequences) {
+function matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, getRuleSequences, ignorableMatching) {
     for (const rule of ruleSet || []) {
-        const inputPositions = matchContextRule(gdef, lookupTable, glyphIndexes, index, getRuleSequences(rule));
+        const inputPositions = matchContextRule(gdef, lookupTable, glyphIndexes, index, getRuleSequences(rule), ignorableMatching);
         if (inputPositions) {
             return { inputPositions, lookupRecords: rule.lookupRecords };
         }
@@ -691,9 +794,10 @@ function matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, getRuleSe
  * @param {number} index - the position of the glyph
  * @param {{backtrack: object[], input: object[], lookahead: object[]}} coverages - the coverage tables of each sequence
  * @param {Array<{sequenceIndex: number, lookupListIndex: number}>} lookupRecords
+ * @param {IgnorableMatching} ignorableMatching - the default ignorables of the context
  * @returns {ContextRuleMatch|null}
  */
-function matchCoverageRule(gdef, lookupTable, glyphIndexes, index, coverages, lookupRecords) {
+function matchCoverageRule(gdef, lookupTable, glyphIndexes, index, coverages, lookupRecords, ignorableMatching) {
     if (!coverages.input.length || !matchesCoverage(glyphIndexes[index], coverages.input[0])) {
         return null;
     }
@@ -701,7 +805,7 @@ function matchCoverageRule(gdef, lookupTable, glyphIndexes, index, coverages, lo
         backtrack: { items: coverages.backtrack, matchesItem: matchesCoverage },
         input: { items: coverages.input.slice(1), matchesItem: matchesCoverage },
         lookahead: { items: coverages.lookahead, matchesItem: matchesCoverage }
-    });
+    }, ignorableMatching);
     return inputPositions && { inputPositions, lookupRecords };
 }
 
@@ -742,9 +846,10 @@ function getCoveredClassRuleSet(coverage, classDef, classSets, glyphIndex) {
  * @param {number} format - the format of the subtable (its substFormat or posFormat)
  * @param {number[]} glyphIndexes - the glyphs of the context
  * @param {number} index - the position of the glyph
+ * @param {IgnorableMatching} [ignorableMatching] - the default ignorables of the context, none if omitted
  * @returns {ContextRuleMatch|null}
  */
-function matchSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes, index) {
+function matchSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes, index, ignorableMatching = NO_IGNORABLE_MATCHING) {
     const glyphIndex = glyphIndexes[index];
     switch (format) {
         case 1: {
@@ -753,7 +858,7 @@ function matchSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes,
                 backtrack: EMPTY_SEQUENCE,
                 input: { items: rule.input, matchesItem: matchesGlyphIndex },
                 lookahead: EMPTY_SEQUENCE
-            }));
+            }), ignorableMatching);
         }
         case 2: {
             const matchesClass = getGlyphClassMatcher(subtable.classDef);
@@ -764,11 +869,11 @@ function matchSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes,
                 backtrack: EMPTY_SEQUENCE,
                 input: { items: rule.classes, matchesItem: matchesClass },
                 lookahead: EMPTY_SEQUENCE
-            }));
+            }), ignorableMatching);
         }
         case 3:
             return matchCoverageRule(gdef, lookupTable, glyphIndexes, index,
-                { backtrack: [], input: subtable.coverages, lookahead: [] }, subtable.lookupRecords);
+                { backtrack: [], input: subtable.coverages, lookahead: [] }, subtable.lookupRecords, ignorableMatching);
         default:
             throw new Error(`Unknown sequence context format: ${format}`);
     }
@@ -784,9 +889,10 @@ function matchSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes,
  * @param {number} format - the format of the subtable (its substFormat or posFormat)
  * @param {number[]} glyphIndexes - the glyphs of the context
  * @param {number} index - the position of the glyph
+ * @param {IgnorableMatching} [ignorableMatching] - the default ignorables of the context, none if omitted
  * @returns {ContextRuleMatch|null}
  */
-function matchChainedSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes, index) {
+function matchChainedSequenceContext(gdef, lookupTable, subtable, format, glyphIndexes, index, ignorableMatching = NO_IGNORABLE_MATCHING) {
     const glyphIndex = glyphIndexes[index];
     switch (format) {
         case 1: {
@@ -795,7 +901,7 @@ function matchChainedSequenceContext(gdef, lookupTable, subtable, format, glyphI
                 backtrack: { items: rule.backtrack, matchesItem: matchesGlyphIndex },
                 input: { items: rule.input, matchesItem: matchesGlyphIndex },
                 lookahead: { items: rule.lookahead, matchesItem: matchesGlyphIndex }
-            }));
+            }), ignorableMatching);
         }
         case 2: {
             const matchesBacktrackClass = getGlyphClassMatcher(subtable.backtrackClassDef);
@@ -808,14 +914,14 @@ function matchChainedSequenceContext(gdef, lookupTable, subtable, format, glyphI
                 backtrack: { items: rule.backtrack, matchesItem: matchesBacktrackClass },
                 input: { items: rule.input, matchesItem: matchesInputClass },
                 lookahead: { items: rule.lookahead, matchesItem: matchesLookaheadClass }
-            }));
+            }), ignorableMatching);
         }
         case 3:
             return matchCoverageRule(gdef, lookupTable, glyphIndexes, index, {
                 backtrack: subtable.backtrackCoverage,
                 input: subtable.inputCoverage,
                 lookahead: subtable.lookaheadCoverage
-            }, subtable.lookupRecords);
+            }, subtable.lookupRecords, ignorableMatching);
         default:
             throw new Error(`Unknown chained sequence context format: ${format}`);
     }
@@ -1115,7 +1221,11 @@ export {
     isMarkIgnoredWithoutGlyphClasses,
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
-    getNotIgnoredGlyphPositions,
+    matchGlyphSequence,
+    matchesGlyphIndex,
+    AUTO_JOINER_FLAGS,
+    NO_IGNORABLE_MATCHING,
+    createIgnorableMatching,
     matchSequenceContext,
     matchChainedSequenceContext,
     RIGHT_TO_LEFT,
