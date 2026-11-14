@@ -5,7 +5,8 @@ import sfnt from './tables/sfnt.mjs';
 import { DefaultEncoding } from './encoding.mjs';
 import glyphset from './glyphset.mjs';
 import Position, {
-    DEFAULT_POSITIONING_FEATURES, getDefaultGlyphAdvance, getMarkAdvanceZeroing, positionGlyphRun
+    DEFAULT_POSITIONING_FEATURES, getDefaultGlyphAdvance, getKernLookupTables, getMarkAdvanceZeroing,
+    getPairAdjustmentLookupTables, getPositioningPlan, positionGlyphRun
 } from './position.mjs';
 import Substitution from './substitution.mjs';
 import { PaletteManager } from './palettes.mjs';
@@ -20,7 +21,7 @@ import {
 import { getCharTextScript, DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from './char.mjs';
 import { normalizeCharacters } from './normalization.mjs';
 import {
-    getOpenTypeScriptTags, getChosenScriptTag, getHarfBuzzShaper, memoizeByScriptTags, selectScriptTag
+    getOpenTypeScriptTags, getChosenScriptTag, getHarfBuzzShaper, memoizeByScriptTags, selectScriptTag, getCachedLayoutValue
 } from './layout.mjs';
 import { applyPaintType } from './tables/cff.mjs';
 
@@ -586,7 +587,11 @@ Font.prototype.glyphIndexToName = function(gid) {
  * A GPOS lookup whose lookupFlag ignores one of the two glyphs (e.g. a mark with IgnoreMarks) adds nothing:
  * the text layout, or font.position.getGlyphRunKerningValue, kerns the glyphs across the ignored ones.
  * The value of a GPOS pair is what it adds to the advance of the left glyph, the x advance of its first value
- * record: its placements and its second value record are in the positions of Font.shape.
+ * record: its placements and its second value record are in the positions of Font.shape. The kerning lookups of each
+ * script are computed once for the GPOS table, like the lookups of the text layout (see GlyphRenderOptions.features),
+ * the values at every call, at the variation of the call, from the coverage tables of their subtables: a glyph added
+ * directly to a coverage table is seen here, while the text layout, which caches the glyphs each lookup can start at,
+ * may miss a glyph added to the coverage of the first glyph of a subtable (the other coverage changes it sees too).
  * The kern table is used when the GPOS table has no kern feature for that script, like HarfBuzz, which kerns a
  * glyph with the next glyph that is not a GDEF mark there: a pair whose right glyph is a GDEF mark adds nothing.
  * @param  {opentype.Glyph|number} leftGlyph
@@ -602,9 +607,27 @@ Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variation) {
         return 0;
     }
     const script = getKerningPairScript(getGlyphScript(leftGlyph), getGlyphScript(rightGlyph));
-    const scriptTag = selectScriptTag(this.position, getOpenTypeScriptTags(script));
-    return this.position.getKerningValue(this.position.getKerningTables(scriptTag), leftGlyph.index, rightGlyph.index, variation);
+    return this.position.getKerningValue(getScriptKerningTables(this, script), leftGlyph.index, rightGlyph.index, variation);
 };
+
+/**
+ * The kerning lookups of the script of a kerning pair (see getKerningValue): the ones of font.position.getKerningTables
+ * for the OpenType script tag of the script that the GPOS table has. Its kern lookups are computed once for the GPOS
+ * table and the script (see getCachedLayoutValue in layout.mjs), the pair adjustment subtables of its extension
+ * lookups at every call, like the subtables of the text layout.
+ * @param  {opentype.Font} font
+ * @param  {string|undefined} script - the ISO 15924 code of the script of the pair (see getKerningPairScript)
+ * @return {object[]|undefined}
+ */
+function getScriptKerningTables(font, script) {
+    const kernLookupTables = getCachedLayoutValue(font, 'gpos', `kernLookupTables ${script}`, () =>
+        getKernLookupTables(font.position, selectScriptTag(font.position, getOpenTypeScriptTags(script)))
+    );
+    if (!kernLookupTables) {
+        return;
+    }
+    return getPairAdjustmentLookupTables(kernLookupTables);
+}
 
 /**
  * The glyph of an index of the font, undefined for an index the font has not.
@@ -839,12 +862,16 @@ function getPositioningFeatureTags(font, options, scriptTags, shaper) {
  *                                 forms, which HarfBuzz applies at the glyphs of each form only: a form that the
  *                                 features option enables applies at every glyph, like a feature of HarfBuzz enabled by
  *                                 the user. Not yet the GPOS feature variations (see Font.shape). The lookups of each
- *                                 script, language, set of features and GSUB feature variation are computed once for
+ *                                 script, language, set of features and GSUB feature variation, with the glyphs each
+ *                                 lookup can start at (from the coverage tables of its subtables), are computed once for
  *                                 the GSUB and the GPOS tables (see getCachedLayoutValue in layout.mjs): the methods of
  *                                 font.substitution and font.position that add a script, a language system, a feature
  *                                 or a lookup recompute them, not a direct change of the objects of the tables after a
- *                                 text was laid out, unless the font was parsed with the layoutCache option false
- *                                 (see parse in opentype.mjs), which computes them at every layout.
+ *                                 text was laid out; a subtable added to or replaced in a lookup, or in the extension
+ *                                 of one of its extension subtables, and a change of a coverage table apply at the next
+ *                                 layout, though the layout may miss a glyph added to the coverage of the first glyph
+ *                                 of a subtable. With the layoutCache option false (see parse in opentype.mjs) they are
+ *                                 computed at every layout.
  *                                 See https://www.microsoft.com/typography/otspec/featuretags.htm
  * @property {Object} [variation] - variation coordinates of the advances, the GPOS values, the GSUB feature variations
  *                                  (not yet the GPOS feature variations, see Font.shape) and the outlines drawn by
@@ -994,24 +1021,29 @@ Font.prototype._shapeGlyphs = function(text, options) {
         xOffset: 0,
         yOffset: 0
     }));
-    for (const clusterIndexes of getGlyphRuns(glyphClusters)) {
-        const firstCluster = glyphClusters[clusterIndexes[0]];
-        const scriptTags = firstCluster.scriptRun.scriptTags;
+    // the runs of the same script tags (a Japanese text alternates between a few scripts in many runs) share their plan
+    const getRunPositioning = memoizeByScriptTags(scriptTags => {
         const gsubScriptTag = getChosenScriptTag(this.substitution, scriptTags);
         const shaper = getScriptRunShaper(scriptTags, gsubScriptTag);
+        const featureTags = getPositioningFeatureTags(this, options, scriptTags, shaper);
+        return {
+            plan: getPositioningPlan(this.position, selectScriptTag(this.position, scriptTags), options.language, featureTags, shaper),
+            markAdvanceZeroing: getMarkAdvanceZeroing(scriptTags, gsubScriptTag)
+        };
+    });
+    for (const clusterIndexes of getGlyphRuns(glyphClusters)) {
+        const firstCluster = glyphClusters[clusterIndexes[0]];
+        const { plan, markAdvanceZeroing } = getRunPositioning(firstCluster.scriptRun.scriptTags);
         positionGlyphRun(
             this.position,
             clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].glyph.index),
             clusterIndexes.map(clusterIndex => glyphPositions[clusterIndex]),
             {
                 rightToLeft: firstCluster.rightToLeft,
-                script: selectScriptTag(this.position, scriptTags),
-                language: options.language,
-                featureTags: getPositioningFeatureTags(this, options, scriptTags, shaper),
+                plan,
                 variation: options.variation,
-                markAdvanceZeroing: getMarkAdvanceZeroing(scriptTags, gsubScriptTag),
+                markAdvanceZeroing,
                 ligatureProperties: clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].ligatureProperties),
-                shaper,
                 defaultIgnorableTypes: clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].defaultIgnorableType),
                 removesDefaultIgnorables: Boolean(options.removeDefaultIgnorables)
             }

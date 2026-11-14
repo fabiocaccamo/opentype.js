@@ -1,20 +1,20 @@
 /**
- * Apply the enabled GSUB features of the thai script (rvrn, ccmp, locl, rlig, rclt, calt, liga, clig, rand and the
- * direction features of the run by default) like the Thai shaper of HarfBuzz, which adds no stage of its own: the
- * lookups of rvrn first, then the lookups of all the other features one after the other in lookup list order, each
- * one to the whole thai script run of text, and not feature by feature.
+ * The stages of the enabled GSUB features of the thai script (rvrn, ccmp, locl, rlig, rclt, calt, liga, clig, rand and
+ * the direction features of the run by default), applied by applyScriptRunFeatures in bidi.mjs like the Thai shaper of
+ * HarfBuzz, which adds no stage of its own: the lookups of rvrn first, then the lookups of all the other features one
+ * after the other in lookup list order, each one to the whole thai script run of text, and not feature by feature.
  */
 
-import { applyFeatureStagesToTokens } from '../applySubstitution.mjs';
+import { getDefaultShaperFeatureStages } from '../applySubstitution.mjs';
 
 /**
- * Apply the enabled thai features to a thai script run of the text
- * @param {Token[]} tokens the tokens of the run
- * @param {string} script the script tag of the run in the GSUB table
- * @param {string[]} tags the enabled feature tags of the run: the thai features and the direction features of the run
+ * The stages of the enabled thai features of the thai script runs (see FeatureStage in applySubstitution.mjs)
+ * @param {string} script the script tag of the runs in the GSUB table
+ * @param {string[]} tags the enabled feature tags of the runs: the thai features and the direction features of the runs
+ * @returns {FeatureStage[]}
  */
-function thaiFeatures(tokens, script, tags) {
-    applyFeatureStagesToTokens(this.query, tags, script, this.language, tokens);
+function getThaiFeatureStages(script, tags) {
+    return getDefaultShaperFeatureStages(this.query, tags, script, this.language);
 }
 
-export default thaiFeatures;
+export default getThaiFeatureStages;

@@ -155,20 +155,24 @@ function ttfGlyphLoader(font, index, parseGlyph, data, position, buildPath) {
  * @param  {opentype.Font} font
  * @param  {number} index
  * @param  {Function} parseCFFCharstring
- * @param  {string} charstring
+ * @param  {function(number): number[]} readCharstring - reads the charstring of a glyph index from the font data,
+ * called once, when the outline of the glyph is first drawn
  * @return {opentype.Glyph}
  */
-function cffGlyphLoader(font, index, parseCFFCharstring, charstring, version) {
+function cffGlyphLoader(font, index, parseCFFCharstring, readCharstring, version) {
     return function() {
         const glyph = new Glyph({index: index, font: font});
+        let charstring;
 
         glyph.path = function() {
+            charstring = charstring || readCharstring(index);
             const path = parseCFFCharstring(font, glyph, charstring, version);
             path.unitsPerEm = font.unitsPerEm;
             return path;
         };
         // the outline at variation coordinates, the current variation of the font if omitted (see getTransform)
         glyph.getBlendPath = function(variationCoords) {
+            charstring = charstring || readCharstring(index);
             return parseCFFCharstring(font, glyph, charstring, version, variationCoords);
         };
 

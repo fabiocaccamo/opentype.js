@@ -1,7 +1,7 @@
 // Parsing utility functions
 
 import check from './check.mjs';
-import { getGlyphVariationPointCount, getTuplePointNumbers } from './util.mjs';
+import { getGlyphVariationPointCount, getTuplePointNumbers, defineLazyProperty } from './util.mjs';
 
 // Retrieve an unsigned byte from the DataView.
 function getByte(dataView, offset) {
@@ -1103,17 +1103,15 @@ Parser.prototype.parseTupleVariationStoreList = function(axisCount, flavor, glyp
         if (!offsetSizeIs32Bit) nextOffset *= 2;
         
         const length = nextOffset - currentOffset;
+        const tableOffset = glyphVariationDataArrayOffset + currentOffset;
 
-        glyphVariations[i] = length
-            ? this.parseTupleVariationStore(
-                glyphVariationDataArrayOffset + currentOffset,
-                axisCount,
-                flavor,
-                glyphs,
-                i
-            )
-            : undefined;
-        
+        // the variation data of a glyph is parsed when it is first read, e.g. when its outline is first varied
+        if (length) {
+            defineLazyProperty(glyphVariations, i, () => this.parseTupleVariationStore(tableOffset, axisCount, flavor, glyphs, i));
+        } else {
+            glyphVariations[i] = undefined;
+        }
+
         currentOffset = nextOffset;
     }
 

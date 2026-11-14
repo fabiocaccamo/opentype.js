@@ -111,6 +111,23 @@ describe('tables/gvar.mjs', function() {
         });
     });
 
+    it('parses the variation data of a glyph when it is first read, then keeps it', function() {
+        // the tuple variation stores of the glyphs of a large variable font (e.g. Roboto Flex) are most of its parse time
+        const font = loadSync('./test/fonts/TestGVAROne.ttf');
+        const glyphVariations = font.tables.gvar.glyphVariations;
+        assert.strictEqual(typeof Object.getOwnPropertyDescriptor(glyphVariations, 0).get, 'function');
+        const variationData = glyphVariations[0];
+        assert.strictEqual(Object.getOwnPropertyDescriptor(glyphVariations, 0).value, variationData);
+        assert.strictEqual(glyphVariations[0], variationData);
+        // ttx -t gvar: the two tuples of .notdef, at wght -1.0 and 1.0 (shared tuples), with the deltas x and y of the
+        // point 0, the delta x of the point 15 and the delta y of the point 16
+        const sharedTuples = font.tables.gvar.sharedTuples;
+        assert.deepStrictEqual(variationData.headers.map(header => [
+            header.peakTuple || sharedTuples[header.sharedTupleRecordsIndex],
+            header.deltas[0], header.deltasY[0], header.deltas[15], header.deltasY[16]
+        ]), [[[-1], 0, -1, 1, -1], [[1], -2, 23, -5, 13]]);
+    });
+
     it('correctly transforms TrueType glyphs', function() {
         ['Cvar1','Cvar2'].forEach(n => {
             const font = fonts[`gvarTest${n}`];

@@ -8,9 +8,11 @@ import {
     getMarkAdvanceZeroing,
     getMarkLigatureComponentIndex,
     areMarksOfSameGlyph,
+    getPositioningPlan,
     positionGlyphRun
 } from '../src/position.mjs';
 import { DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from '../src/char.mjs';
+import { AUTO_JOINER_FLAGS, getCoveragesGlyphDigest, mayGlyphDigestHave } from '../src/layout.mjs';
 import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
 import { replaceTextGlyphs } from './testutil.mjs';
 import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
@@ -67,7 +69,7 @@ function langSys(featureIndexes) {
 // position glyphs of a font as one run with positionGlyphRun, in visual order, in the format of hb-shape without the
 // clusters: glyph@x,y+advance, the offsets when one is not 0, the y advance after the x advance (+x,y) when it is not 0;
 // the run options are the ones of a left-to-right latn run of the default GPOS features and of the default shaper of
-// HarfBuzz if omitted
+// HarfBuzz if omitted, the script, the language, the featureTags and the shaper giving the plan of the run
 function positionGlyphs(font, glyphIndexes, runOptions) {
     const glyphPositions = glyphIndexes.map(glyphIndex => ({
         xAdvance: font.glyphs.get(glyphIndex).advanceWidth,
@@ -75,14 +77,16 @@ function positionGlyphs(font, glyphIndexes, runOptions) {
         xOffset: 0,
         yOffset: 0
     }));
-    positionGlyphRun(font.position, glyphIndexes, glyphPositions, Object.assign({
+    const { script, language, featureTags, shaper, ...options } = Object.assign({
         rightToLeft: false,
         script: 'latn',
         language: undefined,
         featureTags: DEFAULT_POSITIONING_FEATURES,
         variation: undefined,
         markAdvanceZeroing: MarkAdvanceZeroing.AFTER_POSITIONING
-    }, runOptions));
+    }, runOptions);
+    const plan = getPositioningPlan(font.position, script, language, featureTags, shaper);
+    positionGlyphRun(font.position, glyphIndexes, glyphPositions, Object.assign({ plan }, options));
     return glyphPositions.map(({ xAdvance, yAdvance, xOffset, yOffset }, index) =>
         `${glyphIndexes[index]}${xOffset || yOffset ? `@${xOffset},${yOffset}` : ''}+${xAdvance}${yAdvance ? `,${yAdvance}` : ''}`
     ).join('|');
@@ -569,6 +573,76 @@ describe('position.mjs', function() {
         });
     });
 
+    describe('getPositioningPlan', function() {
+        const kernFeature = { tag: 'kern', feature: { featureParams: 0, lookupListIndexes: [0, 1] } };
+        const createPlanFont = () => createFontWithGpos(
+            [
+                { tag: 'DFLT', script: { defaultLangSys: langSys([0]), langSysRecords: [] } },
+                { tag: 'latn', script: { defaultLangSys: langSys([]), langSysRecords: [] } }
+            ],
+            [kernFeature],
+            [pairPosLookup([pairPosSubtable(1, 2, -30)]), extensionLookup([{ lookupType: 2, extension: pairPosSubtable(3, 4, -20) }])]
+        );
+
+        it('gives the lookups of the features with the glyph digest of the glyphs their subtables cover first', function() {
+            const font = createPlanFont();
+            const plan = getPositioningPlan(font.position, 'DFLT', undefined, ['kern'], undefined);
+            const filters = plan.lookups.map(lookup => lookup.firstGlyphFilter);
+            assert.deepStrictEqual(filters.map(({ glyphDigest }) => [1, 3, 0x33].map(glyphIndex => mayGlyphDigestHave(glyphDigest, glyphIndex))), [
+                [true, false, false],
+                [false, true, false]
+            ]);
+            // the subtables of the extension lookup are the pair adjustments its extension subtables wrap
+            const [pairLookupTable, extensionLookupTable] = font.tables.gpos.lookups;
+            assert.deepStrictEqual(filters.map(({ subtables }) => subtables), [
+                pairLookupTable.subtables,
+                extensionLookupTable.subtables.map(subtable => subtable.extension)
+            ]);
+            assert.strictEqual(filters[1].subtables[0], extensionLookupTable.subtables[0].extension);
+            assert.strictEqual(plan.isKernTableApplied, false);
+        });
+
+        it('gives the lookups no glyph digest with layoutCache false, which computes them for one run', function() {
+            const font = createPlanFont();
+            font.isLayoutCacheEnabled = false;
+            const plan = getPositioningPlan(font.position, 'DFLT', undefined, ['kern'], undefined);
+            assert.deepStrictEqual(plan.lookups.map(lookup => lookup.firstGlyphFilter), [null, null]);
+        });
+
+        it('applies a lookup of a plan at the glyphs its first glyph filter may have only, while the lookup has its subtables', function() {
+            // pos glyph1 glyph2 -30, with the filter of a digest of no glyph, read from its one subtable or from none
+            const font = createPlanFont();
+            const lookupTable = font.tables.gpos.lookups[0];
+            const positionWithFilter = firstGlyphFilter => {
+                const glyphPositions = [1, 2].map(() => ({ xAdvance: 500, yAdvance: 0, xOffset: 0, yOffset: 0 }));
+                const plan = { lookups: [{ lookupTable, joinerFlags: AUTO_JOINER_FLAGS, firstGlyphFilter }], isKernTableApplied: false };
+                positionGlyphRun(font.position, [1, 2], glyphPositions, {
+                    rightToLeft: false, plan, variation: undefined, markAdvanceZeroing: MarkAdvanceZeroing.AFTER_POSITIONING
+                });
+                return glyphPositions.map(glyphPosition => glyphPosition.xAdvance);
+            };
+            const glyphDigest = getCoveragesGlyphDigest([]);
+            assert.deepStrictEqual(positionWithFilter({ glyphDigest, subtables: lookupTable.subtables.slice() }), [500, 500]);
+            assert.deepStrictEqual(positionWithFilter({ glyphDigest, subtables: [] }), [470, 500]);
+            assert.deepStrictEqual(positionWithFilter(null), [470, 500]);
+        });
+
+        it('applies the kern table with kern for a script whose GPOS has no kern feature, like HarfBuzz', function() {
+            const position = createPlanFont().position;
+            assert.deepStrictEqual(getPositioningPlan(position, 'latn', undefined, ['kern'], undefined), { lookups: [], isKernTableApplied: true });
+            assert.deepStrictEqual(getPositioningPlan(position, 'latn', undefined, ['mark'], undefined), { lookups: [], isKernTableApplied: false });
+        });
+
+        it('gives no glyph digest to a lookup with a subtable without a coverage of its first glyph', function() {
+            // a contextual positioning of format 3 without input coverage matches nothing (see matchCoverageRule)
+            const font = createPlanFont();
+            font.tables.gpos.lookups[1] = { lookupType: 7, lookupFlag: 0, subtables: [{ posFormat: 3, coverages: [], lookupRecords: [] }] };
+            const plan = getPositioningPlan(font.position, 'DFLT', undefined, ['kern'], undefined);
+            assert.strictEqual(plan.lookups[1].firstGlyphFilter, null);
+            assert.strictEqual(positionGlyphs(font, [1, 2], { script: 'DFLT', featureTags: ['kern'] }), '1+470|2+500');
+        });
+    });
+
     describe('positionGlyphRun', function() {
         let pairFont;
 
@@ -716,6 +790,57 @@ describe('position.mjs', function() {
             });
             // the d o -50 of the new pair adjustment
             assert.strictEqual(positionText('do', { featureTags: ['ss02'] }, editedFont), '8+450|9+500');
+        });
+
+        it('applies a subtable added directly to a lookup of a feature after a run was positioned', function() {
+            // the glyphs each lookup can start at are cached with the lookups, read from the subtables the lookup has then:
+            // TestPairPositioning.ttf with pos T V -300 added to the first pair lookup of kern (fontTools), saved as
+            // pushed-gpos.ttf: hb-shape --no-glyph-names --cluster-level=1 pushed-gpos.ttf -u 0054,0056 [3=0+200|4=1+600]
+            const editedFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
+            const [glyphT, glyphV] = ['T', 'V'].map(character => editedFont.charToGlyphIndex(character));
+            // TestPairPositioning.ttf -u 0054,0056: [3=0+500|4=1+600]
+            assert.strictEqual(positionText('TV', {}, editedFont), '3+500|4+600');
+            editedFont.position.getLookupTables('latn', undefined, 'kern', 2)[0].subtables.push(pairPosSubtable(glyphT, glyphV, -300));
+            assert.strictEqual(positionText('TV', {}, editedFont), '3+200|4+600');
+            assert.strictEqual(editedFont.getKerningValue(glyphT, glyphV), -300);
+        });
+
+        it('applies a subtable replaced directly in a lookup of a feature after a run was positioned, as getKerningValue', function() {
+            // TestPairPositioning.ttf with the one subtable of the first pair lookup of kern replaced by pos T V -300
+            // (fontTools), saved as replaced-gpos.ttf: hb-shape --no-glyph-names --cluster-level=1 replaced-gpos.ttf
+            // -u 0054,0056 [3=0+200|4=1+600]
+            const editedFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'));
+            const [glyphT, glyphV] = ['T', 'V'].map(character => editedFont.charToGlyphIndex(character));
+            assert.strictEqual(positionText('TV', {}, editedFont), '3+500|4+600');
+            const lookupTable = editedFont.position.getLookupTables('latn', undefined, 'kern', 2)[0];
+            assert.strictEqual(lookupTable.subtables.length, 1);
+            lookupTable.subtables[0] = pairPosSubtable(glyphT, glyphV, -300);
+            assert.strictEqual(positionText('TV', {}, editedFont), '3+200|4+600');
+            assert.strictEqual(editedFont.getKerningValue(glyphT, glyphV), -300);
+        });
+
+        it('applies a pair added directly to the coverage of a subtable after a run was positioned, with layoutCache false', function() {
+            // TestPairPositioning.ttf with e in the coverage of pos d a -70 (lookup 7 of kern) and a PairSet pos e a -40 for it
+            // (fontTools), saved as coverage-gpos.ttf: hb-shape --no-glyph-names --cluster-level=1 -u 0065,0061
+            // TestPairPositioning.ttf [14=0+500|5=1+500], coverage-gpos.ttf [14=0+460|5=1+500]
+            const uncachedFont = parse(readFileSync('./test/fonts/TestPairPositioning.ttf'), { layoutCache: false });
+            const [glyphA, glyphE] = ['a', 'e'].map(character => uncachedFont.charToGlyphIndex(character));
+            assert.strictEqual(positionText('ea', {}, uncachedFont), '14+500|5+500');
+            const subtable = uncachedFont.tables.gpos.lookups[7].subtables[0];
+            subtable.coverage.glyphs.push(glyphE);
+            subtable.pairSets.push([{ secondGlyph: glyphA, value1: { xAdvance: -40 }, value2: undefined }]);
+            assert.strictEqual(positionText('ea', {}, uncachedFont), '14+460|5+500');
+        });
+
+        it('applies a subtable added directly to a lookup of a feature after a run was positioned, with layoutCache false', function() {
+            // TestScriptLanguage.ttf (test/generate-script-language-font.py) with pos i b -50 added to the kern lookup of
+            // latn (fontTools), saved as pushed-ib.ttf: hb-shape --no-glyph-names --cluster-level=1 -u 0069,0062
+            // TestScriptLanguage.ttf [8=0+500|7=1+500], pushed-ib.ttf [8=0+450|7=1+500]
+            const uncachedFont = parse(readFileSync('./test/fonts/TestScriptLanguage.ttf'), { layoutCache: false });
+            const [glyphI, glyphB] = ['i', 'b'].map(character => uncachedFont.charToGlyphIndex(character));
+            assert.strictEqual(positionText('ib', {}, uncachedFont), '8+500|7+500');
+            uncachedFont.position.getLookupTables('latn', undefined, 'kern', 2)[0].subtables.push(pairPosSubtable(glyphI, glyphB, -50));
+            assert.strictEqual(positionText('ib', {}, uncachedFont), '8+450|7+500');
         });
 
         describe('the required feature of the language system', function() {
@@ -2232,6 +2357,12 @@ describe('position.mjs', function() {
         it('throws on a lookup type that is not a GPOS lookup type', function() {
             // a parsed font has GPOS lookup types 1 to 9 only (see parseLookupList), a lookup built by hand can have another
             const font = createFont([{ lookupType: 10, lookupFlag: 0, subtables: [{}] }], [0]);
+            assert.throws(() => positionGlyphs(font, [1, 2], { script: 'DFLT' }), /Unknown GPOS lookup type: 10/);
+        });
+
+        it('throws on a lookup type that is not a GPOS lookup type, whatever the glyphs its subtables cover', function() {
+            // the glyphs a lookup can start at (see getLookupFirstGlyphDigest) are read for the GPOS lookup types only
+            const font = createFont([{ lookupType: 10, lookupFlag: 0, subtables: [{ coverage: { format: 1, glyphs: [99] } }] }], [0]);
             assert.throws(() => positionGlyphs(font, [1, 2], { script: 'DFLT' }), /Unknown GPOS lookup type: 10/);
         });
 

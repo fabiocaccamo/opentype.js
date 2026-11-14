@@ -112,13 +112,55 @@ describe('tables/cff.mjs', function () {
         assert.deepEqual(data, hex(cff.make(glyphs, options).encode()));
     });
 
+    it('gives no glyph to a CFF table whose CharStrings INDEX is empty', function () {
+        // the table above with the count of its CharStrings INDEX set to 0: an empty INDEX is a count of 0 without the
+        // other fields (Adobe Technical Note 5176, 5 INDEX Data)
+        const font = { tables: {} };
+        cff.parse(unhex(data), 0, font, {});
+        const emptyCharStringsData = unhex(data);
+        emptyCharStringsData.setUint16(font.tables.cff.topDict.charStrings, 0);
+        for (const options of loadModes) {
+            const emptyFont = { tables: {} };
+            cff.parse(emptyCharStringsData, 0, emptyFont, options);
+            assert.deepStrictEqual([emptyFont.nGlyphs, emptyFont.glyphs.length], [0, 0], JSON.stringify(options));
+        }
+    });
+
+    it('gives a CFF font the glyphs of its CharStrings INDEX in both load modes', function () {
+        // fontTools: len(CharStrings) is 1113, as maxp.numGlyphs, the last glyph is uniFEFF with an advance of 0
+        for (const options of loadModes) {
+            const font = loadSync('./test/fonts/SourceSansPro-Regular.otf', options);
+            const lastGlyph = font.glyphs.get(font.nGlyphs - 1);
+            assert.deepStrictEqual(
+                [font.nGlyphs, lastGlyph.name, lastGlyph.advanceWidth], [1113, 'uniFEFF', 0], JSON.stringify(options)
+            );
+        }
+    });
+
     /**
      * @see https://github.com/opentypejs/opentype.js/issues/524
      */
     it('can fall back to CIDs instead of strings when parsing the charset', function () {
+        // the table above with the SID of its glyph bumps in its format 0 charset set to 395, past the 391 standard
+        // strings and the 4 strings of its String INDEX: the charset keeps the SID
+        const font = { tables: {} };
+        cff.parse(unhex(data), 0, font, {});
+        const unknownStringData = unhex(data);
+        unknownStringData.setUint16(font.tables.cff.topDict.charset + 1, 395);
+        for (const options of loadModes) {
+            const unknownStringFont = { tables: {} };
+            cff.parse(unknownStringData, 0, unknownStringFont, options);
+            const charset = unknownStringFont.cffEncoding.charset;
+            assert.deepStrictEqual(charset, ['.notdef', 395], JSON.stringify(options));
+        }
+    });
+
+    it('gives the lowMemory charset of a CFF font the names of its glyphs', function () {
+        // fontTools: the charset has the 1151 names of the 1151 glyphs, the last one f_l
         const font = loadSync('./test/fonts/FiraSansOT-Medium.otf', { lowMemory: true });
-        assert.equal((new Set(font.cffEncoding.charset)).size, 1509);
-        assert.equal(font.cffEncoding.charset.includes(undefined), false);
+        const charset = font.cffEncoding.charset;
+        assert.deepStrictEqual([charset.length, new Set(charset).size, charset[charset.length - 1]], [1151, 1151, 'f_l']);
+        assert.equal(charset.includes(undefined), false);
     });
 
     it('can parse a CFF2 table', function() {

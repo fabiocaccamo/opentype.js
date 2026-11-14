@@ -139,6 +139,26 @@ describe('bidi.mjs', function() {
             assert.equal(sentences, 'ائتوني به أستخلصه لنفسي');
         });
 
+        it('goes on with an arabic sentence over a whitespace followed by a tashkeel char only', function() {
+            // U+06D6 ARABIC SMALL HIGH LIGATURE SAD WITH LAM WITH ALEF MAKSURA is a tashkeel char (isTashkeelArabicChar) out
+            // of the chars of isArabicChar: an arabic sentence ends at a whitespace with no arabic or tashkeel char after it
+            arabicTokenizer.tokenize('said: \u{628}\u{647} \u{6D6}.');
+            const sentences = arabicTokenizer.getContextRanges('arabicSentence').map(range => arabicTokenizer.rangeToText(range));
+            assert.deepStrictEqual(sentences, ['\u{628}\u{647} \u{6D6}']);
+        });
+
+        it('reverses each arabic sentence in place, with no update of the context ranges', function() {
+            // reversing the tokens of a sentence moves no range: a range update per sentence would read the whole text again
+            let contextUpdateCount = 0;
+            bidiScheherazade.tokenizer.on('updateContextsRanges', () => {
+                contextUpdateCount += 1;
+            });
+            bidiScheherazade.processText('one السلام عليكم two مرحبا three');
+            const tokenText = bidiScheherazade.tokenizer.tokens.map(token => token.char).join('');
+            assert.strictEqual(tokenText, 'one  مكيلع مالسلاtwo ابحرم three');
+            assert.strictEqual(contextUpdateCount, 0);
+        });
+
         // U+FD3E ORNATE LEFT PARENTHESIS and U+FD3F ORNATE RIGHT PARENTHESIS of the Arabic Presentation Forms-A block, of
         // the Common script and of the bidi class ON, which take the direction of the strong chars around them (UAX #9 N1)
         describe('the ornate parentheses', function() {
@@ -1310,7 +1330,7 @@ describe('bidi.mjs', function() {
         });
 
         itFailsUntilFixed('joins an arabic letter to the character of no script before it in the script run before, like HarfBuzz',
-            'applyArabicFeatures (src/bidi.mjs): arabicPresentationForms takes the tokens of the script run, without ' +
+            'applyScriptRunFeatures (src/bidi.mjs): arabicPresentationForms takes the tokens of the script run, without ' +
             'the joining pre-context of the run before it, so the seen after the tatweel of the Syriac run takes no final form',
             function() {
                 // the tatweel after the Syriac alaph is in the Syriac run, whose script its Script_Extensions have. With the
@@ -1930,7 +1950,7 @@ describe('bidi.mjs', function() {
             });
 
             itFailsUntilFixed('decomposes sara am with ccmp turned off, like the Thai shaper of HarfBuzz',
-                'thaiFeatures (src/features/thai/thaiFeatures.mjs): sara am is decomposed by the ccmp of the font only, not like the ' +
+                'getThaiFeatureStages (src/features/thai/thaiFeatures.mjs): sara am is decomposed by the ccmp of the font only, not like the ' +
                 'preprocess of the Thai shaper of HarfBuzz (preprocess_text_thai), so uni0E33 stays one glyph: [317, 367]',
                 () => {
                     // hb-shape --no-glyph-names --cluster-level=1 --features=-ccmp NotoSansThai-Medium-Testing-v1.ttf -u 0E01,0E33

@@ -4,7 +4,8 @@ import { SubstitutionAction, getSubstitutionGlyphEdits } from './featureQuery.mj
 import { getLookupJoinerFlags } from './featureValues.mjs';
 import {
     getLayoutGdefTable, getGdefGlyphClass, getLigatureId, getLigatureComponent, BASE_GLYPH_CLASS, LIGATURE_GLYPH_CLASS,
-    MARK_GLYPH_CLASS, getCachedLayoutValue, createIgnorableMatching, AUTO_JOINER_FLAGS
+    MARK_GLYPH_CLASS, getCachedLayoutValue, createIgnorableMatching, AUTO_JOINER_FLAGS, getSubtablesFirstGlyphCoverages,
+    getSubtablesFirstGlyphDigest, mayGlyphDigestHave, createLookupFirstGlyphFilter, getLookupFilterGlyphDigest
 } from '../layout.mjs';
 
 /**
@@ -450,24 +451,14 @@ function applySubstitution(action, glyphSequence, position) {
 }
 
 /**
- * Get the coverage tables of the first glyph of the subtables of a lookup, or null
- * when a subtable has none (the lookup is then tried at every glyph)
+ * Get the subtables of a lookup the coverage tables of their first glyph are read from (see
+ * getSubtablesFirstGlyphCoverages in layout.mjs): the subtables its extension subtables wrap for an extension lookup
  * @param {any} lookupTable
- * @returns {any[]|null}
+ * @returns {Array<any|undefined>}
  */
-function getLookupFirstGlyphCoverages(lookupTable) {
-    const coverages = [];
-    for (let i = 0; i < lookupTable.subtables.length; i++) {
-        const subtable = lookupTable.lookupType === 7 ? lookupTable.subtables[i].extension : lookupTable.subtables[i];
-        const coverage = subtable && (subtable.coverage ||
-            (subtable.inputCoverage && subtable.inputCoverage[0]) ||
-            (subtable.coverages && subtable.coverages[0]));
-        if (!coverage) {
-            return null;
-        }
-        coverages.push(coverage);
-    }
-    return coverages;
+function getLookupFirstGlyphSubtables(lookupTable) {
+    return lookupTable.lookupType === 7 ?
+        lookupTable.subtables.map(subtable => subtable.extension) : lookupTable.subtables;
 }
 
 /**
@@ -492,17 +483,28 @@ function getLookupFirstGlyphCoverages(lookupTable) {
  * skips them by default (see getLookupJoinerFlags in featureValues.mjs), the default if omitted: like HarfBuzz, the
  * lookup skips the default ignorables when it matches the other glyphs of a rule or of a ligature (see
  * createIgnorableMatching in layout.mjs)
+ * @param {LookupFirstGlyphFilter|null} [firstGlyphFilter] the glyphs the subtables of the lookup cover as their first
+ * glyph (see FeatureLookup.firstGlyphFilter), whose digest tells most glyphs they do not cover faster than their
+ * coverage tables (see getLookupFilterGlyphDigest in layout.mjs); none if omitted
  */
-function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureValue = () => 1, joinerFlags = AUTO_JOINER_FLAGS) {
+function applyLookupToTokens(
+    query, lookupTable, tag, tokens, getTokenFeatureValue = () => 1, joinerFlags = AUTO_JOINER_FLAGS, firstGlyphFilter = null
+) {
     if (query.isMaxGlyphCountExceeded) {
         return;
     }
     const layout = query.font.substitution;
-    const coverages = getLookupFirstGlyphCoverages(lookupTable);
+    const firstGlyphSubtables = getLookupFirstGlyphSubtables(lookupTable);
+    // null when a subtable has no coverage of its first glyph: the lookup is then tried at every glyph
+    const coverages = getSubtablesFirstGlyphCoverages(firstGlyphSubtables);
+    const firstGlyphDigest = getLookupFilterGlyphDigest(firstGlyphFilter, firstGlyphSubtables);
     // a glyph no subtable covers cannot start a substitution: skip it without building its context
     const isCovered = glyphIndex => {
         if (!coverages) {
             return true;
+        }
+        if (firstGlyphDigest && !mayGlyphDigestHave(firstGlyphDigest, glyphIndex)) {
+            return false;
         }
         return coverages.some(coverage => layout.getCoverageIndex(coverage, glyphIndex) >= 0);
     };
@@ -541,7 +543,21 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureVal
  * glyph like the global mask that HarfBuzz gives it
  * @property {JoinerFlags} joinerFlags how the lookup skips the zero width joiners and non-joiners, from the features
  * that have it (see getLookupJoinerFlags in featureValues.mjs)
+ * @property {LookupFirstGlyphFilter|null} firstGlyphFilter the glyphs the subtables of the lookup cover as their first
+ * glyph (see getLookupFirstGlyphDigest, and createLookupFirstGlyphFilter in layout.mjs), null when a subtable has no
+ * coverage of its first glyph or when the layout does not cache the lookups
  */
+
+/**
+ * The glyph digest of the glyphs the subtables of a GSUB lookup cover as their first glyph (see GlyphDigest in
+ * layout.mjs): it reads the coverage tables of all its subtables, so it is computed with the lookups the layout caches
+ * (see getFeaturesLookups)
+ * @param {any} lookupTable
+ * @returns {GlyphDigest|null} null when a subtable has no coverage of its first glyph
+ */
+function getLookupFirstGlyphDigest(lookupTable) {
+    return getSubtablesFirstGlyphDigest(getLookupFirstGlyphSubtables(lookupTable));
+}
 
 /**
  * Get the lookups of features in lookup list order, like HarfBuzz: each lookup once, with the tag of the (first)
@@ -559,7 +575,7 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureVal
  */
 function getFeaturesLookups(query, tags, script, language, withRequiredFeature = false) {
     const key = JSON.stringify(['lookups', tags, script, language, withRequiredFeature, query.shaper, query.getFeatureVariationIndex()]);
-    return getCachedLayoutValue(query.font, 'gsub', key, () => {
+    return getCachedLayoutValue(query.font, 'gsub', key, isCached => {
         const features = tags.map(tag => ({ tag, feature: query.getFeature({ tag, script, language }), isRequired: false }));
         const requiredFeature = withRequiredFeature && query.getRequiredFeature(script, language);
         if (requiredFeature) {
@@ -589,7 +605,14 @@ function getFeaturesLookups(query, tags, script, language, withRequiredFeature =
             const lookupTable = query.getLookupByIndex(lookupIndex);
             if (lookupTable) {
                 const { featureTags, ...lookupOrigin } = lookupOrigins.get(lookupIndex);
-                lookups.push({ lookupTable, ...lookupOrigin, joinerFlags: getLookupJoinerFlags(query.shaper, featureTags) });
+                lookups.push({
+                    lookupTable,
+                    ...lookupOrigin,
+                    joinerFlags: getLookupJoinerFlags(query.shaper, featureTags),
+                    firstGlyphFilter: createLookupFirstGlyphFilter(
+                        lookupTable, isCached, getLookupFirstGlyphSubtables, getLookupFirstGlyphDigest
+                    )
+                });
             }
         }
         return lookups;
@@ -612,21 +635,20 @@ function getLookupFeatureValue(query, featureLookup) {
 }
 
 /**
- * Apply the lookups of features to a list of tokens like HarfBuzz: in lookup list order, each one once and at every
- * glyph (see applyLookupToTokens), with the tag and the value of its first feature (see getLookupFeatureValue), so that
- * a lookup sees the glyphs the previous ones substituted, and not feature by feature
+ * Apply the lookups of features (see getFeaturesLookups) to a list of tokens like HarfBuzz: in lookup list order, each
+ * one once and at every glyph (see applyLookupToTokens), with the tag and the value of its first feature (see
+ * getLookupFeatureValue), so that a lookup sees the glyphs the previous ones substituted, and not feature by feature
  * @param {FeatureQuery} query
- * @param {string[]} tags feature tags
- * @param {string} script script tag
- * @param {string|undefined} language language tag, the default language system of the script if undefined
+ * @param {FeatureLookup[]} featureLookups
  * @param {Token[]} tokens
- * @param {boolean} [withRequiredFeature=false] whether to add the lookups of the required feature of the language system
- * (see getRequiredFeatureStage)
  */
-function applyFeaturesToTokens(query, tags, script, language, tokens, withRequiredFeature = false) {
-    for (const featureLookup of getFeaturesLookups(query, tags, script, language, withRequiredFeature)) {
+function applyFeatureLookupsToTokens(query, featureLookups, tokens) {
+    for (const featureLookup of featureLookups) {
         const featureValue = getLookupFeatureValue(query, featureLookup);
-        applyLookupToTokens(query, featureLookup.lookupTable, featureLookup.tag, tokens, () => featureValue, featureLookup.joinerFlags);
+        applyLookupToTokens(
+            query, featureLookup.lookupTable, featureLookup.tag, tokens, () => featureValue, featureLookup.joinerFlags,
+            featureLookup.firstGlyphFilter
+        );
     }
 }
 
@@ -649,25 +671,34 @@ function getRequiredFeatureStage(stages, requiredFeature) {
 const REQUIRED_VARIATION_ALTERNATES_TAG = 'rvrn';
 
 /**
- * Apply features to a run of text in the stages of the shapers of HarfBuzz that add no stage of their own (the
- * default shaper, the Thai shaper): the lookups of rvrn first, then the lookups of the other features together
- * (see applyFeaturesToTokens), the lookups of the required feature of the language system in its stage (see
- * getRequiredFeatureStage)
- * @param {FeatureQuery} query
+ * A stage of the GSUB features of a script run, like a stage of the map of HarfBuzz: its lookups apply after the ones
+ * of the stages before it (see applyFeatureLookupsToTokens)
+ * @typedef FeatureStage
+ * @type Object
+ * @property {FeatureLookup[]} lookups the lookups of the features of the stage (see getFeaturesLookups)
+ * @property {string} [formTag] the arabic form of the stage, whose lookups start at the letters of the form (see
+ * arabicPresentationForms in arab/arabicPresentationForms.mjs), none for the other stages
+ */
+
+/**
+ * The stages of features of the shapers of HarfBuzz that add no stage of their own (the default shaper, the Thai
+ * shaper): the lookups of rvrn first, then the lookups of the other features together, the lookups of the required
+ * feature of the language system in its stage (see getRequiredFeatureStage)
+ * @param {FeatureQuery} query its shaper is the one of the run (see FeatureQuery.startScriptRun)
  * @param {string[]} tags feature tags
  * @param {string} script script tag
  * @param {string|undefined} language language tag, the default language system of the script if undefined
- * @param {Token[]} tokens
+ * @returns {FeatureStage[]}
  */
-function applyFeatureStagesToTokens(query, tags, script, language, tokens) {
+function getDefaultShaperFeatureStages(query, tags, script, language) {
     const stages = [
         tags.filter(tag => tag === REQUIRED_VARIATION_ALTERNATES_TAG),
         tags.filter(tag => tag !== REQUIRED_VARIATION_ALTERNATES_TAG)
     ];
     const requiredFeatureStage = getRequiredFeatureStage(stages, query.getRequiredFeature(script, language));
-    for (let i = 0; i < stages.length; i++) {
-        applyFeaturesToTokens(query, stages[i], script, language, tokens, i === requiredFeatureStage);
-    }
+    return stages.map((stageTags, stageIndex) => ({
+        lookups: getFeaturesLookups(query, stageTags, script, language, stageIndex === requiredFeatureStage)
+    }));
 }
 
 export default applySubstitution;
@@ -680,8 +711,8 @@ export {
     applyLookupToTokens,
     getFeaturesLookups,
     getLookupFeatureValue,
-    applyFeaturesToTokens,
+    applyFeatureLookupsToTokens,
     getRequiredFeatureStage,
-    applyFeatureStagesToTokens,
+    getDefaultShaperFeatureStages,
     REQUIRED_VARIATION_ALTERNATES_TAG
 };

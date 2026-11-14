@@ -1,8 +1,46 @@
 import assert from 'assert';
-import Tokenizer, { Token, getTextCharacters } from '../src/tokenizer.mjs';
+import Tokenizer, { Token, ContextParams, getTextCharacters } from '../src/tokenizer.mjs';
 import { isWhiteSpace, isArabicChar } from '../src/char.mjs';
 
 describe('tokenizer.mjs', function() {
+    describe('ContextParams', function() {
+        it('gives the item at an offset from the current one, null outside the context', function() {
+            const contextParams = new ContextParams(['a', 'b', 'c', 'd'], 1);
+            assert.deepStrictEqual([-2, -1, 0, 1, 2, 3].map(offset => contextParams.get(offset)), [null, 'a', 'b', 'c', 'd', null]);
+            contextParams.setCurrentIndex(3);
+            assert.deepStrictEqual([-3, 0, 1].map(offset => contextParams.get(offset)), ['a', 'd', null]);
+        });
+
+        it('gives the backtrack and the lookahead of the current item, copies of the context read when they are read', function() {
+            const context = ['a', 'b', 'c', 'd'];
+            const contextParams = new ContextParams(context, 1);
+            assert.deepStrictEqual([contextParams.current, contextParams.backtrack, contextParams.lookahead], ['b', ['a'], ['c', 'd']]);
+            contextParams.setCurrentIndex(2);
+            assert.deepStrictEqual([contextParams.current, contextParams.backtrack, contextParams.lookahead], ['c', ['a', 'b'], ['d']]);
+            assert.notStrictEqual(contextParams.lookahead, contextParams.lookahead);
+            context.push('e');
+            assert.deepStrictEqual(contextParams.lookahead, ['d', 'e']);
+        });
+
+        it('reads only the current item when it is created or moved, so a text is tokenized in linear time', function() {
+            // each character of a text used to copy the characters before it and after it into its ContextParams
+            const readIndexes = [];
+            const context = new Proxy(['a', 'b', 'c', 'd'], {
+                get: (items, property) => {
+                    if (/^\d+$/.test(property)) {
+                        readIndexes.push(Number(property));
+                    }
+                    return items[property];
+                }
+            });
+            const contextParams = new ContextParams(context, 1);
+            contextParams.setCurrentIndex(2);
+            assert.deepStrictEqual(readIndexes, [1, 2]);
+            assert.strictEqual(contextParams.get(-1), 'b');
+            assert.deepStrictEqual(readIndexes, [1, 2, 1]);
+        });
+    });
+
     describe('tokenize', function() {
         let tokenizer;
         beforeEach(function() {
