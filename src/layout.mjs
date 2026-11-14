@@ -3,6 +3,7 @@
 
 import check from './check.mjs';
 import { DEFAULT_IGNORABLE_TYPES } from './char.mjs';
+import { arraysEqual } from './util.mjs';
 
 function searchTag(arr, tag) {
     /* jshint bitwise: false */
@@ -315,6 +316,156 @@ function getCoverageIndex(coverageTable, glyphIndex) {
     }
 }
 
+// the shifts of the masks of a glyph digest (see GlyphDigest), each mask a bit for each run of 2^shift glyph indexes
+const GLYPH_DIGEST_SHIFTS = [4, 0, 9];
+const GLYPH_DIGEST_MASK_BITS = 32;
+
+/**
+ * A filter of a set of glyphs, like the hb_set_digest_t of HarfBuzz: one 32-bit mask for each of GLYPH_DIGEST_SHIFTS,
+ * in which a glyph sets the bit of its index shifted right, modulo 32. A glyph whose bits are not all set is not in the
+ * set; a glyph whose bits are all set may be in it.
+ * @typedef GlyphDigest
+ * @type number[]
+ */
+
+/**
+ * Add a range of glyph indexes to a glyph digest
+ * @param {GlyphDigest} glyphDigest - updated
+ * @param {number} firstGlyphIndex
+ * @param {number} lastGlyphIndex - included
+ */
+function addGlyphRangeToDigest(glyphDigest, firstGlyphIndex, lastGlyphIndex) {
+    for (let i = 0; i < GLYPH_DIGEST_SHIFTS.length; i++) {
+        const firstBit = firstGlyphIndex >>> GLYPH_DIGEST_SHIFTS[i];
+        const lastBit = lastGlyphIndex >>> GLYPH_DIGEST_SHIFTS[i];
+        if (lastBit - firstBit >= GLYPH_DIGEST_MASK_BITS - 1) {
+            glyphDigest[i] = -1;
+            continue;
+        }
+        for (let bit = firstBit; bit <= lastBit; bit++) {
+            glyphDigest[i] |= 1 << (bit % GLYPH_DIGEST_MASK_BITS);
+        }
+    }
+}
+
+/**
+ * The glyph digest of the glyphs of coverage tables
+ * @param {object[]} coverageTables - OpenType Layout coverage tables (see getCoverageIndex)
+ * @returns {GlyphDigest}
+ */
+function getCoveragesGlyphDigest(coverageTables) {
+    const glyphDigest = GLYPH_DIGEST_SHIFTS.map(() => 0);
+    for (const coverageTable of coverageTables) {
+        if (coverageTable.format === 1) {
+            for (const glyphIndex of coverageTable.glyphs) {
+                addGlyphRangeToDigest(glyphDigest, glyphIndex, glyphIndex);
+            }
+        } else if (coverageTable.format === 2) {
+            for (const range of coverageTable.ranges) {
+                addGlyphRangeToDigest(glyphDigest, range.start, range.end);
+            }
+        }
+    }
+    return glyphDigest;
+}
+
+/**
+ * Whether a glyph may be in the set of glyphs of a glyph digest: false when it is not
+ * @param {GlyphDigest} glyphDigest
+ * @param {number} glyphIndex
+ * @returns {boolean}
+ */
+function mayGlyphDigestHave(glyphDigest, glyphIndex) {
+    for (let i = 0; i < GLYPH_DIGEST_SHIFTS.length; i++) {
+        if (!(glyphDigest[i] & (1 << ((glyphIndex >>> GLYPH_DIGEST_SHIFTS[i]) % GLYPH_DIGEST_MASK_BITS)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * The coverage table of the first glyph of a GSUB or GPOS subtable, the glyph it applies at: the coverage table of a
+ * single, multiple, alternate, ligature, pair, cursive or reverse chaining subtable and of a contextual subtable of
+ * format 1 or 2, the mark coverage of a mark attachment subtable, the first input coverage of a contextual subtable
+ * of format 3. Not of an extension subtable: pass the subtable it wraps (see getLookupFirstGlyphSubtables in
+ * features/applySubstitution.mjs and position.mjs)
+ * @param {object} subtable
+ * @returns {object|undefined} undefined for a subtable without one
+ */
+function getSubtableFirstGlyphCoverage(subtable) {
+    return subtable.coverage || subtable.markCoverage || subtable.mark1Coverage ||
+        (subtable.inputCoverage && subtable.inputCoverage[0]) || (subtable.coverages && subtable.coverages[0]);
+}
+
+/**
+ * The coverage tables of the first glyph of subtables (see getSubtableFirstGlyphCoverage)
+ * @param {Array<object|undefined>} subtables - GSUB or GPOS subtables, not extension subtables: undefined for the
+ * missing subtable of a malformed extension subtable
+ * @returns {object[]|null} null when a subtable has no coverage of its first glyph, and may apply at any glyph
+ */
+function getSubtablesFirstGlyphCoverages(subtables) {
+    const coverageTables = subtables.map(subtable => subtable && getSubtableFirstGlyphCoverage(subtable));
+    return coverageTables.every(Boolean) ? coverageTables : null;
+}
+
+/**
+ * The glyph digest of the glyphs that subtables can apply at, the union of the coverage of their first glyph (see
+ * getSubtablesFirstGlyphCoverages): a lookup of these subtables applies at no glyph the digest does not have
+ * @param {Array<object|undefined>} subtables - GSUB or GPOS subtables, not extension subtables
+ * @returns {GlyphDigest|null} null when a subtable has no coverage of its first glyph, and may apply at any glyph
+ */
+function getSubtablesFirstGlyphDigest(subtables) {
+    const coverageTables = getSubtablesFirstGlyphCoverages(subtables);
+    return coverageTables && getCoveragesGlyphDigest(coverageTables);
+}
+
+/**
+ * The glyphs a GSUB or GPOS lookup can start at, the glyph digest of the coverage of the first glyph of its subtables,
+ * with a copy of the subtables it was read from, the ones its extension subtables wrap (see getLookupFilterGlyphDigest)
+ * @typedef LookupFirstGlyphFilter
+ * @type Object
+ * @property {GlyphDigest} glyphDigest
+ * @property {Array<object|undefined>} subtables
+ */
+
+/**
+ * The first glyph filter of a lookup the layout caches with the lookups of its features (see getCachedLayoutValue):
+ * none for a lookup it does not cache, which applies once, so that reading its coverage tables would cost more than it
+ * saves
+ * @param {object} lookupTable
+ * @param {boolean} isCached - whether the layout caches the lookup
+ * @param {function(object): Array<object|undefined>} getFirstGlyphSubtables - the subtables of a lookup the digest is
+ * read from, the subtables its extension subtables wrap
+ * @param {function(object): (GlyphDigest|null)} getFirstGlyphDigest - the digest of a lookup, null when one of its
+ * subtables may start at any glyph
+ * @returns {LookupFirstGlyphFilter|null}
+ */
+function createLookupFirstGlyphFilter(lookupTable, isCached, getFirstGlyphSubtables, getFirstGlyphDigest) {
+    if (!isCached) {
+        return null;
+    }
+    const glyphDigest = getFirstGlyphDigest(lookupTable);
+    return glyphDigest && { glyphDigest, subtables: getFirstGlyphSubtables(lookupTable).slice() };
+}
+
+/**
+ * The glyph digest of the first glyph filter of a lookup while the lookup has the subtables the filter was read from:
+ * none, so that the lookup is tried at every glyph, after a subtable was added to the lookup or replaced in it, or in
+ * one of its extension subtables (e.g. in the subtables of a lookup of Layout.getLookupTables), which may start at
+ * other glyphs
+ * @param {LookupFirstGlyphFilter|null} firstGlyphFilter
+ * @param {Array<object|undefined>} firstGlyphSubtables - the subtables the lookup has now, the ones its extension
+ * subtables wrap (see createLookupFirstGlyphFilter)
+ * @returns {GlyphDigest|null}
+ */
+function getLookupFilterGlyphDigest(firstGlyphFilter, firstGlyphSubtables) {
+    if (!firstGlyphFilter || !arraysEqual(firstGlyphFilter.subtables, firstGlyphSubtables)) {
+        return null;
+    }
+    return firstGlyphFilter.glyphDigest;
+}
+
 // the lookupFlag bits (OpenType Layout Common Table Formats, LookupFlag bit enumeration)
 const RIGHT_TO_LEFT = 0x0001;
 const IGNORE_BASE_GLYPHS = 0x0002;
@@ -345,20 +496,20 @@ const MAX_CACHED_LAYOUT_VALUES = 1024;
 
 /**
  * A value computed from the GSUB or GPOS table of a font (e.g. the lookups of a set of features), computed once for
- * the table and a key: the methods of Layout that add a script, a language system, a feature or a lookup to the table
- * clear its values (see clearLayoutCache), a table that replaces it has values of its own. The value is computed at
- * every call for a font without the table or whose layout cache is off (font.isLayoutCacheEnabled, see the
- * layoutCache option of parse in opentype.mjs).
+ * the table and a key: the methods of Layout that add a script, a language system, a feature or a lookup to the table,
+ * and the methods of Substitution that add a substitution to a lookup, clear its values (see clearLayoutCache), a table
+ * that replaces it has values of its own. The value is computed at every call for a font without the table or whose
+ * layout cache is off (font.isLayoutCacheEnabled, see the layoutCache option of parse in opentype.mjs).
  * @param {Font} font
  * @param {string} tableName - 'gsub' or 'gpos'
  * @param {string} key - what the value depends on besides the table
- * @param {function(): any} computeValue
+ * @param {function(boolean): any} computeValue - given whether the value it computes is cached
  * @returns {any}
  */
 function getCachedLayoutValue(font, tableName, key, computeValue) {
     const table = font.tables[tableName];
     if (!table || !font.isLayoutCacheEnabled) {
-        return computeValue();
+        return computeValue(false);
     }
     let cache = layoutCaches.get(table);
     if (!cache) {
@@ -369,14 +520,14 @@ function getCachedLayoutValue(font, tableName, key, computeValue) {
         if (cache.size >= MAX_CACHED_LAYOUT_VALUES) {
             cache.clear();
         }
-        cache.set(key, computeValue());
+        cache.set(key, computeValue(true));
     }
     return cache.get(key);
 }
 
 /**
  * Clear the values computed from a GSUB or GPOS table (see getCachedLayoutValue), after a change of its scripts,
- * language systems, features or lookups.
+ * language systems, features, lookups or subtables.
  * @param {object} table
  */
 function clearLayoutCache(table) {
@@ -541,6 +692,17 @@ function isGlyphIgnoredByLookup(gdef, lookupTable, glyphIndex) {
 // the joiner flags of the lookups of the features of HarfBuzz but a few (F_MANUAL_ZWNJ and F_MANUAL_ZWJ), and of the
 // required feature: both joiners skipped
 const AUTO_JOINER_FLAGS = Object.freeze({ autoZeroWidthNonJoiner: true, autoZeroWidthJoiner: true });
+
+/**
+ * Whether two joiner flags skip the same joiners
+ * @param {JoinerFlags} joinerFlags
+ * @param {JoinerFlags} otherJoinerFlags
+ * @returns {boolean}
+ */
+function areJoinerFlagsEqual(joinerFlags, otherJoinerFlags) {
+    return joinerFlags.autoZeroWidthNonJoiner === otherJoinerFlags.autoZeroWidthNonJoiner &&
+        joinerFlags.autoZeroWidthJoiner === otherJoinerFlags.autoZeroWidthJoiner;
+}
 
 /**
  * The default ignorables a lookup skips when it matches glyphs, like the matcher_t of the skipping iterators of
@@ -1213,6 +1375,13 @@ Layout.prototype = {
 export default Layout;
 export {
     getCoverageIndex,
+    getCoveragesGlyphDigest,
+    mayGlyphDigestHave,
+    getSubtablesFirstGlyphCoverages,
+    getSubtablesFirstGlyphDigest,
+    getSubtableFirstGlyphCoverage,
+    createLookupFirstGlyphFilter,
+    getLookupFilterGlyphDigest,
     getLayoutGdefTable,
     getGdefGlyphClass,
     isMarkGlyph,
@@ -1224,6 +1393,7 @@ export {
     matchGlyphSequence,
     matchesGlyphIndex,
     AUTO_JOINER_FLAGS,
+    areJoinerFlagsEqual,
     NO_IGNORABLE_MATCHING,
     createIgnorableMatching,
     matchSequenceContext,
@@ -1237,6 +1407,7 @@ export {
     MARK_GLYPH_CLASS,
     getRequiredFeatureIndex,
     getCachedLayoutValue,
+    clearLayoutCache,
     getOpenTypeScriptTags,
     isRightToLeftScript,
     getChosenScriptTag,

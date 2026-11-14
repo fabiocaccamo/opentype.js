@@ -10,7 +10,8 @@ import {
     getTokenLigatureProperties,
     getTokenLigatedGlyphs,
     getTokenDefaultIgnorableType,
-    applyFeaturesToTokens,
+    getFeaturesLookups,
+    applyFeatureLookupsToTokens,
     getRequiredFeatureStage,
     REQUIRED_VARIATION_ALTERNATES_TAG
 } from './features/applySubstitution.mjs';
@@ -26,8 +27,8 @@ import {
 } from './layout.mjs';
 import arabicSentenceCheck from './features/arab/contextCheck/arabicSentence.mjs';
 import arabicPresentationForms from './features/arab/arabicPresentationForms.mjs';
-import latinFeatures from './features/latn/latinFeatures.mjs';
-import thaiFeatures from './features/thai/thaiFeatures.mjs';
+import getLatinFeatureStages from './features/latn/latinFeatures.mjs';
+import getThaiFeatureStages from './features/thai/thaiFeatures.mjs';
 
 /**
  * Create Bidi. features
@@ -96,10 +97,12 @@ function reverseArabicSentences() {
         for (const token of rangeTokens) {
             this.rightToLeftTokens.add(token);
         }
+        // silent: reversing a range in place moves no range, the context ranges need no update
         this.tokenizer.replaceRange(
             range.startIndex,
             range.endOffset,
-            rangeTokens.reverse()
+            rangeTokens.reverse(),
+            true
         );
     }
 }
@@ -290,53 +293,58 @@ function getArabicStagesAfterForms(query, script, language) {
 }
 
 /**
- * Apply the enabled arabic features to an arabic script run, in the stages of the Arabic shaper of HarfBuzz: rvrn,
- * then the direction features and rand, then ccmp and locl, then each presentation form of the letters of the run,
+ * The stages of the enabled arabic features of the arabic script runs, the stages of the Arabic shaper of HarfBuzz:
+ * rvrn, then the direction features and rand, then ccmp and locl, then each presentation form of the letters of a run,
  * then rlig, then calt, then the other features (see getStagesBeforeShaperFeatures and getArabicStagesAfterForms), the
  * lookups of the required feature of the language system in its stage (see getRequiredFeatureStage), at every glyph
- * of the run, merged with the lookups of the stage in lookup list order
- * @param {Token[]} tokens the tokens of the run
- * @param {string} script the script tag of the run in the GSUB table
- * @param {string[]} tags the enabled feature tags of the run (see getScriptRunFeatureTags)
- * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags)
+ * of a run, merged with the lookups of the stage in lookup list order
+ * @param {string} script the script tag of the runs in the GSUB table
+ * @param {string[]} tags the enabled feature tags of the runs (see getScriptRunFeatureTags)
+ * @param {string[]} directionTags the direction features of the runs (see getDirectionFeatureTags)
+ * @returns {FeatureStage[]}
  */
-function applyArabicFeatures(tokens, script, tags, directionTags) {
+function getArabicFeatureStages(script, tags, directionTags) {
     const stagesBeforeForms = getStagesBeforeShaperFeatures(directionTags);
     const formStages = ARABIC_FORM_TAGS.map(tag => [tag]);
     const shaperStages = stagesBeforeForms.concat(formStages, getArabicStagesAfterForms(this.query, script, this.language));
     const stages = getFeatureStages(tags, shaperStages);
     const firstFormStage = stagesBeforeForms.length;
     const requiredFeatureStage = getRequiredFeatureStage(stages, this.query.getRequiredFeature(script, this.language));
+    const featureStages = [];
     for (let i = 0; i < stages.length; i++) {
         const isFormStage = i >= firstFormStage && i < firstFormStage + formStages.length;
-        if (isFormStage) {
+        const withRequiredFeature = i === requiredFeatureStage;
+        if (!isFormStage) {
+            featureStages.push({ lookups: getFeaturesLookups(this.query, stages[i], script, this.language, withRequiredFeature) });
+        } else if (stages[i].length) {
             // the required feature is in the stage of a form only when the form is enabled (see getRequiredFeatureStage)
-            if (stages[i].length) {
-                arabicPresentationForms.call(this, tokens, script, stages[i][0], i === requiredFeatureStage);
-            }
-        } else {
-            applyFeaturesToTokens(this.query, stages[i], script, this.language, tokens, i === requiredFeatureStage);
+            const formTag = stages[i][0];
+            featureStages.push({
+                lookups: getFeaturesLookups(this.query, [formTag], script, this.language, withRequiredFeature),
+                formTag
+            });
         }
     }
+    return featureStages;
 }
 
 /**
- * Apply the enabled indic features to a script run of the Indic shaper of HarfBuzz, in its stages: rvrn, then the
- * direction features and rand, then ccmp and locl (see getStagesBeforeShaperFeatures), then nukt, then the other
+ * The stages of the enabled indic features of the script runs of the Indic shaper of HarfBuzz, its stages: rvrn, then
+ * the direction features and rand, then ccmp and locl (see getStagesBeforeShaperFeatures), then nukt, then the other
  * features, the lookups of the required feature of the language system in its stage (see getRequiredFeatureStage).
  * Not yet the reordering and the other features of the Indic shaper.
- * @param {Token[]} tokens the tokens of the run
- * @param {string} script the script tag of the run in the GSUB table
- * @param {string[]} tags the enabled feature tags of the run (see getScriptRunFeatureTags)
- * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags)
+ * @param {string} script the script tag of the runs in the GSUB table
+ * @param {string[]} tags the enabled feature tags of the runs (see getScriptRunFeatureTags)
+ * @param {string[]} directionTags the direction features of the runs (see getDirectionFeatureTags)
+ * @returns {FeatureStage[]}
  */
-function applyIndicFeatures(tokens, script, tags, directionTags) {
+function getIndicFeatureStages(script, tags, directionTags) {
     const shaperStages = getStagesBeforeShaperFeatures(directionTags).concat([[INDIC_NUKTA_FORMS_TAG]]);
     const stages = getFeatureStages(tags, shaperStages);
     const requiredFeatureStage = getRequiredFeatureStage(stages, this.query.getRequiredFeature(script, this.language));
-    for (let i = 0; i < stages.length; i++) {
-        applyFeaturesToTokens(this.query, stages[i], script, this.language, tokens, i === requiredFeatureStage);
-    }
+    return stages.map((stageTags, stageIndex) => ({
+        lookups: getFeaturesLookups(this.query, stageTags, script, this.language, stageIndex === requiredFeatureStage)
+    }));
 }
 
 /**
@@ -377,43 +385,72 @@ function getScriptRunFeatureTags(shaper, directionTags) {
 }
 
 /**
- * Apply the enabled features of its shaper and of its direction to a script run (see getScriptRunFeatureTags), with
- * the script tag of the run that the GSUB table has (see selectScriptTag) and the language of the features. Like the
- * direction of a buffer of HarfBuzz, the direction features of a run are the ones of the direction of its script (see
- * getDirectionFeatureTags), and like a buffer of HarfBuzz, it starts with the initial random state and has a maximum
+ * The features of the script runs of the same script tags: the shaper of their features (see getScriptRunShaper), the
+ * script tag of the runs that the GSUB table has (see selectScriptTag), and their direction features, the ones of the
+ * direction of their script like the direction of a buffer of HarfBuzz (see getDirectionFeatureTags)
+ * @param {string[]} scriptTags the OpenType script tags of the runs
+ * @returns {{shaper: string, script: string, directionTags: string[]}}
+ */
+function getScriptRunFeatures(scriptTags) {
+    return {
+        shaper: getScriptRunShaper(scriptTags, getChosenScriptTag(this.query.font.substitution, scriptTags)),
+        script: selectScriptTag(this.query.font.substitution, scriptTags),
+        directionTags: getDirectionFeatureTags(scriptTags)
+    };
+}
+
+/**
+ * The stages of the enabled features of the script runs of a shaper (see getScriptRunFeatureTags), the stages of the
+ * shaper of HarfBuzz (see FeatureStage in applySubstitution.mjs), computed while the query shapes one of these runs
+ * (see FeatureQuery.startScriptRun)
+ * @param {{shaper: string, script: string, directionTags: string[]}} runFeatures see getScriptRunFeatures
+ * @returns {FeatureStage[]}
+ */
+function getScriptRunFeatureStages(runFeatures) {
+    const { shaper, script, directionTags } = runFeatures;
+    const tags = getScriptRunFeatureTags.call(this, shaper, directionTags);
+    switch (shaper) {
+        case 'arab':
+            return getArabicFeatureStages.call(this, script, tags, directionTags);
+        case 'thai':
+            return getThaiFeatureStages.call(this, script, tags);
+        case 'indic':
+            return getIndicFeatureStages.call(this, script, tags, directionTags);
+        default:
+            return getLatinFeatureStages.call(this, script, tags);
+    }
+}
+
+/**
+ * Apply the enabled features of its shaper and of its direction to a script run (see getScriptRunFeatures), stage
+ * after stage (see getScriptRunFeatureStages), the lookups of an arabic form starting at the letters of the form (see
+ * arabicPresentationForms). Like a buffer of HarfBuzz, the run starts with the initial random state and has a maximum
  * number of glyphs of its own (see FeatureQuery.startScriptRun).
  * @param {{tokens: Token[], scriptTags: string[]}} run
- * @param {function(string[]): string} getRunShaper the shaper of the features of the script tags of a run (see
- * getScriptRunShaper)
+ * @param {function(string[]): Object} getRunFeatures the features of the script tags of a run (see
+ * getScriptRunFeatures)
+ * @param {function(string[]): FeatureStage[]} getRunFeatureStages the stages of the features of the script tags of a
+ * run (see getScriptRunFeatureStages)
  */
-function applyScriptRunFeatures(run, getRunShaper) {
+function applyScriptRunFeatures(run, getRunFeatures, getRunFeatureStages) {
     // a text without registered features is not shaped, and a font without a GSUB table has no lookup to apply (the
     // Layout methods create the table when a lookup is added)
     if (!Object.keys(this.featuresTags).length || !this.query.font.tables.gsub) {
         return;
     }
-    const shaper = getRunShaper(run.scriptTags);
+    const runFeatures = getRunFeatures(run.scriptTags);
     // a shaper with no registered features is skipped, an empty list of features still applies the required feature
-    if (!this.featuresTags[shaper]) {
+    if (!this.featuresTags[runFeatures.shaper]) {
         return;
     }
     checkGlyphIndexStatus.call(this);
-    const script = selectScriptTag(this.query.font.substitution, run.scriptTags);
-    const directionTags = getDirectionFeatureTags(run.scriptTags);
-    const tags = getScriptRunFeatureTags.call(this, shaper, directionTags);
-    this.query.startScriptRun(directionTags, run.tokens.length, shaper);
-    switch (shaper) {
-        case 'arab':
-            applyArabicFeatures.call(this, run.tokens, script, tags, directionTags);
-            break;
-        case 'thai':
-            thaiFeatures.call(this, run.tokens, script, tags);
-            break;
-        case 'indic':
-            applyIndicFeatures.call(this, run.tokens, script, tags, directionTags);
-            break;
-        default:
-            latinFeatures.call(this, run.tokens, script, tags);
+    this.query.startScriptRun(runFeatures.directionTags, run.tokens.length, runFeatures.shaper);
+    for (const stage of getRunFeatureStages(run.scriptTags)) {
+        if (stage.formTag) {
+            arabicPresentationForms(this.query, run.tokens, stage.formTag, stage.lookups);
+        } else {
+            applyFeatureLookupsToTokens(this.query, stage.lookups, run.tokens);
+        }
     }
 }
 
@@ -427,14 +464,16 @@ Bidi.prototype.checkContextReady = function (contextId) {
 
 /**
  * Apply the features to the script runs of the text, each run on its own like HarfBuzz, then lay the arabic sentences
- * out from right to left. The shaper of the runs of the same script tags is computed once.
+ * out from right to left. The features of the runs of the same script tags and their stages are computed once, like
+ * the shape plan of HarfBuzz.
  */
 Bidi.prototype.applyFeaturesToContexts = function () {
-    const getRunShaper = memoizeByScriptTags(scriptTags =>
-        getScriptRunShaper(scriptTags, getChosenScriptTag(this.query.font.substitution, scriptTags))
+    const getRunFeatures = memoizeByScriptTags(scriptTags => getScriptRunFeatures.call(this, scriptTags));
+    const getRunFeatureStages = memoizeByScriptTags(scriptTags =>
+        getScriptRunFeatureStages.call(this, getRunFeatures(scriptTags))
     );
     for (const run of this.scriptRuns) {
-        applyScriptRunFeatures.call(this, run, getRunShaper);
+        applyScriptRunFeatures.call(this, run, getRunFeatures, getRunFeatureStages);
     }
     if (this.checkContextReady('arabicSentence')) {
         reverseArabicSentences.call(this);

@@ -59,7 +59,7 @@ function calcCFFSubroutineBias(subrs) {
     return bias;
 }
 
-// @TODO: reduce code duplication between parseCFFIndex(), parseCFFIndexLowMemory() and getCffIndexObject()
+// @TODO: reduce code duplication between parseCFFIndex() and parseCFFIndexLowMemory()
 
 // Parse a `CFF` INDEX array.
 // An index array consists of a list of offsets, then a list of objects at those offsets.
@@ -118,22 +118,7 @@ function parseCFFIndexLowMemory(data, start, version) {
         endOffset = start + countLength;
     }
 
-    return {offsets: offsets, startOffset: start, endOffset: endOffset};
-}
-function getCffIndexObject(i, offsets, data, start, conversionFn, version) {
-    const count = version > 1 ? parse.getULong(data, start) : parse.getCard16(data, start);
-    const countLength = version > 1 ? 4 : 2;
-    let objectOffset = 0;
-    if (count !== 0) {
-        const offsetSize = parse.getByte(data, start + countLength);
-        objectOffset = start + ((count + 1) * offsetSize) + countLength;
-    }
-
-    let value = parse.getBytes(data, objectOffset + offsets[i], objectOffset + offsets[i + 1]);
-    if (conversionFn) {
-        value = conversionFn(value);
-    }
-    return value;
+    return {count: count, offsets: offsets, objectOffset: objectOffset, startOffset: start, endOffset: endOffset};
 }
 
 // Parse a `CFF` DICT real value.
@@ -1293,14 +1278,13 @@ function parseCFFTable(data, start, font, opt) {
     }
 
     // Offsets in the top dict are relative to the beginning of the CFF data, so add the CFF start offset.
-    let charStringsIndex;
-    if (opt.lowMemory) {
-        charStringsIndex = parseCFFIndexLowMemory(data, start + topDict.charStrings, header.formatMajor);
-        font.nGlyphs = charStringsIndex.offsets.length - (header.formatMajor > 1 ? 1 : 0); // number of elements is count + 1
-    } else {
-        charStringsIndex = parseCFFIndex(data, start + topDict.charStrings, null, header.formatMajor);
-        font.nGlyphs = charStringsIndex.objects.length;
-    }
+    // The charstrings are read when the outline of their glyph is first drawn (see cffGlyphLoader in glyphset.mjs).
+    const charStringsIndex = parseCFFIndexLowMemory(data, start + topDict.charStrings, header.formatMajor);
+    const { offsets: charStringOffsets, objectOffset: charStringsObjectOffset } = charStringsIndex;
+    const readCharstring = index => parse.getBytes(
+        data, charStringsObjectOffset + charStringOffsets[index], charStringsObjectOffset + charStringOffsets[index + 1]
+    );
+    font.nGlyphs = charStringsIndex.count;
 
     if ( header.formatMajor > 1 && font.tables.maxp && font.nGlyphs !== font.tables.maxp.numGlyphs ) {
         console.error(`Glyph count in the CFF2 table (${font.nGlyphs}) must correspond to the glyph count in the maxp table (${font.tables.maxp.numGlyphs})`);
@@ -1339,13 +1323,11 @@ function parseCFFTable(data, start, font, opt) {
     font.glyphs = new glyphset.GlyphSet(font);
     if (opt.lowMemory) {
         font._push = function(i) {
-            const charString = getCffIndexObject(i, charStringsIndex.offsets, data, start + topDict.charStrings, undefined, header.formatMajor);
-            font.glyphs.push(i, glyphset.cffGlyphLoader(font, i, parseCFFCharstring, charString, header.formatMajor));
+            font.glyphs.push(i, glyphset.cffGlyphLoader(font, i, parseCFFCharstring, readCharstring, header.formatMajor));
         };
     } else {
         for (let i = 0; i < font.nGlyphs; i += 1) {
-            const charString = charStringsIndex.objects[i];
-            font.glyphs.push(i, glyphset.cffGlyphLoader(font, i, parseCFFCharstring, charString, header.formatMajor));
+            font.glyphs.push(i, glyphset.cffGlyphLoader(font, i, parseCFFCharstring, readCharstring, header.formatMajor));
         }
     }
 

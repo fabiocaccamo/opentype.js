@@ -3,7 +3,7 @@
  */
 
 import { getArabicJoiningType } from '../../char.mjs';
-import { applyLookupToTokens, getFeaturesLookups, getLookupFeatureValue } from '../applySubstitution.mjs';
+import { applyLookupToTokens, getLookupFeatureValue } from '../applySubstitution.mjs';
 import { getMaskedFeatureValue, getUnmaskedFeatureValue } from '../featureValues.mjs';
 
 /**
@@ -78,25 +78,26 @@ function getFormTokenFeatureValue(featuresOption, tag, isFormToken) {
  * getFormTokenFeatureValue). Unlike HarfBuzz, whose form mask applies to every input glyph, the later input glyphs of a
  * rule and the components of a ligature are matched whatever their form. With the required feature of the language
  * system in the stage of the form, its lookups join the lookups of the form in lookup list order and apply at every
- * glyph, like the global mask that HarfBuzz gives them (see getFeaturesLookups and getLookupFeatureValue)
+ * glyph, like the global mask that HarfBuzz gives them (see getFeaturesLookups and getLookupFeatureValue in
+ * applySubstitution.mjs)
+ * @param {FeatureQuery} query
  * @param {Token[]} tokens the tokens of the run
- * @param {string} script the script tag of the run in the GSUB table
  * @param {string} tag the form feature tag: isol, fina, medi or init
- * @param {boolean} [withRequiredFeature=false] whether the required feature applies in the stage of the form
+ * @param {FeatureLookup[]} lookups the lookups of the form, with the ones of the required feature when it applies in the
+ * stage of the form (see getFeaturesLookups in applySubstitution.mjs)
  */
-function arabicPresentationForms(tokens, script, tag, withRequiredFeature = false) {
+function arabicPresentationForms(query, tokens, tag, lookups) {
     const forms = getArabicJoiningForms(tokens.map(token => token.char));
     const formTokens = new Set(tokens.filter((token, index) => forms[index] === tag));
-    const featuresOption = this.query.featuresOption;
+    const featuresOption = query.featuresOption;
     const getTokenFormValue = token => getFormTokenFeatureValue(featuresOption, tag, formTokens.has(token));
-    const lookups = getFeaturesLookups(this.query, [tag], script, this.language, withRequiredFeature);
     for (const featureLookup of lookups) {
-        const lookupTable = featureLookup.lookupTable;
+        const { lookupTable, joinerFlags, firstGlyphFilter } = featureLookup;
         if (featureLookup.isRequiredFeatureLookup) {
-            const requiredValue = getLookupFeatureValue(this.query, featureLookup);
-            applyLookupToTokens(this.query, lookupTable, tag, tokens, () => requiredValue, featureLookup.joinerFlags);
+            const requiredValue = getLookupFeatureValue(query, featureLookup);
+            applyLookupToTokens(query, lookupTable, tag, tokens, () => requiredValue, joinerFlags, firstGlyphFilter);
         } else {
-            applyLookupToTokens(this.query, lookupTable, tag, tokens, getTokenFormValue, featureLookup.joinerFlags);
+            applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFormValue, joinerFlags, firstGlyphFilter);
         }
     }
 }

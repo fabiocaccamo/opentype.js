@@ -17,10 +17,18 @@ import Layout, {
     matchesGlyphIndex,
     createIgnorableMatching,
     AUTO_JOINER_FLAGS,
+    areJoinerFlagsEqual,
     matchSequenceContext,
     matchChainedSequenceContext,
     getRequiredFeatureIndex,
     getCachedLayoutValue,
+    getCoveragesGlyphDigest,
+    mayGlyphDigestHave,
+    getSubtableFirstGlyphCoverage,
+    getSubtablesFirstGlyphCoverages,
+    getSubtablesFirstGlyphDigest,
+    createLookupFirstGlyphFilter,
+    getLookupFilterGlyphDigest,
     getOpenTypeScriptTags,
     isRightToLeftScript,
     selectScriptTag
@@ -588,6 +596,124 @@ describe('layout.mjs', function() {
             assert.strictEqual(layout.getCoverageIndex({ glyphs: [0x4f] }, 0x4f), -1);
             assert.strictEqual(layout.getCoverageIndex({ format: 3, glyphs: [0x4f] }, 0x4f), -1);
         });
+
+        describe('getCoveragesGlyphDigest and mayGlyphDigestHave', function() {
+            // the glyphs a digest may have, among the glyph indexes 0 to 65535
+            const getDigestGlyphs = glyphDigest => {
+                const glyphs = [];
+                for (let glyphIndex = 0; glyphIndex < 65536; glyphIndex++) {
+                    if (mayGlyphDigestHave(glyphDigest, glyphIndex)) {
+                        glyphs.push(glyphIndex);
+                    }
+                }
+                return glyphs;
+            };
+
+            it('may have every glyph of its coverage tables, of format 1 and 2, and not most of the other glyphs', function() {
+                const coveredGlyphs = [6, 11, 16, 18, 37, 38, 39, 40, 41, 0x4f].concat(Array.from({ length: 9 }, (item, offset) => 44 + offset), [0x125, 0x129]);
+                const digestGlyphs = getDigestGlyphs(getCoveragesGlyphDigest([cov1, cov2]));
+                assert.deepStrictEqual(coveredGlyphs.filter(glyphIndex => !digestGlyphs.includes(glyphIndex)), []);
+                assert.ok(digestGlyphs.length < 1024, `${digestGlyphs.length} glyphs`);
+                assert.strictEqual(mayGlyphDigestHave(getCoveragesGlyphDigest([cov1]), 0x33), false);
+            });
+
+            it('may have every glyph of a range of more glyphs than the bits of its masks', function() {
+                const wideRange = { format: 2, ranges: [{ start: 100, end: 40000, index: 0 }] };
+                const digestGlyphs = getDigestGlyphs(getCoveragesGlyphDigest([wideRange]));
+                assert.deepStrictEqual([digestGlyphs.includes(100), digestGlyphs.includes(40000), digestGlyphs.length > 39900], [true, true, true]);
+            });
+
+            it('may have the first and the last glyph indexes, 0 and 65535, of a coverage of format 1', function() {
+                const digestGlyphs = getDigestGlyphs(getCoveragesGlyphDigest([{ format: 1, glyphs: [0, 65535] }]));
+                assert.deepStrictEqual([digestGlyphs.includes(0), digestGlyphs.includes(65535), digestGlyphs.includes(1)], [true, true, false]);
+            });
+
+            it('has no glyph for no coverage table, or coverage tables of no valid format', function() {
+                assert.deepStrictEqual(getDigestGlyphs(getCoveragesGlyphDigest([])), []);
+                assert.deepStrictEqual(getDigestGlyphs(getCoveragesGlyphDigest([{ format: 3, glyphs: [0x4f] }])), []);
+            });
+        });
+
+        describe('getSubtableFirstGlyphCoverage, getSubtablesFirstGlyphCoverages and getSubtablesFirstGlyphDigest', function() {
+            it('gives the coverage of the glyph a subtable applies at, of each kind of subtable', function() {
+                const [coverage, markCoverage, mark1Coverage, inputCoverage, coverages] = [cov1, cov2, { format: 1, glyphs: [1] },
+                    { format: 1, glyphs: [2] }, { format: 1, glyphs: [3] }];
+                assert.strictEqual(getSubtableFirstGlyphCoverage({ coverage }), coverage);
+                assert.strictEqual(getSubtableFirstGlyphCoverage({ markCoverage, baseCoverage: cov1 }), markCoverage);
+                assert.strictEqual(getSubtableFirstGlyphCoverage({ markCoverage, ligatureCoverage: cov1 }), markCoverage);
+                assert.strictEqual(getSubtableFirstGlyphCoverage({ mark1Coverage, mark2Coverage: cov1 }), mark1Coverage);
+                assert.strictEqual(getSubtableFirstGlyphCoverage({ backtrackCoverage: [cov1], inputCoverage: [inputCoverage, cov1] }), inputCoverage);
+                assert.strictEqual(getSubtableFirstGlyphCoverage({ coverages: [coverages, cov1] }), coverages);
+                assert.strictEqual(getSubtableFirstGlyphCoverage({ coverages: [] }), undefined);
+            });
+
+            it('gives the digest of the coverages of the subtables, none when a subtable has no coverage', function() {
+                const digest = getSubtablesFirstGlyphDigest([{ coverage: cov1 }, { markCoverage: { format: 1, glyphs: [6] } }]);
+                assert.deepStrictEqual([0x4f, 6, 0x33].map(glyphIndex => mayGlyphDigestHave(digest, glyphIndex)), [true, true, false]);
+                assert.strictEqual(getSubtablesFirstGlyphDigest([{ coverage: cov1 }, { coverages: [] }]), null);
+            });
+
+            it('gives the coverages of the subtables, none when a subtable has no coverage or is missing', function() {
+                const markCoverage = { format: 1, glyphs: [6] };
+                assert.deepStrictEqual(getSubtablesFirstGlyphCoverages([{ coverage: cov1 }, { markCoverage }]), [cov1, markCoverage]);
+                assert.strictEqual(getSubtablesFirstGlyphCoverages([{ coverage: cov1 }, { coverages: [] }]), null);
+                assert.strictEqual(getSubtablesFirstGlyphCoverages([{ coverage: cov1 }, undefined]), null);
+                assert.deepStrictEqual(getSubtablesFirstGlyphCoverages([]), []);
+            });
+        });
+
+        describe('createLookupFirstGlyphFilter and getLookupFilterGlyphDigest', function() {
+            const lookupTable = { lookupType: 1, lookupFlag: 0, subtables: [{ substFormat: 1, coverage: cov1, deltaGlyphId: 1 }] };
+            // a lookup of single substitutions (type 1), or of extension subtables (type 7) that wrap them
+            const getFirstGlyphSubtables = lookup => (
+                lookup.lookupType === 7 ? lookup.subtables.map(subtable => subtable.extension) : lookup.subtables
+            );
+            const getFirstGlyphDigest = lookup => getSubtablesFirstGlyphDigest(getFirstGlyphSubtables(lookup));
+            const createFilter = (lookup, isCached = true) => (
+                createLookupFirstGlyphFilter(lookup, isCached, getFirstGlyphSubtables, getFirstGlyphDigest)
+            );
+
+            it('gives the digest of a cached lookup with a copy of its subtables, none for a lookup that is not cached', function() {
+                const firstGlyphFilter = createFilter(lookupTable);
+                assert.deepStrictEqual(firstGlyphFilter, {
+                    glyphDigest: getCoveragesGlyphDigest([cov1]),
+                    subtables: lookupTable.subtables
+                });
+                assert.notStrictEqual(firstGlyphFilter.subtables, lookupTable.subtables);
+                assert.strictEqual(createFilter(lookupTable, false), null);
+                assert.strictEqual(createLookupFirstGlyphFilter(lookupTable, true, getFirstGlyphSubtables, () => null), null);
+            });
+
+            it('gives the digest of a filter while the lookup has the subtables it was read from, none after a subtable is added', function() {
+                const firstGlyphFilter = createFilter(lookupTable);
+                assert.strictEqual(getLookupFilterGlyphDigest(firstGlyphFilter, lookupTable.subtables), firstGlyphFilter.glyphDigest);
+                const editedSubtables = lookupTable.subtables.concat({ substFormat: 1, coverage: cov2, deltaGlyphId: 1 });
+                assert.strictEqual(getLookupFilterGlyphDigest(firstGlyphFilter, editedSubtables), null);
+                assert.strictEqual(getLookupFilterGlyphDigest(null, lookupTable.subtables), null);
+            });
+
+            it('gives no digest after a subtable is replaced in the lookup, the number of its subtables unchanged', function() {
+                const editedLookupTable = { ...lookupTable, subtables: lookupTable.subtables.slice() };
+                const firstGlyphFilter = createFilter(editedLookupTable);
+                editedLookupTable.subtables[0] = { substFormat: 1, coverage: cov2, deltaGlyphId: 1 };
+                assert.strictEqual(getLookupFilterGlyphDigest(firstGlyphFilter, editedLookupTable.subtables), null);
+            });
+
+            it('keeps the subtables an extension subtable wraps, and gives no digest after the one of a wrapper is replaced', function() {
+                const extensionLookupTable = {
+                    lookupType: 7,
+                    lookupFlag: 0,
+                    subtables: [{ substFormat: 1, lookupType: 1, extension: lookupTable.subtables[0] }]
+                };
+                const firstGlyphFilter = createFilter(extensionLookupTable);
+                assert.deepStrictEqual(firstGlyphFilter.subtables, lookupTable.subtables);
+                assert.strictEqual(
+                    getLookupFilterGlyphDigest(firstGlyphFilter, getFirstGlyphSubtables(extensionLookupTable)), firstGlyphFilter.glyphDigest
+                );
+                extensionLookupTable.subtables[0].extension = { substFormat: 1, coverage: cov2, deltaGlyphId: 1 };
+                assert.strictEqual(getLookupFilterGlyphDigest(firstGlyphFilter, getFirstGlyphSubtables(extensionLookupTable)), null);
+            });
+        });
     });
 
     describe('getGdefGlyphClass and isMarkGlyph', function() {
@@ -758,6 +884,16 @@ describe('layout.mjs', function() {
             assert.strictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 0, 1, sequence([glyphB])), null);
             assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, glyphs, 0, 1, isSkippedIgnorable), 2);
             assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, glyphs, 2, -1, isSkippedIgnorable), 0);
+        });
+    });
+
+    describe('areJoinerFlagsEqual', function() {
+        it('compares the values of two joiner flags, whatever their objects', function() {
+            const manualZeroWidthJoiner = { autoZeroWidthNonJoiner: true, autoZeroWidthJoiner: false };
+            assert.strictEqual(areJoinerFlagsEqual(AUTO_JOINER_FLAGS, { autoZeroWidthNonJoiner: true, autoZeroWidthJoiner: true }), true);
+            assert.strictEqual(areJoinerFlagsEqual(manualZeroWidthJoiner, { ...manualZeroWidthJoiner }), true);
+            assert.strictEqual(areJoinerFlagsEqual(AUTO_JOINER_FLAGS, manualZeroWidthJoiner), false);
+            assert.strictEqual(areJoinerFlagsEqual(AUTO_JOINER_FLAGS, { autoZeroWidthNonJoiner: false, autoZeroWidthJoiner: true }), false);
         });
     });
 

@@ -206,5 +206,29 @@ describe('substitution.mjs', function() {
             substitution.addSingle('ss01', { sub: 3, by: 22 }, 'latn');
             assert.deepStrictEqual(font.stringToGlyphIndexes('abc', { script: 'latn', features: { ss01: true } }), [1, 2, 22]);
         });
+
+        // a substitution of b added to the subtable of a substitution of a, after a text was laid out: b is not one of the
+        // glyphs the subtable started at when the text layout cached its lookup
+        it('applies a single substitution added to the subtable of a lookup the text layout has cached', function() {
+            substitution.addSingle('liga', { sub: 1, by: 26 });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('ab'), [26, 2]);
+            substitution.addSingle('liga', { sub: 2, by: 25 });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('ab'), [26, 25]);
+        });
+
+        it('applies a multiple substitution added to the subtable of a lookup the text layout has cached', function() {
+            substitution.addMultiple('liga', { sub: 1, by: [26, 26] });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('ab'), [26, 26, 2]);
+            substitution.addMultiple('liga', { sub: 2, by: [25, 25] });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('ab'), [26, 26, 25, 25]);
+        });
+
+        it('applies an alternate substitution added to the subtable of a lookup the text layout has cached', function() {
+            // liga takes the first alternate, its value 1
+            substitution.addAlternate('liga', { sub: 1, by: [26] });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('ab'), [26, 2]);
+            substitution.addAlternate('liga', { sub: 2, by: [25] });
+            assert.deepStrictEqual(font.stringToGlyphIndexes('ab'), [26, 25]);
+        });
     });
 });

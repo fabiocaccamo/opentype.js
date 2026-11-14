@@ -179,4 +179,27 @@ function warnOncePerFont(font, kind, value, getMessage) {
     }
 }
 
-export { arraysEqual, binarySearch, binarySearchIndex, binarySearchInsert, isGzip, unGzip, copyPoint, copyComponent, getGlyphVariationPointCount, getTuplePointNumbers, warnOncePerFont };
+/**
+ * Define an enumerable property of an object whose value is computed at its first read, then kept as the value of the
+ * property, like a property set to the computed value: setting it before replaces the value without computing it
+ * @param {Object} object
+ * @param {string|number} propertyName
+ * @param {function(): any} computeValue
+ */
+function defineLazyProperty(object, propertyName, computeValue) {
+    const setValue = value => Object.defineProperty(object, propertyName, {
+        value, writable: true, enumerable: true, configurable: true
+    });
+    Object.defineProperty(object, propertyName, {
+        get: function() {
+            const value = computeValue();
+            setValue(value);
+            return value;
+        },
+        set: setValue,
+        enumerable: true,
+        configurable: true
+    });
+}
+
+export { arraysEqual, binarySearch, binarySearchIndex, binarySearchInsert, isGzip, unGzip, copyPoint, copyComponent, getGlyphVariationPointCount, getTuplePointNumbers, warnOncePerFont, defineLazyProperty };

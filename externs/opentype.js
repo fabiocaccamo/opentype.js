@@ -878,8 +878,9 @@ opentype.loadSync = function(url) {};
 
 /**
  * opt.layoutCache (default true): with false the layout does not cache the lookups of the GSUB and GPOS tables of
- * the font, so a change made directly to the objects of these tables applies at the next layout; any value other than
- * a boolean or undefined throws a TypeError.
+ * the font, nor the kerning lookups of Font.getKerningValue, so a change made directly to the objects of these tables
+ * applies at the next layout; any value other than a boolean or undefined throws a TypeError. The charstrings of a CFF
+ * font and the glyph variations of a gvar table are read from the font data when they are first used.
  * @param  {ArrayBuffer} buffer
  * @param  {Object=} opt
  * @return {opentype.Font}

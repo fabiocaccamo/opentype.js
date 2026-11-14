@@ -396,6 +396,114 @@ describe('font.mjs', function() {
             assert.equal(font.getAdvanceWidth('fi', font.unitsPerEm), 2);
         });
 
+        it('computes the kerning lookups of the script of a pair once for the GPOS table, again after its script is added', function() {
+            // TestScriptLanguage.ttf (test/generate-script-language-font.py): A alpha -40 in latn only; the pair takes grek,
+            // which the GPOS table has not, so DFLT, whose kern has no A alpha, until a grek kern lookup is added
+            const scriptLanguageFont = loadSync('./test/fonts/TestScriptLanguage.ttf');
+            const [glyphA, alpha] = ['A', '\u{3B1}'].map(character => scriptLanguageFont.charToGlyph(character));
+            assert.equal(scriptLanguageFont.getKerningValue(glyphA, alpha), 0);
+            const kernLookup = scriptLanguageFont.position.getLookupTables('grek', 'dflt', 'kern', 2, true)[0];
+            kernLookup.subtables.push({
+                posFormat: 1,
+                coverage: { format: 1, glyphs: [glyphA.index] },
+                valueFormat1: 4,
+                valueFormat2: 0,
+                pairSets: [[{ secondGlyph: alpha.index, value1: { xAdvance: -60 }, value2: undefined }]]
+            });
+            assert.equal(scriptLanguageFont.getKerningValue(glyphA, alpha), -60);
+            // a direct change of a kern feature is not seen once its lookups are cached, until the table is replaced; one
+            // two, of no script, takes DFLT: one two -10
+            const [cachedOne, cachedTwo] = ['1', '2'].map(character => scriptLanguageFont.charToGlyph(character));
+            assert.equal(scriptLanguageFont.getKerningValue(cachedOne, cachedTwo), -10);
+            scriptLanguageFont.position.getFeatureTable('DFLT', 'dflt', 'kern').lookupListIndexes = [];
+            assert.equal(scriptLanguageFont.getKerningValue(cachedOne, cachedTwo), -10);
+            scriptLanguageFont.tables.gpos = Object.assign({}, scriptLanguageFont.tables.gpos);
+            assert.equal(scriptLanguageFont.getKerningValue(cachedOne, cachedTwo), 0);
+            // with the layoutCache option false, a direct change of a kern feature applies at the next call
+            const uncachedFont = loadSync('./test/fonts/TestScriptLanguage.ttf', { layoutCache: false });
+            const [one, two] = ['1', '2'].map(character => uncachedFont.charToGlyph(character));
+            assert.equal(uncachedFont.getKerningValue(one, two), -10);
+            uncachedFont.position.getFeatureTable('DFLT', 'dflt', 'kern').lookupListIndexes = [];
+            assert.equal(uncachedFont.getKerningValue(one, two), 0);
+        });
+
+        it('kerns a pair with a subtable added to an extension kern lookup at the next call, as the text layout', function() {
+            // TestGPOS-KernTwoLookups.ttf (test/generate-kern-lookups-font.py): no lookup kerns V period, the lookup 1 is
+            // an extension lookup; hb-shape --no-glyph-names -u 56,2E gives [5=0+600|7=1+250], and on the font built
+            // with pos V period -300 added to that lookup [5=0+300|7=1+250]
+            const font = loadSync('./test/fonts/regression/TestGPOS-KernTwoLookups.ttf');
+            const [glyphV, period] = ['V', '.'].map(character => font.charToGlyph(character));
+            const getKerningAndAdvances = () => [
+                font.getKerningValue(glyphV, period), font.shape('V.').map(({ glyph, xAdvance }) => [glyph.index, xAdvance])
+            ];
+            assert.deepStrictEqual(getKerningAndAdvances(), [0, [[5, 600], [7, 250]]]);
+            font.tables.gpos.lookups[1].subtables.push({
+                lookupType: 2,
+                extension: {
+                    posFormat: 1,
+                    coverage: { format: 1, glyphs: [glyphV.index] },
+                    valueFormat1: 4,
+                    valueFormat2: 0,
+                    pairSets: [[{ secondGlyph: period.index, value1: { xAdvance: -300 }, value2: undefined }]]
+                }
+            });
+            assert.deepStrictEqual(getKerningAndAdvances(), [-300, [[5, 300], [7, 250]]]);
+        });
+
+        it('kerns a pair with the subtable replaced in an extension subtable of a kern lookup at the next call, as the text layout', function() {
+            // TestGPOS-KernTwoLookups.ttf with the pair adjustment its first extension subtable of the lookup 1 wraps
+            // replaced by pos V period -300 (fontTools), saved as replaced-extension-gpos.ttf: hb-shape --no-glyph-names
+            // --cluster-level=1 -u 56,2E TestGPOS-KernTwoLookups.ttf [5=0+600|7=1+250], replaced-extension-gpos.ttf
+            // [5=0+300|7=1+250]
+            const font = loadSync('./test/fonts/regression/TestGPOS-KernTwoLookups.ttf');
+            const [glyphV, period] = ['V', '.'].map(character => font.charToGlyph(character));
+            const getKerningAndAdvances = () => [
+                font.getKerningValue(glyphV, period), font.shape('V.').map(({ glyph, xAdvance }) => [glyph.index, xAdvance])
+            ];
+            assert.deepStrictEqual(getKerningAndAdvances(), [0, [[5, 600], [7, 250]]]);
+            font.tables.gpos.lookups[1].subtables[0].extension = {
+                posFormat: 1,
+                coverage: { format: 1, glyphs: [glyphV.index] },
+                valueFormat1: 4,
+                valueFormat2: 0,
+                pairSets: [[{ secondGlyph: period.index, value1: { xAdvance: -300 }, value2: undefined }]]
+            };
+            assert.deepStrictEqual(getKerningAndAdvances(), [-300, [[5, 300], [7, 250]]]);
+        });
+
+        it('kerns a pair added directly to the coverage of a subtable after a text was laid out, unlike the text layout', function() {
+            // TestPairPositioning.ttf with e in the coverage of pos d a -70 (lookup 7 of kern) and a PairSet pos e a -40 for it
+            // (fontTools), saved as coverage-gpos.ttf: hb-shape --no-glyph-names --cluster-level=1 -u 0065,0061
+            // TestPairPositioning.ttf [14=0+500|5=1+500], coverage-gpos.ttf [14=0+460|5=1+500]; getKerningValue reads the
+            // coverage tables at every call, the text layout caches the glyphs each lookup starts at (see README.md)
+            const font = loadSync('./test/fonts/TestPairPositioning.ttf');
+            const [glyphA, glyphE] = ['a', 'e'].map(character => font.charToGlyph(character));
+            const getKerningAndAdvances = () => [
+                font.getKerningValue(glyphE, glyphA), font.shape('ea').map(({ glyph, xAdvance }) => [glyph.index, xAdvance])
+            ];
+            assert.deepStrictEqual(getKerningAndAdvances(), [0, [[14, 500], [5, 500]]]);
+            const subtable = font.tables.gpos.lookups[7].subtables[0];
+            subtable.coverage.glyphs.push(glyphE.index);
+            subtable.pairSets.push([{ secondGlyph: glyphA.index, value1: { xAdvance: -40 }, value2: undefined }]);
+            assert.deepStrictEqual(getKerningAndAdvances(), [-40, [[14, 500], [5, 500]]]);
+        });
+
+        it('stops kerning a pair removed directly from the coverage of a subtable at the next layout', function() {
+            // TestPairPositioning.ttf with d out of the coverage of pos d a -70 (lookup 7 of kern) and its PairSet removed
+            // (fontTools), saved as coverage-removed-gpos.ttf: hb-shape --no-glyph-names --cluster-level=1 -u 0064,0061
+            // TestPairPositioning.ttf [8=0+430|5=1+500], coverage-removed-gpos.ttf [8=0+500|5=1+500]
+            const font = loadSync('./test/fonts/TestPairPositioning.ttf');
+            const [glyphA, glyphD] = ['a', 'd'].map(character => font.charToGlyph(character));
+            const getKerningAndAdvances = () => [
+                font.getKerningValue(glyphD, glyphA), font.shape('da').map(({ glyph, xAdvance }) => [glyph.index, xAdvance])
+            ];
+            assert.deepStrictEqual(getKerningAndAdvances(), [-70, [[8, 430], [5, 500]]]);
+            const subtable = font.tables.gpos.lookups[7].subtables[0];
+            subtable.coverage.glyphs = [];
+            subtable.pairSets = [];
+            assert.deepStrictEqual(getKerningAndAdvances(), [0, [[8, 500], [5, 500]]]);
+        });
+
         it('kerns a text with the kern feature of the language option, the default language system without it', function() {
             const pairLookup = xAdvance => ({
                 lookupType: 2,
@@ -1208,6 +1316,28 @@ describe('font.mjs', function() {
 
         before(function() {
             pairFont = loadSync('./test/fonts/TestPairPositioning.ttf');
+        });
+
+        it('shapes each text with the features, the language and the variation of its call, whatever the calls before', function() {
+            // the plans of the script runs of a text are computed once for its call (see _shapeGlyphs and
+            // Bidi.applyFeaturesToContexts): hb-shape --no-glyph-names --cluster-level=1 [options] TestScriptLanguage.ttf
+            // -u 0031,0032,0020,0061,0062 (kern one two -30 and liga sub a b by a_b in latn, no liga in latn TRK)
+            const scriptLanguageFont = loadSync('./test/fonts/TestScriptLanguage.ttf');
+            const expectedShapes = [
+                [{}, '[2=0+470|3=1+500|1=2+500|19=3+500]'],
+                [{ features: { kern: false } }, '[2=0+500|3=1+500|1=2+500|19=3+500]'],
+                [{ features: { liga: false } }, '[2=0+470|3=1+500|1=2+500|6=3+500|7=4+500]'],
+                [{ language: 'TRK' }, '[2=0+470|3=1+500|1=2+500|6=3+500|7=4+500]'],
+                [{ kerning: false, features: { liga: false } }, '[2=0+500|3=1+500|1=2+500|6=3+500|7=4+500]']
+            ];
+            for (const [options, expectedShape] of expectedShapes.concat(expectedShapes.slice().reverse())) {
+                assert.strictEqual(formatShape(scriptLanguageFont.shape('12 ab', options)), expectedShape, JSON.stringify(options));
+            }
+            // --variations=wght=200|800 Changa-VariableFont_wght.ttf -u 41,56
+            const variableFont = loadSync('./test/fonts/Changa-VariableFont_wght.ttf');
+            for (const [weight, expectedShape] of [[200, '[1=0+503|113=1+486]'], [800, '[1=0+611|113=1+621]'], [200, '[1=0+503|113=1+486]']]) {
+                assert.strictEqual(formatShape(variableFont.shape('AV', { variation: { wght: weight } })), expectedShape, `wght ${weight}`);
+            }
         });
 
         it('gives each glyph its cluster, its advances and its offsets in font units', function() {

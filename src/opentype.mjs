@@ -153,9 +153,12 @@ function isLayoutCacheEnabledByOption(layoutCacheOption) {
  * @param  {ArrayBuffer}
  * @param  {Object} opt - options for parsing
  * @param  {boolean} [opt.layoutCache=true] - whether the layout caches the lookups of the GSUB and GPOS tables of the
- *                                            font (font.isLayoutCacheEnabled): with false a change made directly to
- *                                            the objects of these tables applies at the next layout; any value other
- *                                            than a boolean or undefined throws a TypeError
+ *                                            font and the kerning lookups of Font.getKerningValue
+ *                                            (font.isLayoutCacheEnabled): with false a change made directly to the
+ *                                            objects of these tables applies at the next layout; any value other than
+ *                                            a boolean or undefined throws a TypeError. The charstrings of a CFF font
+ *                                            and the glyph variations of a gvar table are read from the font data when
+ *                                            they are first used, with or without lowMemory
  * @return {opentype.Font}
  */
 function parseBuffer(buffer, opt={}) {

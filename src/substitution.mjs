@@ -2,7 +2,7 @@
 // the GSUB substitution table.
 
 import check from './check.mjs';
-import Layout from './layout.mjs';
+import Layout, { clearLayoutCache } from './layout.mjs';
 import { arraysEqual } from './util.mjs';
 
 /**
@@ -199,6 +199,8 @@ Substitution.prototype.addSingle = function(feature, substitution, script, langu
         subtable.substitute.splice(pos, 0, 0);
     }
     subtable.substitute[pos] = substitution.by;
+    // the layout computes again what it computed from the subtables (see getCachedLayoutValue in layout.mjs)
+    clearLayoutCache(this.getTable());
 };
 
 /**
@@ -225,6 +227,7 @@ Substitution.prototype.addMultiple = function(feature, substitution, script, lan
         subtable.sequences.splice(pos, 0, 0);
     }
     subtable.sequences[pos] = substitution.by;
+    clearLayoutCache(this.getTable());
 };
 
 /**
@@ -250,6 +253,7 @@ Substitution.prototype.addAlternate = function(feature, substitution, script, la
         subtable.alternateSets.splice(pos, 0, 0);
     }
     subtable.alternateSets[pos] = substitution.by;
+    clearLayoutCache(this.getTable());
 };
 
 /**
@@ -296,6 +300,7 @@ Substitution.prototype.addLigature = function(feature, ligature, script, languag
         subtable.coverage.glyphs.splice(pos, 0, coverageGlyph);
         subtable.ligatureSets.splice(pos, 0, [ligatureTable]);
     }
+    clearLayoutCache(this.getTable());
 };
 
 /**

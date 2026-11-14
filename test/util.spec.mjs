@@ -1,7 +1,7 @@
 import assert from 'assert';
 import { readFileSync } from 'fs';
 import { parse } from '../src/opentype.mjs';
-import { arraysEqual, getGlyphVariationPointCount, getTuplePointNumbers, warnOncePerFont } from '../src/util.mjs';
+import { arraysEqual, getGlyphVariationPointCount, getTuplePointNumbers, warnOncePerFont, defineLazyProperty } from '../src/util.mjs';
 
 describe('util.mjs', function() {
     describe('arraysEqual', function() {
@@ -34,6 +34,31 @@ describe('util.mjs', function() {
             assert.deepStrictEqual(getTuplePointNumbers({ privatePoints: [1, 2] }, sharedPoints), [1, 2]);
             assert.deepStrictEqual(getTuplePointNumbers({ privatePoints: [] }, sharedPoints), []);
             assert.deepStrictEqual(getTuplePointNumbers({}, sharedPoints), [0, 5]);
+        });
+    });
+
+    describe('defineLazyProperty', function() {
+        it('computes the value at the first read only, then keeps it as an enumerable property', function() {
+            const object = {};
+            let computationCount = 0;
+            defineLazyProperty(object, 1, () => {
+                computationCount++;
+                return { glyph: 1 };
+            });
+            assert.deepStrictEqual([Object.keys(object), computationCount], [['1'], 0]);
+            const value = object[1];
+            assert.strictEqual(object[1], value);
+            assert.deepStrictEqual([value, computationCount], [{ glyph: 1 }, 1]);
+            assert.deepStrictEqual(JSON.parse(JSON.stringify(object)), { 1: { glyph: 1 } });
+        });
+
+        it('replaces the value set before the first read without computing it', function() {
+            const object = {};
+            defineLazyProperty(object, 'deltas', () => assert.fail('computed'));
+            object.deltas = [1, 2];
+            assert.deepStrictEqual(object.deltas, [1, 2]);
+            object.deltas = [3];
+            assert.deepStrictEqual(object, { deltas: [3] });
         });
     });
 

@@ -44,7 +44,10 @@ function ContextChecker(contextName, checkStart, checkEnd) {
  * @typedef ContextParams
  * @type Object
  * @property {array} context context items
- * @property {number} currentIndex current item index
+ * @property {number} index current item index
+ * @property {any} current current item
+ * @property {array} backtrack the items before the current one, a copy of the context made at each read
+ * @property {array} lookahead the items after the current one, a copy of the context made at each read
  */
 
 /**
@@ -54,12 +57,21 @@ function ContextChecker(contextName, checkStart, checkEnd) {
  */
 function ContextParams(context, currentIndex) {
     this.context = context;
-    this.index = currentIndex;
     this.length = context.length;
-    this.current = context[currentIndex];
-    this.backtrack = context.slice(0, currentIndex);
-    this.lookahead = context.slice(currentIndex + 1);
+    this.setCurrentIndex(currentIndex);
 }
+
+// the backtrack and the lookahead are copied only when read: a context checker or a lookup reads the context by index
+Object.defineProperty(ContextParams.prototype, 'backtrack', {
+    get: function() {
+        return this.context.slice(0, this.index);
+    }
+});
+Object.defineProperty(ContextParams.prototype, 'lookahead', {
+    get: function() {
+        return this.context.slice(this.index + 1);
+    }
+});
 
 /**
  * Create an event instance
@@ -304,8 +316,6 @@ Event.prototype.unsubscribe = function (subsId) {
 ContextParams.prototype.setCurrentIndex = function(index) {
     this.index = index;
     this.current = this.context[index];
-    this.backtrack = this.context.slice(0, index);
-    this.lookahead = this.context.slice(index + 1);
 };
 
 /**
@@ -316,16 +326,11 @@ ContextParams.prototype.setCurrentIndex = function(index) {
  * @param {number} offset an offset from current value index
  */
 ContextParams.prototype.get = function (offset) {
-    switch (true) {
-        case (offset === 0):
-            return this.current;
-        case (offset < 0 && Math.abs(offset) <= this.backtrack.length):
-            return this.backtrack.slice(offset)[0];
-        case (offset > 0 && offset <= this.lookahead.length):
-            return this.lookahead[offset - 1];
-        default:
-            return null;
+    if (offset === 0) {
+        return this.current;
     }
+    const position = this.index + offset;
+    return position >= 0 && position < this.context.length ? this.context[position] : null;
 };
 
 /**
