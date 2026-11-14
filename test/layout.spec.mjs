@@ -7,6 +7,9 @@ import Layout, {
     getLigatureId,
     getLigatureComponent,
     getChosenScriptTag,
+    HarfBuzzShaper,
+    getHarfBuzzShaper,
+    memoizeByScriptTags,
     isMarkIgnoredWithoutGlyphClasses,
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
@@ -394,6 +397,96 @@ describe('layout.mjs', function() {
             assert.strictEqual(getChosenScriptTag(layout, ['grek']), undefined);
             delete font.tables.gsub;
             assert.strictEqual(getChosenScriptTag(layout, ['grek']), undefined);
+        });
+    });
+
+    describe('getHarfBuzzShaper', function() {
+        // hb_ot_shaper_categorize (hb-ot-shaper.hh of HarfBuzz 11.3.2), horizontal text
+        it('gives the Arabic, Thai, Hangul, Hebrew and Khmer shapers whatever the GSUB script', function() {
+            for (const gsubScriptTag of [undefined, 'DFLT', 'latn']) {
+                assert.strictEqual(getHarfBuzzShaper(['arab'], gsubScriptTag), HarfBuzzShaper.ARABIC);
+                assert.strictEqual(getHarfBuzzShaper(['thai'], gsubScriptTag), HarfBuzzShaper.THAI);
+                assert.strictEqual(getHarfBuzzShaper(['lao '], gsubScriptTag), HarfBuzzShaper.THAI);
+                assert.strictEqual(getHarfBuzzShaper(['hang'], gsubScriptTag), HarfBuzzShaper.HANGUL);
+                assert.strictEqual(getHarfBuzzShaper(['hebr'], gsubScriptTag), HarfBuzzShaper.HEBREW);
+                assert.strictEqual(getHarfBuzzShaper(['khmr'], gsubScriptTag), HarfBuzzShaper.KHMER);
+            }
+        });
+
+        it('gives the Arabic shaper to Syriac unless its GSUB script is DFLT', function() {
+            assert.strictEqual(getHarfBuzzShaper(['syrc'], 'syrc'), HarfBuzzShaper.ARABIC);
+            assert.strictEqual(getHarfBuzzShaper(['syrc'], undefined), HarfBuzzShaper.ARABIC);
+            assert.strictEqual(getHarfBuzzShaper(['syrc'], 'latn'), HarfBuzzShaper.ARABIC);
+            assert.strictEqual(getHarfBuzzShaper(['syrc'], 'DFLT'), HarfBuzzShaper.DEFAULT);
+        });
+
+        it('gives the Indic shaper to an Indic script, the USE for the tags of the third version', function() {
+            const bengaliTags = getOpenTypeScriptTags('Beng');
+            assert.strictEqual(getHarfBuzzShaper(bengaliTags, 'bng2'), HarfBuzzShaper.INDIC);
+            assert.strictEqual(getHarfBuzzShaper(bengaliTags, 'beng'), HarfBuzzShaper.INDIC);
+            assert.strictEqual(getHarfBuzzShaper(bengaliTags, 'dflt'), HarfBuzzShaper.INDIC);
+            assert.strictEqual(getHarfBuzzShaper(bengaliTags, undefined), HarfBuzzShaper.INDIC);
+            assert.strictEqual(getHarfBuzzShaper(bengaliTags, 'bng3'), HarfBuzzShaper.USE);
+            assert.strictEqual(getHarfBuzzShaper(bengaliTags, 'DFLT'), HarfBuzzShaper.DEFAULT);
+            assert.strictEqual(getHarfBuzzShaper(bengaliTags, 'latn'), HarfBuzzShaper.DEFAULT);
+        });
+
+        it('gives the Indic shaper to each script of the Indic shaper, the USE for the tags of the third version', function() {
+            for (const script of ['Beng', 'Deva', 'Gujr', 'Guru', 'Knda', 'Mlym', 'Orya', 'Taml', 'Telu']) {
+                const scriptTags = getOpenTypeScriptTags(script);
+                const [thirdVersionTag, secondVersionTag, firstVersionTag] = scriptTags;
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, secondVersionTag), HarfBuzzShaper.INDIC, script);
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, firstVersionTag), HarfBuzzShaper.INDIC, script);
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, thirdVersionTag), HarfBuzzShaper.USE, script);
+            }
+        });
+
+        it('gives the Myanmar shaper to Myanmar unless its GSUB script is DFLT, latn or mymr', function() {
+            const myanmarTags = getOpenTypeScriptTags('Mymr');
+            assert.strictEqual(getHarfBuzzShaper(myanmarTags, 'mym2'), HarfBuzzShaper.MYANMAR);
+            assert.strictEqual(getHarfBuzzShaper(myanmarTags, undefined), HarfBuzzShaper.MYANMAR);
+            for (const gsubScriptTag of ['DFLT', 'latn', 'mymr']) {
+                assert.strictEqual(getHarfBuzzShaper(myanmarTags, gsubScriptTag), HarfBuzzShaper.DEFAULT);
+            }
+        });
+
+        it('gives the USE to its scripts unless their GSUB script is DFLT or latn', function() {
+            for (const script of ['Bali', 'Tibt', 'Sinh', 'Mong', 'Tutg']) {
+                const scriptTags = getOpenTypeScriptTags(script);
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, scriptTags[0]), HarfBuzzShaper.USE, script);
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, undefined), HarfBuzzShaper.USE, script);
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, 'DFLT'), HarfBuzzShaper.DEFAULT, script);
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, 'latn'), HarfBuzzShaper.DEFAULT, script);
+            }
+        });
+
+        it('gives the default shaper to the other scripts and to a text of no script', function() {
+            for (const scriptTags of [['latn'], ['cyrl'], ['grek'], ['hani'], ['DFLT']]) {
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, undefined), HarfBuzzShaper.DEFAULT, scriptTags[0]);
+                assert.strictEqual(getHarfBuzzShaper(scriptTags, scriptTags[0]), HarfBuzzShaper.DEFAULT, scriptTags[0]);
+            }
+        });
+    });
+
+    describe('memoizeByScriptTags', function() {
+        it('computes the value of each set of script tags once', function() {
+            const computedScriptTags = [];
+            const getValue = memoizeByScriptTags(scriptTags => {
+                computedScriptTags.push(scriptTags);
+                return scriptTags[0].toUpperCase();
+            });
+            assert.strictEqual(getValue(['hani']), 'HANI');
+            assert.strictEqual(getValue(['kana']), 'KANA');
+            assert.strictEqual(getValue(['hani']), 'HANI');
+            assert.strictEqual(getValue(['dev3', 'dev2', 'deva']), 'DEV3');
+            assert.strictEqual(getValue(['dev3', 'dev2', 'deva']), 'DEV3');
+            assert.deepStrictEqual(computedScriptTags, [['hani'], ['kana'], ['dev3', 'dev2', 'deva']]);
+        });
+
+        it('tells apart the sets of script tags of the same tags in another order', function() {
+            const getValue = memoizeByScriptTags(scriptTags => scriptTags.join(' '));
+            assert.strictEqual(getValue(['dev2', 'deva']), 'dev2 deva');
+            assert.strictEqual(getValue(['deva', 'dev2']), 'deva dev2');
         });
     });
 

@@ -4,6 +4,7 @@ import {
     getUnmaskedFeatureValue,
     getMaskedFeatureValue,
     getRunFeatureValue,
+    isDefaultFeatureInMap,
     isDefaultFeatureEnabled,
     getEnabledFeatureTags,
     getDirectionFeatureTags
@@ -73,6 +74,22 @@ describe('featureValues.mjs', function() {
         it('gives the other features their value', function() {
             const featuresOption = { rtla: 2, rand: 256, salt: 3 };
             assert.deepStrictEqual(['rtla', 'rand', 'salt', 'calt'].map(tag => getRunFeatureValue(featuresOption, tag, ['rtla', 'rtlm'])), [2, 0, 3, 1]);
+        });
+    });
+
+    describe('isDefaultFeatureInMap', function() {
+        it('keeps a default feature in the feature map unless its value is 0 or false, like a max_value of 0 in HarfBuzz', function() {
+            // the has_gpos_mark of HarfBuzz on a copy of TestNormalization.ttf with an empty GPOS mark feature (fontTools):
+            // hb-shape --features=mark=256 -u FB2A,05B8 and --features=mark=512 keep the presentation form decomposed,
+            // like the default, [53=1|54=0|55=0]; --features=mark=0: [53=1|56=0]
+            const inMapValues = [undefined, true, 1, 2, 256, 512, false, 0].map(value => isDefaultFeatureInMap({ mark: value }, 'mark'));
+            assert.deepStrictEqual(inMapValues, [true, true, true, true, true, true, false, false]);
+            assert.strictEqual(isDefaultFeatureInMap(undefined, 'mark'), true);
+            assert.strictEqual(isDefaultFeatureInMap([{ script: 'latn', tags: ['mark'] }], 'mark'), true);
+        });
+
+        it('throws on an invalid value', function() {
+            assert.throws(() => isDefaultFeatureInMap({ mark: 'on' }, 'mark'), TypeError);
         });
     });
 

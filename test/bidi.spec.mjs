@@ -3,6 +3,8 @@ import Bidi from '../src/bidi.mjs';
 import FeatureQuery from '../src/features/featureQuery.mjs';
 import { parse } from '../src/opentype.mjs';
 import { SPACE_TYPES } from '../src/char.mjs';
+import { normalizeCharacters } from '../src/normalization.mjs';
+import { HarfBuzzShaper } from '../src/layout.mjs';
 import { readFileSync } from 'fs';
 import { shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
 import {
@@ -74,6 +76,44 @@ describe('bidi.mjs', function() {
         }];
         bidiFira.applyFeatures(latinFont, latinFeatures);
     });
+    describe('registerNormalizer', function() {
+        it('normalizes the characters of each script run with the script tags of the run, the tokens taking their glyphs', function() {
+            // TestNormalization.ttf (see normalization.spec.mjs): e and the acute composed into eacute (10) in the latn
+            // run, the shadda (26) put before the fatha (24) in the arab run
+            const normalizationFont = loadSync('./test/fonts/TestNormalization.ttf');
+            const normalizedRuns = [];
+            const bidi = new Bidi();
+            bidi.registerNormalizer((characters, scriptTags) => {
+                normalizedRuns.push([characters.map(character => character.char).join(''), scriptTags]);
+                const shaper = scriptTags.includes('arab') ? HarfBuzzShaper.ARABIC : HarfBuzzShaper.DEFAULT;
+                return normalizeCharacters(normalizationFont, characters, shaper, false);
+            });
+            bidi.applyFeatures(normalizationFont, []);
+            bidi.processText('e\u{301} \u{628}\u{64E}\u{651}');
+            assert.deepStrictEqual(normalizedRuns, [['e\u{301} ', ['latn']], ['\u{628}\u{64E}\u{651}', ['arab']]]);
+            assert.deepStrictEqual(bidi.scriptRuns.map(run => [run.scriptTags, run.tokens.map(token => token.char).join('')]),
+                [[['latn'], '\u{E9} '], [['arab'], '\u{628}\u{651}\u{64E}']]);
+            // the tokens of the runs in the order of the text, before the right-to-left run is reversed
+            const runTokens = bidi.scriptRuns.flatMap(run => run.tokens);
+            assert.deepStrictEqual(runTokens.map(token => [token.state.glyphIndex, token.cluster, token.spaceFallbackType]), [
+                [10, 0, SPACE_TYPES.NOT_SPACE], [1, 2, SPACE_TYPES.NOT_SPACE], [23, 3, SPACE_TYPES.NOT_SPACE],
+                [26, 4, SPACE_TYPES.NOT_SPACE], [24, 4, SPACE_TYPES.NOT_SPACE]
+            ]);
+        });
+
+        it('normalizes the whole text with the script tag of the script option', function() {
+            const runScriptTags = [];
+            const bidi = new Bidi();
+            bidi.registerNormalizer((characters, scriptTags) => {
+                runScriptTags.push(scriptTags);
+                return characters.map(({ char, cluster }) => ({ char, cluster, glyphIndex: 0, spaceFallbackType: SPACE_TYPES.NOT_SPACE }));
+            });
+            bidi.applyFeatures(latinFont, [], { script: 'arab' });
+            assert.deepStrictEqual(bidi.getTextGlyphs('ab'), [0, 0]);
+            assert.deepStrictEqual(runScriptTags, [['arab']]);
+        });
+    });
+
     describe('arabic contexts', function() {
         it('should match the arabic script runs of a given text', function() {
             bidiScheherazade.processText('Hello السلام عليكم');
@@ -225,6 +265,10 @@ describe('bidi.mjs', function() {
         it('should adjust then render layout direction of bidi text', function() {
             const bidiText = bidiScheherazade.getBidiText('Be kind, فما كان الرفق في شيء إلا زانه ، ولا نزع من شيء إلا شانه');
             assert.equal(bidiText, 'Be kind, هناش الإ ءيش نم عزن الو ، هناز الإ ءيش يف قفرلا ناك امف');
+        });
+
+        it('lays out a text without registered features', function() {
+            assert.equal(new Bidi().getBidiText('ab \u{633}\u{62F}'), 'ab \u{62F}\u{633}');
         });
     });
     describe('applyFeatures', function () {
@@ -1058,6 +1102,74 @@ describe('bidi.mjs', function() {
         });
     });
 
+    describe('indic features', function() {
+        // TestNormalization.ttf (see normalization.spec.mjs): its GSUB has ccmp (lookup 0) and nukt (lookup 1, ka and
+        // nukta into qa); the Devanagari runs take the Indic shaper of its dev2 script. The references are hb-shape
+        // --shapers=ot --no-glyph-names --cluster-level=1 --no-positions on fontTools copies of the font
+        let font;
+
+        beforeEach(function() {
+            font = loadSync('./test/fonts/TestNormalization.ttf');
+        });
+
+        it('applies nukt after ccmp and locl, in a stage of its own, like the Indic shaper of HarfBuzz', function() {
+            // a copy with a ccmp lookup sub qa by A; after the nukt lookup in the lookup list: -u 0958: [66=0], ka and nukta
+            // composed into qa by nukt after the ccmp stage; the default shaper, which applies no nukt and keeps U+0958:
+            // --script=Latn -u 0958: [2=0]
+            font.substitution.addSingle('ccmp', { sub: 66, by: 2 }, 'dev2');
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{958}'), [66]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{958}', { script: 'latn' }), [2]);
+        });
+
+        it('applies nukt before the other features, whatever the lookup list order, like the Indic shaper of HarfBuzz', function() {
+            // a copy with a calt lookup sub ka by na; before the nukt lookup in the lookup list: -u 0958: [66=0], ka and
+            // nukta composed into qa by nukt before calt; --features=-nukt -u 0958: [67=0|65=0]
+            const gsub = font.tables.gsub;
+            const [ccmpLookup, nuktaFormsLookup] = gsub.lookups;
+            gsub.lookups = [ccmpLookup, createSingleLookup([64], [67]), nuktaFormsLookup];
+            gsub.features.find(featureRecord => featureRecord.tag === 'nukt').feature.lookupListIndexes = [2];
+            gsub.features.push({ tag: 'calt', feature: { featureParams: 0, lookupListIndexes: [1] } });
+            gsub.scripts.find(scriptRecord => scriptRecord.tag === 'dev2').script.defaultLangSys.featureIndexes.push(gsub.features.length - 1);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{958}'), [66]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{958}', { features: { nukt: false } }), [67, 65]);
+        });
+
+        it('applies rvrn to an indic run in a stage of its own before ccmp, like the Indic shaper of HarfBuzz', function() {
+            // a copy with a ccmp lookup sub ka by na and an rvrn lookup sub ka by A after it in the lookup list: -u 0915:
+            // [2=0]; --features=-rvrn -u 0915: [67=0]
+            const gsub = font.tables.gsub;
+            const [ccmpLookup, nuktaFormsLookup] = gsub.lookups;
+            gsub.lookups = [ccmpLookup, createSingleLookup([64], [67]), createSingleLookup([64], [2]), nuktaFormsLookup];
+            gsub.features.find(featureRecord => featureRecord.tag === 'ccmp').feature.lookupListIndexes = [0, 1];
+            gsub.features.find(featureRecord => featureRecord.tag === 'nukt').feature.lookupListIndexes = [3];
+            gsub.features.push({ tag: 'rvrn', feature: { featureParams: 0, lookupListIndexes: [2] } });
+            gsub.scripts.find(scriptRecord => scriptRecord.tag === 'dev2').script.defaultLangSys.featureIndexes.push(gsub.features.length - 1);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{915}'), [2]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{915}', { features: { rvrn: false } }), [67]);
+        });
+
+        it('applies no nukt to a Devanagari run of the default shaper, whose GSUB script is DFLT, like HarfBuzz', function() {
+            // -u 0915,093C: [66=0]; a copy without the dev2 script of GSUB: -u 0915,093C: [64=0|65=1]
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{915}\u{93C}'), [66]);
+            const fontWithoutDevanagari = loadSync('./test/fonts/TestNormalization.ttf');
+            const gsubScripts = fontWithoutDevanagari.tables.gsub.scripts;
+            fontWithoutDevanagari.tables.gsub.scripts = gsubScripts.filter(scriptRecord => scriptRecord.tag !== 'dev2');
+            assert.deepStrictEqual(fontWithoutDevanagari.stringToGlyphIndexes('\u{915}\u{93C}'), [64, 65]);
+        });
+
+        it('applies the required feature of an indic language system whatever the features option, like HarfBuzz', function() {
+            // a copy whose dev2 language system has nukt as its required feature (ReqFeatureIndex), not in its
+            // FeatureIndex: -u 0958: [66=0]; --features=-nukt -u 0958: [66=0]
+            const gsub = font.tables.gsub;
+            const nuktFeatureIndex = gsub.features.findIndex(featureRecord => featureRecord.tag === 'nukt');
+            const defaultLangSys = gsub.scripts.find(scriptRecord => scriptRecord.tag === 'dev2').script.defaultLangSys;
+            defaultLangSys.reqFeatureIndex = nuktFeatureIndex;
+            defaultLangSys.featureIndexes = defaultLangSys.featureIndexes.filter(featureIndex => featureIndex !== nuktFeatureIndex);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{958}'), [66]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('\u{958}', { features: { nukt: false } }), [66]);
+        });
+    });
+
     describe('a font without a GSUB table', function() {
         it('looks no GSUB feature up in its script runs, until a substitution added through the Layout methods creates the table', function() {
             const font = createLookupFlagsFont();
@@ -1668,6 +1780,44 @@ describe('bidi.mjs', function() {
                 // [329=3+638|328=2@-130,0+508|747=1+645|932=0+439]
                 assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{628}\u{6D5}\u{631}\u{632}'), [329, 328, 747, 932]);
             });
+
+        itFailsUntilFixed('lays out an arabic word with the decomposed yeh barree with hamza from right to left: Scheherazade, like HarfBuzz',
+            'arabicSentenceStartCheck (src/features/arab/contextCheck/arabicSentence.mjs): the normalization composes U+06D2 ' +
+            'U+0654 into U+06D3, which isArabicChar leaves out, so the word is not laid out from right to left',
+            function() {
+                // beh, yeh barree, hamza above, beh: hb-shape --shapers=ot --no-glyph-names --cluster-level=1
+                // --no-positions Scheherazade-Bold.ttf -u 0628,06D2,0654,0628 [373=3|586=1|932=0]
+                assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{628}\u{6D2}\u{654}\u{628}'), [373, 586, 932]);
+            });
+
+        itFailsUntilFixed('lays out an arabic sentence with the decomposed yeh barree with hamza from right to left: Scheherazade, like HarfBuzz',
+            'arabicSentenceStartCheck (src/features/arab/contextCheck/arabicSentence.mjs): the normalization composes U+06D2 ' +
+            'U+0654 into U+06D3, which isArabicChar leaves out, so it splits the right-to-left sentence',
+            function() {
+                // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --no-positions Scheherazade-Bold.ttf
+                // -u 0628,0627,0020,0628,06D2,0654,0020,0628,0627 [524=8|932=7|3=6|586=4|932=3|3=2|524=1|932=0]
+                assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{628}\u{627} \u{628}\u{6D2}\u{654} \u{628}\u{627}'),
+                    [524, 932, 3, 586, 932, 3, 524, 932]);
+            });
+
+        it('lays out an arabic word with a haraka before a mark of Arabic Extended-A from right to left: Scheherazade, like HarfBuzz', function() {
+            // beh fatha U+08F3 lam: the normalization moves U+08F3 (class 230) before the fatha (class 30), like
+            // reorder_marks_arabic of HarfBuzz, and the fatha after it stays in the right-to-left sentence, attached to beh:
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 Scheherazade-Bold.ttf -u 0628,064E,08F3,0644
+            // [717=3+929|1075=1@85,-93+0|1325=1@96,-33+0|932=0+439]; -u 0628,064E,08D3,0644 [717=3+929|1075=1+0|0=1+1135|932=0+439]
+            const glyphPositions = arabicFont.shape('\u{628}\u{64E}\u{8F3}\u{644}')
+                .map(glyphPosition => [glyphPosition.glyph.index, glyphPosition.xOffset, glyphPosition.yOffset, glyphPosition.xAdvance]);
+            assert.deepStrictEqual(glyphPositions, [[717, 0, 0, 929], [1075, 85, -93, 0], [1325, 96, -33, 0], [932, 0, 0, 439]]);
+            assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{628}\u{64E}\u{8F3}\u{644}'), [717, 1075, 1325, 932]);
+            assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{628}\u{64E}\u{8D3}\u{644}'), [717, 1075, 0, 932]);
+        });
+
+        it('does not split an arabic sentence at a mark of Arabic Extended-A: Scheherazade, like HarfBuzz', function() {
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --no-positions Scheherazade-Bold.ttf
+            // -u 0628,0627,0020,0628,064E,08F3,0644,0020,0628,0627 [524=9|932=8|3=7|717=6|1075=4|1325=4|932=3|3=2|524=1|932=0]
+            assert.deepStrictEqual(arabicFont.stringToGlyphIndexes('\u{628}\u{627} \u{628}\u{64E}\u{8F3}\u{644} \u{628}\u{627}'),
+                [524, 932, 3, 717, 1075, 1325, 932, 3, 524, 932]);
+        });
 
         itFailsUntilFixed('joins the letters of Arabic Supplement and Arabic Extended-A from right to left: Scheherazade, like HarfBuzz',
             'getArabicJoiningType (src/char.mjs): the joining types cover the Arabic block U+0600-06FF only, so U+0750-077F and ' +

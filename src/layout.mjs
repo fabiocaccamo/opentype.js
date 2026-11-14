@@ -117,6 +117,105 @@ function getChosenScriptTag(layout, scriptTags) {
 }
 
 /**
+ * The shapers of HarfBuzz (hb_ot_shaper_t), see getHarfBuzzShaper
+ * @readonly
+ * @enum {string}
+ */
+const HarfBuzzShaper = Object.freeze({
+    DEFAULT: 'default',
+    ARABIC: 'arabic',
+    HANGUL: 'hangul',
+    HEBREW: 'hebrew',
+    INDIC: 'indic',
+    KHMER: 'khmer',
+    MYANMAR: 'myanmar',
+    THAI: 'thai',
+    USE: 'use'
+});
+
+// the ISO 15924 codes of the scripts of the Indic shaper of HarfBuzz and of its Universal Shaping Engine (USE)
+const INDIC_SCRIPTS = ['Beng', 'Deva', 'Gujr', 'Guru', 'Knda', 'Mlym', 'Orya', 'Taml', 'Telu'];
+const UNIVERSAL_SHAPING_ENGINE_SCRIPTS = [
+    'Adlm', 'Ahom', 'Bali', 'Batk', 'Bhks', 'Brah', 'Bugi', 'Buhd', 'Cakm', 'Cham', 'Chrs', 'Cpmn', 'Diak', 'Dogr',
+    'Dupl', 'Egyp', 'Elym', 'Gara', 'Gong', 'Gonm', 'Gran', 'Gukh', 'Hano', 'Hmng', 'Hmnp', 'Java', 'Kali', 'Kawi',
+    'Khar', 'Khoj', 'Kits', 'Krai', 'Kthi', 'Lana', 'Lepc', 'Limb', 'Mahj', 'Maka', 'Mand', 'Mani', 'Marc', 'Medf',
+    'Modi', 'Mong', 'Mtei', 'Mult', 'Nagm', 'Nand', 'Newa', 'Nkoo', 'Onao', 'Ougr', 'Phag', 'Phlp', 'Plrd', 'Rjng',
+    'Rohg', 'Saur', 'Shrd', 'Sidd', 'Sind', 'Sinh', 'Sogd', 'Sogo', 'Soyo', 'Sund', 'Sunu', 'Sylo', 'Tagb', 'Takr',
+    'Tale', 'Tavt', 'Tfng', 'Tglg', 'Tibt', 'Tirh', 'Tnsa', 'Todr', 'Toto', 'Tutg', 'Vith', 'Wcho', 'Yezi', 'Zanb'
+];
+const INDIC_SCRIPT_TAGS = INDIC_SCRIPTS.flatMap(getOpenTypeScriptTags);
+const UNIVERSAL_SHAPING_ENGINE_SCRIPT_TAGS = UNIVERSAL_SHAPING_ENGINE_SCRIPTS.flatMap(getOpenTypeScriptTags);
+const MYANMAR_SCRIPT_TAGS = getOpenTypeScriptTags('Mymr');
+const THAI_SHAPER_SCRIPT_TAGS = ['thai', 'lao '];
+// the GSUB scripts that make an Indic, Myanmar or USE run take the default shaper of HarfBuzz
+const DEFAULT_SHAPER_GSUB_SCRIPT_TAGS = ['DFLT', 'latn'];
+
+/**
+ * The shaper HarfBuzz picks for a horizontal run from its script and from the script it chose in GSUB
+ * (hb_ot_shaper_categorize, hb-ot-shaper.hh of HarfBuzz 11.3.2): the Arabic shaper for Arabic, and for Syriac unless
+ * its GSUB script is DFLT; the Thai, Hangul, Hebrew and Khmer shapers for their scripts; the Indic shaper for an
+ * Indic script, the USE for the third version of its tags (e.g. dev3); the Myanmar shaper for Myanmar, unless its
+ * GSUB script is mymr; the USE for the scripts of the USE; the default shaper for an Indic, Myanmar or USE script whose
+ * GSUB script is DFLT or latn, and for the other scripts.
+ * @param {string[]} scriptTags - the OpenType script tags of the run (see getOpenTypeScriptTags)
+ * @param {string|undefined} gsubScriptTag - the script HarfBuzz chose in GSUB (see getChosenScriptTag), undefined
+ * for none
+ * @return {HarfBuzzShaper}
+ */
+function getHarfBuzzShaper(scriptTags, gsubScriptTag) {
+    const hasScriptTag = tags => scriptTags.some(tag => tags.includes(tag));
+    const isDefaultShaperGsubScript = DEFAULT_SHAPER_GSUB_SCRIPT_TAGS.includes(gsubScriptTag);
+    if (scriptTags.includes('arab')) {
+        return HarfBuzzShaper.ARABIC;
+    }
+    if (scriptTags.includes('syrc')) {
+        return gsubScriptTag === 'DFLT' ? HarfBuzzShaper.DEFAULT : HarfBuzzShaper.ARABIC;
+    }
+    if (hasScriptTag(THAI_SHAPER_SCRIPT_TAGS)) {
+        return HarfBuzzShaper.THAI;
+    }
+    if (scriptTags.includes('hang')) {
+        return HarfBuzzShaper.HANGUL;
+    }
+    if (scriptTags.includes('hebr')) {
+        return HarfBuzzShaper.HEBREW;
+    }
+    if (scriptTags.includes('khmr')) {
+        return HarfBuzzShaper.KHMER;
+    }
+    if (hasScriptTag(INDIC_SCRIPT_TAGS)) {
+        if (isDefaultShaperGsubScript) {
+            return HarfBuzzShaper.DEFAULT;
+        }
+        return gsubScriptTag && gsubScriptTag.endsWith('3') ? HarfBuzzShaper.USE : HarfBuzzShaper.INDIC;
+    }
+    if (hasScriptTag(MYANMAR_SCRIPT_TAGS)) {
+        return isDefaultShaperGsubScript || gsubScriptTag === 'mymr' ? HarfBuzzShaper.DEFAULT : HarfBuzzShaper.MYANMAR;
+    }
+    if (hasScriptTag(UNIVERSAL_SHAPING_ENGINE_SCRIPT_TAGS)) {
+        return isDefaultShaperGsubScript ? HarfBuzzShaper.DEFAULT : HarfBuzzShaper.USE;
+    }
+    return HarfBuzzShaper.DEFAULT;
+}
+
+/**
+ * A function of the script tags of a run that computes its value once for each set of script tags it is called with,
+ * e.g. the shaper of the runs of a text, which alternates between a few scripts in many runs (a Japanese text)
+ * @param {function(string[]): any} computeValue - a function of the script tags of a run (see getOpenTypeScriptTags)
+ * @return {function(string[]): any}
+ */
+function memoizeByScriptTags(computeValue) {
+    const values = new Map();
+    return scriptTags => {
+        const key = scriptTags.join(',');
+        if (!values.has(key)) {
+            values.set(key, computeValue(scriptTags));
+        }
+        return values.get(key);
+    };
+}
+
+/**
  * The script tag a layout table uses for a list of script tags, like hb_ot_layout_table_select_script of HarfBuzz: the
  * first one the table has, otherwise the first one, which getScriptTable takes to the fallback scripts.
  * @param {Layout} layout - a GSUB or GPOS layout (font.substitution, font.position)
@@ -1031,5 +1130,8 @@ export {
     getOpenTypeScriptTags,
     isRightToLeftScript,
     getChosenScriptTag,
+    HarfBuzzShaper,
+    getHarfBuzzShaper,
+    memoizeByScriptTags,
     selectScriptTag
 };

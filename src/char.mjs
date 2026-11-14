@@ -3,6 +3,7 @@
 // ╰─╾──────────────────────────┄─────────────────────────────────────────────╯
 // jscs:disable maximumLineLength
 import { SCRIPT_CODES, SCRIPT_RANGES, SCRIPT_EXTENSION_RANGES } from './unicode-scripts.mjs';
+import { MODIFIED_COMBINING_CLASS_RANGES, DECOMPOSITION_FIRST_CHARACTERS } from './unicode-normalization.mjs';
 
 /**
  * Check if a char is Arabic: of the Arabic block (not yet all of it) or of the Arabic Presentation Forms-A and -B
@@ -48,13 +49,18 @@ export function getArabicJoiningType(char) {
  */
 export function isTashkeelArabicChar(char) {
     // eslint-disable-next-line no-misleading-character-class
-    return /[\u0600-\u0605\u060C-\u060E\u0610-\u061B\u061E\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/.test(char);
+    return /[\u0600-\u0605\u060C-\u060E\u0610-\u061B\u061E\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED\u0898-\u089F\u08CA-\u08E1\u08E3-\u08FF]/.test(char);
 }
 
 // the start code point of each range of code points of one script (see unicode-scripts.mjs), and its script
 const { scriptRangeStarts, scriptRangeCodes } = decodeScriptRanges(SCRIPT_RANGES);
 // the ranges of code points whose Script_Extensions are not their script alone (see unicode-scripts.mjs)
 const { extensionRangeStarts, extensionRangeEnds, extensionRangeScripts } = decodeScriptExtensionRanges(SCRIPT_EXTENSION_RANGES);
+
+// the ranges of code points of a modified combining class other than 0 (see unicode-normalization.mjs)
+const { combiningClassRangeStarts, combiningClassRangeEnds, combiningClasses } = decodeCombiningClassRanges(MODIFIED_COMBINING_CLASS_RANGES);
+// the first character of the canonical decompositions that String.prototype.normalize cannot give, by character
+const decompositionFirstCharacters = decodeDecompositionFirstCharacters(DECOMPOSITION_FIRST_CHARACTERS);
 
 /**
  * Decode the ranges of code points of one script of unicode-scripts.mjs
@@ -94,6 +100,38 @@ function decodeScriptExtensionRanges(encodedRanges) {
         scripts.push(scriptIndexes.map(scriptIndex => SCRIPT_CODES[scriptIndex]));
     }
     return { extensionRangeStarts: starts, extensionRangeEnds: ends, extensionRangeScripts: scripts };
+}
+
+/**
+ * Decode the ranges of code points of a modified combining class of unicode-normalization.mjs
+ * @param {string} encodedRanges - MODIFIED_COMBINING_CLASS_RANGES
+ * @return {{combiningClassRangeStarts: number[], combiningClassRangeEnds: number[], combiningClasses: number[]}} the
+ * first and the last code point of each range, in ascending order, and its modified combining class
+ */
+function decodeCombiningClassRanges(encodedRanges) {
+    const starts = [];
+    const ends = [];
+    const classes = [];
+    let start = 0;
+    for (const encodedRange of encodedRanges.split(',')) {
+        const [distance, length, combiningClass] = encodedRange.split(':').map(value => parseInt(value, 36));
+        start += distance;
+        starts.push(start);
+        ends.push(start + length);
+        classes.push(combiningClass);
+    }
+    return { combiningClassRangeStarts: starts, combiningClassRangeEnds: ends, combiningClasses: classes };
+}
+
+/**
+ * Decode the first characters of the canonical decompositions of unicode-normalization.mjs
+ * @param {string} encodedDecompositions - DECOMPOSITION_FIRST_CHARACTERS
+ * @return {Map<string, string>} the first character of the canonical decomposition of each character
+ */
+function decodeDecompositionFirstCharacters(encodedDecompositions) {
+    return new Map(encodedDecompositions.split(',').map(encodedDecomposition =>
+        encodedDecomposition.split(':').map(codePoint => String.fromCodePoint(parseInt(codePoint, 16)))
+    ));
 }
 
 /**
@@ -223,6 +261,78 @@ const SPACE_FALLBACK_TYPES = new Map([
  */
 export function getSpaceFallbackType(char) {
     return SPACE_FALLBACK_TYPES.get(char.codePointAt(0)) || SPACE_TYPES.NOT_SPACE;
+}
+
+/**
+ * Check if a char is a mark for the normalization of HarfBuzz (_hb_glyph_info_is_unicode_mark, hb-ot-layout.hh of
+ * HarfBuzz 11.3.2): a char of the Mn, Mc or Me general category, those of the Unicode version of the JavaScript engine
+ * (its \p{M})
+ * @param {string} char a single char
+ * @return {boolean}
+ */
+export function isUnicodeMark(char) {
+    return /\p{M}/u.test(char);
+}
+
+/**
+ * The modified combining class of a char, the order of the marks in the normalization of HarfBuzz
+ * (hb_unicode_funcs_t::modified_combining_class, hb-unicode.hh of HarfBuzz 11.3.2, see unicode-normalization.mjs): the
+ * Canonical_Combining_Class of Unicode 16.0.0, with the classes HarfBuzz modifies (e.g. 27 for the Arabic shadda, before
+ * the fatha, 28 to 35 for the other Arabic vowel marks, 12 for the Hebrew dagesh, before the vowel points), for a mark
+ * only, like HarfBuzz keeps it (_hb_glyph_info_set_unicode_props)
+ * @param {string} char a single char
+ * @return {number} 0 for the starters and the chars that are not marks
+ */
+export function getModifiedCombiningClass(char) {
+    const codePoint = char.codePointAt(0);
+    const index = findRangeIndex(combiningClassRangeStarts, codePoint);
+    return index >= 0 && codePoint <= combiningClassRangeEnds[index] ? combiningClasses[index] : 0;
+}
+
+/**
+ * The canonical decomposition mapping of a char, one step, like the decompose function of the Unicode functions of
+ * HarfBuzz (hb_ucd_decompose, hb-ucd.cc of HarfBuzz 11.3.2), from String.prototype.normalize and, for the
+ * decompositions whose first char is itself decomposed and excluded from composition, unicode-normalization.mjs: a
+ * singleton (e.g. U+212B ANGSTROM SIGN to U+00C5, U+2001 EM QUAD to U+2003 EM SPACE) or two chars, the first of which
+ * can decompose again (e.g. U+01D5 to U+00DC U+0304, U+FB2C to U+FB49 U+05C1, a Hangul syllable LVT to its syllable
+ * LV and its T jamo). The Unicode version is the one of the JavaScript engine
+ * @param {string} char a single char
+ * @return {string[]|null} the char of a singleton or the two chars of the decomposition, null for a char without a
+ * canonical decomposition
+ */
+export function getCanonicalDecomposition(char) {
+    const decomposedChars = Array.from(char.normalize('NFD'));
+    if (decomposedChars.length === 1) {
+        return decomposedChars[0] === char ? null : decomposedChars;
+    }
+    const composedChar = char.normalize('NFC');
+    if (composedChar !== char && Array.from(composedChar).length === 1) {
+        return [composedChar];
+    }
+    const lastChar = decomposedChars.pop();
+    const firstChar = decompositionFirstCharacters.get(char) || decomposedChars.join('').normalize('NFC');
+    return [firstChar, lastChar];
+}
+
+/**
+ * The primary composite of two chars, like the compose function of the Unicode functions of HarfBuzz (hb_ucd_compose,
+ * hb-ucd.cc of HarfBuzz 11.3.2): the char whose canonical decomposition (see getCanonicalDecomposition) is the two
+ * chars, unless it is excluded from composition (e.g. U+0915 U+093C to U+0958 DEVANAGARI LETTER QA) or not a starter;
+ * a Hangul syllable LV of its L and V jamo, a Hangul syllable LVT of its syllable LV and its T jamo. The Unicode
+ * version is the one of the JavaScript engine
+ * @param {string} firstChar a single char
+ * @param {string} secondChar a single char
+ * @return {string|null} null for chars that do not compose
+ */
+export function getCanonicalComposition(firstChar, secondChar) {
+    const composedChar = (firstChar + secondChar).normalize('NFC');
+    if (Array.from(composedChar).length !== 1) {
+        return null;
+    }
+    const decomposition = getCanonicalDecomposition(composedChar);
+    const isDecomposition = decomposition !== null && decomposition.length === 2 &&
+        decomposition[0] === firstChar && decomposition[1] === secondChar;
+    return isDecomposition ? composedChar : null;
 }
 
 // the scripts of the chars that take the script of the text around them: Common, Inherited and Unknown

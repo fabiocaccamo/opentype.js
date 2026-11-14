@@ -14,9 +14,14 @@ import { SVGImageManager } from './svgimages.mjs';
 import { VariationManager } from './variation.mjs';
 import HintingTrueType from './hintingtt.mjs';
 import Bidi, { getScriptRunShaper } from './bidi.mjs';
-import { ARABIC_FORM_TAGS, getEnabledFeatureTags, getDirectionFeatureTags } from './features/featureValues.mjs';
-import { getCharTextScript, getSpaceFallbackType, isVariationSelector, SPACE_TYPES } from './char.mjs';
-import { getOpenTypeScriptTags, getChosenScriptTag, selectScriptTag } from './layout.mjs';
+import {
+    ARABIC_FORM_TAGS, getEnabledFeatureTags, getDirectionFeatureTags, isDefaultFeatureInMap
+} from './features/featureValues.mjs';
+import { getCharTextScript, SPACE_TYPES } from './char.mjs';
+import { normalizeCharacters } from './normalization.mjs';
+import {
+    getOpenTypeScriptTags, getChosenScriptTag, getHarfBuzzShaper, memoizeByScriptTags, selectScriptTag
+} from './layout.mjs';
 import { applyPaintType } from './tables/cff.mjs';
 
 function createDefaultNamesInfo(options) {
@@ -249,45 +254,29 @@ Font.prototype.stringToGlyphIndexes = function(s, options) {
 };
 
 /**
- * The glyph of a character of a text, like decompose_current_character of HarfBuzz (hb-ot-shape-normalize.cc of
- * HarfBuzz 11.3.2), not yet with its canonical decomposition: the glyph of the character in the cmap (see
- * charToGlyphIndex); for a space the font has not that can use the glyph of U+0020 SPACE (a space fallback type other
- * than NOT_SPACE, see getSpaceFallbackType in char.mjs), the glyph of U+0020, whose advance is then the one of the
- * space type (see getDefaultGlyphAdvance in position.mjs); for U+2011 NON-BREAKING HYPHEN the font has not, the glyph
- * of U+2010 HYPHEN; otherwise the glyph index of the cmap, .notdef. A character followed by a variation selector
- * (U+FE00 to U+FE0F, U+E0100 to U+E01EF, see isVariationSelector in char.mjs) keeps the glyph of the cmap, like
- * handle_variation_selector_cluster of HarfBuzz, which maps it to its nominal glyph without these fallbacks (not yet
- * when other marks come between the character and the selector); a Mongolian free variation selector after it keeps
- * the fallbacks, like HarfBuzz.
+ * Whether the mark feature is in the feature map of a script run, like the has_gpos_mark of the plan of HarfBuzz
+ * (hb-ot-shape.cc of HarfBuzz 11.3.2): the features option does not turn it off with 0 or false (see
+ * isDefaultFeatureInMap, so mark 256 keeps it, though its lookups do not apply), and the GSUB or the GPOS table has it
+ * for the script of the run and the language of the options, not as the required feature of the language system (see
+ * hb_ot_layout_language_find_feature)
  * @param  {Font} font
- * @param  {string} char a single character
- * @param  {string|null} nextChar the character after it in the text, null at the end
- * @return {{glyphIndex: number|null, spaceFallbackType: number}} spaceFallbackType the space type of the glyph of
- * U+0020 that draws a space, NOT_SPACE for the other glyphs
+ * @param  {string[]} scriptTags - the OpenType script tags of the run (see getOpenTypeScriptTags)
+ * @param  {GlyphRenderOptions} options
+ * @return {boolean}
  */
-function getCharacterGlyph(font, char, nextChar) {
-    const glyphIndex = font.charToGlyphIndex(char);
-    if (glyphIndex > 0 || isVariationSelector(nextChar)) {
-        return { glyphIndex, spaceFallbackType: SPACE_TYPES.NOT_SPACE };
+function hasMarkFeature(font, scriptTags, options) {
+    if (!isDefaultFeatureInMap(options.features, 'mark')) {
+        return false;
     }
-    const spaceFallbackType = getSpaceFallbackType(char);
-    if (spaceFallbackType !== SPACE_TYPES.NOT_SPACE) {
-        const spaceGlyphIndex = font.charToGlyphIndex(' ');
-        if (spaceGlyphIndex > 0) {
-            return { glyphIndex: spaceGlyphIndex, spaceFallbackType };
-        }
-    }
-    if (char === '\u{2011}') {
-        const hyphenGlyphIndex = font.charToGlyphIndex('\u{2010}');
-        if (hyphenGlyphIndex > 0) {
-            return { glyphIndex: hyphenGlyphIndex, spaceFallbackType: SPACE_TYPES.NOT_SPACE };
-        }
-    }
-    return { glyphIndex, spaceFallbackType: SPACE_TYPES.NOT_SPACE };
+    return [font.substitution, font.position].some(layout =>
+        layout.getFeatureTable(selectScriptTag(layout, scriptTags), options.language, 'mark') !== undefined
+    );
 }
 
 /**
- * Create a Bidi instance mapping the characters to glyph indexes (see getCharacterGlyph), with the features, the
+ * Create a Bidi instance mapping the characters of each script run to glyph indexes with the Unicode normalization of
+ * HarfBuzz (see normalizeCharacters in normalization.mjs), with the shaper HarfBuzz picks for the run (see
+ * getHarfBuzzShaper in layout.mjs, computed once for the runs of the same script tags), and with the features, the
  * script, the language and the variation of the given options.
  * @param  {GlyphRenderOptions} [options]
  * @return {Bidi}
@@ -297,11 +286,13 @@ Font.prototype._createBidi = function(options) {
     options = options || {};
     const bidi = new Bidi();
 
-    // the 'glyphIndex' state modifier: the glyph of the character of each token, and its spaceFallbackType
-    bidi.registerModifier('glyphIndex', null, (token, contextParams) => {
-        const characterGlyph = getCharacterGlyph(this, token.char, contextParams.get(1));
-        token.spaceFallbackType = characterGlyph.spaceFallbackType;
-        return characterGlyph.glyphIndex;
+    const getRunNormalization = memoizeByScriptTags(scriptTags => ({
+        shaper: getHarfBuzzShaper(scriptTags, getChosenScriptTag(this.substitution, scriptTags)),
+        hasMarkFeature: hasMarkFeature(this, scriptTags, options)
+    }));
+    bidi.registerNormalizer((characters, scriptTags) => {
+        const normalization = getRunNormalization(scriptTags);
+        return normalizeCharacters(this, characters, normalization.shaper, normalization.hasMarkFeature);
     });
 
     bidi.applyFeatures(this, this.updateFeatures(options.features), {
@@ -319,7 +310,9 @@ Font.prototype._createBidi = function(options) {
  * (its cluster), like the clusters of HarfBuzz (cluster level 1): a ligature represents all its component
  * characters, and the glyphs between its components (e.g. the marks its lookup skips) are in its cluster; each
  * glyph of a multiple substitution represents the characters of the glyph it replaces; a character represented
- * by no glyph of its own (e.g. a variation selector) belongs to the cluster of the glyph before it.
+ * by no glyph of its own (e.g. a variation selector) belongs to the cluster of the glyph before it. Like the
+ * normalization of HarfBuzz (see stringToGlyphs): the characters a character is decomposed into are in its cluster, a
+ * base and the mark composed with it are one cluster, and a mark put before other marks is in one cluster with them.
  * The glyphs are the ones (and in the same order) returned by stringToGlyphs().
  * @param  {string} s
  * @param  {GlyphRenderOptions} [options]
@@ -340,7 +333,7 @@ Font.prototype.stringToGlyphClusters = function(s, options) {
  * a right-to-left run, scriptRun the script run of the glyph, ligatureProperties what the ligature substitutions
  * recorded about the glyph (see Bidi.getTextGlyphClusters), spaceType the space type of the advance of the glyph
  * (see getDefaultGlyphAdvance in position.mjs): like _hb_ot_shape_fallback_spaces of HarfBuzz, the space fallback type
- * of its character (see getCharacterGlyph), NOT_SPACE for a ligated glyph
+ * of its character (see normalizeCharacters in normalization.mjs), NOT_SPACE for a ligated glyph
  * @private
  */
 Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
@@ -364,9 +357,21 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
  * length of the given string.
  * The glyphs are in visual order, like HarfBuzz: the glyphs of an Arabic text in reverse order, the glyphs of a
  * multiple substitution included (e.g. a letter and the mark that ccmp decomposed it into, the mark first).
- * Like HarfBuzz, a space the font has not (U+00A0, U+2000 to U+200A, U+202F, U+205F, U+3000) takes the glyph of
- * U+0020 SPACE, with the advance of its kind of space in Font.shape, and U+2011 NON-BREAKING HYPHEN the glyph of
- * U+2010 HYPHEN, before the GSUB features (see getCharacterGlyph).
+ * Before the GSUB features, the characters of each script run are normalized like HarfBuzz (see normalizeCharacters in
+ * normalization.mjs): a character the font has not is decomposed into the characters of its canonical decomposition
+ * the font has (e.g. U+00C0 into A and U+0300, U+2001 EM QUAD into U+2003 EM SPACE), the marks after a base are put in
+ * the order of the modified combining classes of HarfBuzz (e.g. U+0323 before U+0301, the Arabic shadda before the
+ * fatha), and a base and a mark are composed into their precomposed character when the font has its glyph (e.g. e and
+ * U+0301 into U+00E9); a space the font has not (U+00A0, U+2000 to U+200A, U+202F, U+205F, U+3000) then takes the glyph
+ * of U+0020 SPACE, with the advance of its kind of space in Font.shape, and U+2011 NON-BREAKING HYPHEN the glyph of
+ * U+2010 HYPHEN. The normalization is the one of the shaper HarfBuzz picks for the run (see getHarfBuzzShaper in
+ * layout.mjs): the Indic, Khmer, Myanmar and USE shapers decompose every character, also when the font has it, and
+ * do not compose the parts of a split vowel sign (e.g. U+09CB into U+09C7 and U+09BE, U+0958 into U+0915 and U+093C,
+ * which the nukt of the font composes again with the Indic shaper, see GlyphRenderOptions.features, U+2001 into
+ * U+2003 in a Khmer run); the Hangul shaper keeps a syllable the font has before a mark and composes nothing; the
+ * Hebrew shaper composes the Hebrew presentation forms in a font without a mark feature (e.g. U+05E9 and U+05C1 into
+ * U+FB2A). Not yet the U+25CC DOTTED CIRCLE of the Indic and USE shapers, nor the decomposition of the Khmer split
+ * vowel signs into U+17C1 and themselves of the Khmer shaper (see normalizeCharacters).
  * @param  {string}
  * @param  {GlyphRenderOptions} [options]
  * @return {opentype.Glyph[]}
@@ -561,10 +566,11 @@ function getGlyphRuns(glyphClusters) {
  * @param  {Font} font
  * @param  {GlyphRenderOptions} options
  * @param  {string[]} scriptTags - the OpenType script tags of the run (see getScriptRunShaper)
+ * @param  {string|undefined} gsubScriptTag - the script HarfBuzz chose in GSUB for the run (see getChosenScriptTag)
  * @return {string[]}
  */
-function getPositioningFeatureTags(font, options, scriptTags) {
-    const shaper = getScriptRunShaper(scriptTags);
+function getPositioningFeatureTags(font, options, scriptTags, gsubScriptTag) {
+    const shaper = getScriptRunShaper(scriptTags, gsubScriptTag);
     const shaperFeature = font.defaultRenderOptions.features.find(feature => feature.script === shaper);
     const shaperTags = shaperFeature ? shaperFeature.tags.filter(tag => !ARABIC_FORM_TAGS.includes(tag)) : [];
     const defaultTags = shaperTags.concat(getDirectionFeatureTags(scriptTags), DEFAULT_POSITIONING_FEATURES);
@@ -580,8 +586,11 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                               https://learn.microsoft.com/en-us/typography/opentype/spec/scripttags), taken literally:
  *                               'deva' selects the language systems of the first version of the Indic tags, 'dev2' those
  *                               of the second one. Like HarfBuzz with the script of a buffer, the text is one script run,
- *                               which takes the arabic features for 'arab', the thai features for 'thai' and the latin
- *                               features otherwise. Without it, like
+ *                               which takes the arabic features for 'arab', the thai features for 'thai', the indic
+ *                               features for a tag of an Indic script of the Indic shaper of HarfBuzz, unless the GSUB
+ *                               script HarfBuzz chooses for it is 'DFLT', 'latn' or a tag of the third version such as
+ *                               'dev3' (e.g. 'dev2' in a font with a dev2 script in GSUB, 'dev2' or 'dev3' in a font
+ *                               with only a dflt script, see features), the latin features otherwise. Without it, like
  *                               HarfBuzz after the itemization of a browser, the text is split into script runs by the
  *                               Unicode Script property of its characters, the characters of no script (Common,
  *                               Inherited, Unknown: digits, punctuation, spaces, most combining marks) and the variation
@@ -596,8 +605,9 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                               deva for Devanagari and the other Indic scripts; DFLT for a text of no script). Each
  *                               script run is shaped on
  *                               its own: its GSUB lookups and its kerning pairs never cross the run. The arabic runs take
- *                               the arabic features, the thai runs the thai features, the other runs the latin features
- *                               (see features). A script the font has not falls back to 'DFLT', 'dflt', then 'latn', like
+ *                               the arabic features, the thai runs the thai features, the runs of the Indic shaper of
+ *                               HarfBuzz the indic features, the other runs the latin features (see features). A script
+ *                               the font has not falls back to 'DFLT', 'dflt', then 'latn', like
  *                               HarfBuzz; with 'hebr' and no hebr script in the GPOS table, no GPOS lookup applies and
  *                               the kern table does, like the Hebrew shaper of HarfBuzz. Like HarfBuzz, the GPOS lookups
  *                               apply to a right-to-left run in the order of the text (the value records of a pair to its
@@ -621,10 +631,10 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                                      then takes the nonspacing marks of Unicode as marks. Like HarfBuzz, which shapes
  *                                      each script run and each direction run on its own, two glyphs of two script
  *                                      runs, or of a left-to-right run and of a right-to-left run, are never kerned
- *                                      together. Not yet the composition of HarfBuzz: a letter and a combining mark
- *                                      (e.g. A and U+0300) are not composed into the precomposed glyph of the font
- *                                      (Agrave), so the kern table and the GPOS lookups with IgnoreMarks kern the
- *                                      letter across the mark. The other GPOS features apply without kerning too
+ *                                      together. Like HarfBuzz, a letter and a combining mark (e.g. A and U+0300)
+ *                                      composed into the precomposed glyph of the font (Agrave) are kerned as that
+ *                                      glyph (see Font.stringToGlyphs). The other GPOS features apply without
+ *                                      kerning too
  * @property {object} [features] - OpenType Layout feature tags (e.g. `{ liga: false, ss01: true, cv01: 2 }`), enabling
  *                                 or disabling them over the default ones, in every script run, for GSUB and for GPOS.
  *                                 Like font-feature-settings and the feature values of HarfBuzz, a value is a boolean
@@ -648,7 +658,9 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                                 that the required feature shares with salt 2 or with an Arabic form the option does
  *                                 not set. GSUB: rvrn, ccmp, locl, rlig, rclt, calt, liga, clig and rand for the latin
  *                                 and the thai features; rvrn, ccmp, locl, isol, init, medi, fina, rlig, rclt, calt,
- *                                 liga, clig, mset and rand for the arabic features; and the direction features of the
+ *                                 liga, clig, mset and rand for the arabic features; rvrn, ccmp, locl, nukt, rlig, rclt,
+ *                                 calt, liga, clig and rand for the indic features, of the runs of the Indic shaper of
+ *                                 HarfBuzz (see getHarfBuzzShaper in layout.mjs); and the direction features of the
  *                                 script of the run, like HarfBuzz from the horizontal direction of the script whatever
  *                                 the order the glyphs are laid out in: rtla and rtlm in a run of a right-to-left
  *                                 script (Arabic, Hebrew, Syriac...), ltra and ltrm in the other runs, which the
@@ -662,7 +674,13 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  *                                 direction features and rand, ccmp and locl, each form (isol, fina, medi, then init)
  *                                 to the letters of its form (each lookup of the form once over the whole run, in
  *                                 lookup list order), rlig, calt (with the other features when the language system has
- *                                 rclt), then the other features. Like HarfBuzz, the required feature of the language
+ *                                 rclt), then the other features; the indic features in the stages of the Indic shaper
+ *                                 of HarfBuzz: the direction features and rand, ccmp and locl, nukt (which composes a
+ *                                 consonant and a nukta, e.g. the U+0915 U+093C of the normalized U+0958, into the glyph
+ *                                 of their nukta form), then the other features; not yet its reordering, its other
+ *                                 features (akhn, rphf, blwf, half, pstf, pres, abvs, blws, psts, haln...), which apply
+ *                                 only when the features option enables them, nor its liga off by default. Like
+ *                                 HarfBuzz, the required feature of the language
  *                                 system (its ReqFeatureIndex) applies whatever the features option, at every glyph,
  *                                 with the lookups of the stage of its tag in lookup list order when the tag is
  *                                 enabled, otherwise with rvrn. Not yet the stch of the Arabic shaper of HarfBuzz, nor
@@ -702,10 +720,11 @@ function getPositioningFeatureTags(font, options, scriptTags) {
  */
 Font.prototype.defaultRenderOptions = {
     kerning: true,
-    // the GSUB features of each shaper: arab for the arabic script runs, thai for the thai script runs, latn for the
-    // other ones. Like HarfBuzz, rvrn is on by default in a stage of its own, the substitution features browsers enable
-    // by default and rand apply to every script, and the arabic features add the forms and mset
-    // (collect_features_arabic); each run adds the direction features of its script (see getDirectionFeatureTags).
+    // the GSUB features of each shaper: arab for the arabic script runs, thai for the thai script runs, indic for the
+    // runs of the Indic shaper of HarfBuzz, latn for the other ones. Like HarfBuzz, rvrn is on by default in a stage of
+    // its own, the substitution features browsers enable by default and rand apply to every script, the arabic
+    // features add the forms and mset (collect_features_arabic), the indic features nukt (collect_features_indic); each
+    // run adds the direction features of its script (see getDirectionFeatureTags).
     // Not yet the other features HarfBuzz enables by default: the automatic fractions (numr, dnom and frac around
     // U+2044 FRACTION SLASH), the stch of the Arabic shaper, and the GSUB lookups of abvm, blwm, curs, dist, kern (with
     // the kerning option), mark and mkmk, which HarfBuzz looks up in GSUB too
@@ -713,6 +732,7 @@ Font.prototype.defaultRenderOptions = {
         { script: 'arab', tags: ['rvrn', 'ccmp', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'mset', 'rand'] },
         { script: 'latn', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] },
         { script: 'thai', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] },
+        { script: 'indic', tags: ['rvrn', 'ccmp', 'locl', 'nukt', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] },
     ],
     hinting: false,
     usePalette: 0,
@@ -793,14 +813,12 @@ Font.prototype.defaultRenderOptions = {
  * the GPOS and kern table pairs, in the backtrack, the input and the lookahead of the contextual rules of GPOS and
  * GSUB, and when it looks for the base of a mark, and hides with an advance of 0, are drawn with their glyph (.notdef
  * without one) and their advance, no pair and no contextual rule matches across them, and a mark after one of them but
- * U+200D (e.g. U+00AD, U+200C, U+034F) is not attached to the base before it; a letter and a combining mark are not composed into the precomposed glyph
- * of the font (e.g. A and U+0300 into Agrave), so the kern table and the GPOS lookups with IgnoreMarks kern the
- * letter across the mark; the GPOS lookups of the Arabic forms (isol, init, medi, fina), which HarfBuzz applies at
- * the glyphs of each form only, apply only when the features option enables them, then at every glyph like a feature
- * that the user of HarfBuzz enables; the GPOS feature variations (the FeatureVariations of the GPOS table), which
- * HarfBuzz applies like the GSUB ones, are not applied yet: the lookups of a GPOS feature are the ones of its
- * FeatureList record at every variation; nor the GSUB lookups of abvm, blwm, curs, dist, kern (with the kerning
- * option), mark and mkmk, which HarfBuzz looks up in GSUB too.
+ * U+200D (e.g. U+00AD, U+200C, U+034F) is not attached to the base before it; the GPOS lookups of the Arabic forms
+ * (isol, init, medi, fina), which HarfBuzz applies at the glyphs of each form only, apply only when the features
+ * option enables them, then at every glyph like a feature that the user of HarfBuzz enables; the GPOS feature
+ * variations (the FeatureVariations of the GPOS table), which HarfBuzz applies like the GSUB ones, are not applied
+ * yet: the lookups of a GPOS feature are the ones of its FeatureList record at every variation; nor the GSUB lookups
+ * of abvm, blwm, curs, dist, kern (with the kerning option), mark and mkmk, which HarfBuzz looks up in GSUB too.
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options] - features, kerning, script, language and variation
  * @return {GlyphPosition[]}
@@ -820,6 +838,7 @@ Font.prototype.shape = function(text, options) {
     for (const clusterIndexes of getGlyphRuns(glyphClusters)) {
         const firstCluster = glyphClusters[clusterIndexes[0]];
         const scriptTags = firstCluster.scriptRun.scriptTags;
+        const gsubScriptTag = getChosenScriptTag(this.substitution, scriptTags);
         positionGlyphRun(
             this.position,
             clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].glyph.index),
@@ -828,9 +847,9 @@ Font.prototype.shape = function(text, options) {
                 rightToLeft: firstCluster.rightToLeft,
                 script: selectScriptTag(this.position, scriptTags),
                 language: options.language,
-                featureTags: getPositioningFeatureTags(this, options, scriptTags),
+                featureTags: getPositioningFeatureTags(this, options, scriptTags, gsubScriptTag),
                 variation: options.variation,
-                markAdvanceZeroing: getMarkAdvanceZeroing(scriptTags, getChosenScriptTag(this.substitution, scriptTags)),
+                markAdvanceZeroing: getMarkAdvanceZeroing(scriptTags, gsubScriptTag),
                 ligatureProperties: clusterIndexes.map(clusterIndex => glyphClusters[clusterIndex].ligatureProperties)
             }
         );

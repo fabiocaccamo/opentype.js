@@ -4,7 +4,7 @@
 import Layout, {
     getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, isMarkGlyph, getLigatureId,
     getLigatureComponent, isMarkIgnoredWithoutGlyphClasses, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES, IGNORE_MARKS, RIGHT_TO_LEFT, getRequiredFeatureIndex,
-    getOpenTypeScriptTags, matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue
+    matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue, HarfBuzzShaper, getHarfBuzzShaper
 } from './layout.mjs';
 import { SPACE_TYPES } from './char.mjs';
 
@@ -1043,55 +1043,33 @@ function applyKernTable(font, glyphRun) {
     }
 }
 
-// the ISO 15924 codes of the scripts of the Indic shaper of HarfBuzz and of its Universal Shaping Engine (USE), see
-// getMarkAdvanceZeroing
-const INDIC_SCRIPTS = ['Beng', 'Deva', 'Gujr', 'Guru', 'Knda', 'Mlym', 'Orya', 'Taml', 'Telu'];
-const UNIVERSAL_SHAPING_ENGINE_SCRIPTS = [
-    'Adlm', 'Ahom', 'Bali', 'Batk', 'Bhks', 'Brah', 'Bugi', 'Buhd', 'Cakm', 'Cham', 'Chrs', 'Cpmn', 'Diak', 'Dogr',
-    'Dupl', 'Egyp', 'Elym', 'Gara', 'Gong', 'Gonm', 'Gran', 'Gukh', 'Hano', 'Hmng', 'Hmnp', 'Java', 'Kali', 'Kawi',
-    'Khar', 'Khoj', 'Kits', 'Krai', 'Kthi', 'Lana', 'Lepc', 'Limb', 'Mahj', 'Maka', 'Mand', 'Mani', 'Marc', 'Medf',
-    'Modi', 'Mong', 'Mtei', 'Mult', 'Nagm', 'Nand', 'Newa', 'Nkoo', 'Onao', 'Ougr', 'Phag', 'Phlp', 'Plrd', 'Rjng',
-    'Rohg', 'Saur', 'Shrd', 'Sidd', 'Sind', 'Sinh', 'Sogd', 'Sogo', 'Soyo', 'Sund', 'Sunu', 'Sylo', 'Tagb', 'Takr',
-    'Tale', 'Tavt', 'Tfng', 'Tglg', 'Tibt', 'Tirh', 'Tnsa', 'Todr', 'Toto', 'Tutg', 'Vith', 'Wcho', 'Yezi', 'Zanb'
-];
-const INDIC_SCRIPT_TAGS = INDIC_SCRIPTS.flatMap(getOpenTypeScriptTags);
-const UNIVERSAL_SHAPING_ENGINE_SCRIPT_TAGS = UNIVERSAL_SHAPING_ENGINE_SCRIPTS.flatMap(getOpenTypeScriptTags);
-// the script tags of the Hangul and Khmer shapers of HarfBuzz, whatever the script of GSUB
-const MARK_ADVANCE_KEEPING_SCRIPT_TAGS = ['hang', 'khmr'];
-const MYANMAR_SCRIPT_TAGS = getOpenTypeScriptTags('Mymr');
-// the GSUB scripts that make an Indic, Myanmar or USE run take the default shaper of HarfBuzz
-const DEFAULT_SHAPER_GSUB_SCRIPT_TAGS = ['DFLT', 'latn'];
-
 /**
  * When the HarfBuzz shaper of a run sets the advance of the GDEF marks to 0 (see MarkAdvanceZeroing), from the
- * OpenType script tags of the run and the script HarfBuzz chose for them in GSUB (hb_ot_shaper_categorize, see
- * getChosenScriptTag): never with the Hangul and Khmer shapers and with the Indic shaper (an Indic script whose GSUB
- * script is its tag of the first or second version, or none), before GPOS with the USE and Myanmar shapers (a USE
- * script, an Indic script whose GSUB script is a tag of the third version, Myanmar), after GPOS with the default,
- * Arabic, Hebrew and Thai shapers, which an Indic, Myanmar or USE script takes when its GSUB script is DFLT or latn
- * (or mymr, for Myanmar).
+ * OpenType script tags of the run and the script HarfBuzz chose for them in GSUB (see getHarfBuzzShaper in
+ * layout.mjs): never with the Hangul, Khmer and Indic shapers, before GPOS with the USE and Myanmar shapers, after
+ * GPOS with the default, Arabic, Hebrew and Thai shapers.
  * @param {string[]} scriptTags - the OpenType script tags of the run (see getOpenTypeScriptTags)
  * @param {string|undefined} gsubScriptTag - the script HarfBuzz chose in GSUB, undefined for none
  * @returns {MarkAdvanceZeroing}
  */
 function getMarkAdvanceZeroing(scriptTags, gsubScriptTag) {
-    const hasScriptTag = tags => scriptTags.some(tag => tags.includes(tag));
-    if (hasScriptTag(MARK_ADVANCE_KEEPING_SCRIPT_TAGS)) {
-        return MarkAdvanceZeroing.NONE;
+    const shaper = getHarfBuzzShaper(scriptTags, gsubScriptTag);
+    switch (shaper) {
+        case HarfBuzzShaper.HANGUL:
+        case HarfBuzzShaper.INDIC:
+        case HarfBuzzShaper.KHMER:
+            return MarkAdvanceZeroing.NONE;
+        case HarfBuzzShaper.MYANMAR:
+        case HarfBuzzShaper.USE:
+            return MarkAdvanceZeroing.BEFORE_POSITIONING;
+        case HarfBuzzShaper.DEFAULT:
+        case HarfBuzzShaper.ARABIC:
+        case HarfBuzzShaper.HEBREW:
+        case HarfBuzzShaper.THAI:
+            return MarkAdvanceZeroing.AFTER_POSITIONING;
+        default:
+            throw new Error(`Unknown shaper ${shaper}`);
     }
-    if (DEFAULT_SHAPER_GSUB_SCRIPT_TAGS.includes(gsubScriptTag)) {
-        return MarkAdvanceZeroing.AFTER_POSITIONING;
-    }
-    if (hasScriptTag(INDIC_SCRIPT_TAGS)) {
-        return gsubScriptTag && gsubScriptTag.endsWith('3') ? MarkAdvanceZeroing.BEFORE_POSITIONING : MarkAdvanceZeroing.NONE;
-    }
-    if (hasScriptTag(MYANMAR_SCRIPT_TAGS)) {
-        return gsubScriptTag === 'mymr' ? MarkAdvanceZeroing.AFTER_POSITIONING : MarkAdvanceZeroing.BEFORE_POSITIONING;
-    }
-    if (hasScriptTag(UNIVERSAL_SHAPING_ENGINE_SCRIPT_TAGS)) {
-        return MarkAdvanceZeroing.BEFORE_POSITIONING;
-    }
-    return MarkAdvanceZeroing.AFTER_POSITIONING;
 }
 
 /**
@@ -1286,7 +1264,7 @@ function getFirstCharAdvance(font, chars, variation) {
 /**
  * The x advance of a glyph before GPOS, like hb_ot_position_default of HarfBuzz: the advance of the glyph at the
  * variation (see getGlyphAdvance), or for a space that the font has not, drawn with the glyph of U+0020 SPACE (see
- * getCharacterGlyph in font.mjs), the advance of its space type, like _hb_ot_shape_fallback_spaces
+ * normalizeCharacters in normalization.mjs), the advance of its space type, like _hb_ot_shape_fallback_spaces
  * (hb-ot-shape-fallback.cc of HarfBuzz 11.3.2): 1/n em for EM_n, rounded like HarfBuzz ((em + n / 2) / n in integers),
  * 4/18 em truncated, the advance of the first digit the font has for FIGURE, of the period or else of the comma for
  * PUNCTUATION (the advance of the glyph when the font has none), half the advance of the glyph truncated for NARROW,

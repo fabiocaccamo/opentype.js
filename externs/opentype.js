@@ -60,15 +60,38 @@ opentype.Font.prototype.charToGlyph = function(c) {};
  * the first enabled one, where HarfBuzz joins the masks of the features. Like HarfBuzz, rand is on by default with
  * the value 255 (a random alternate, from the random numbers of HarfBuzz from the start of each script run), and the
  * direction features of the script of each run (rtla and rtlm in a run of a right-to-left script such as Arabic or
- * Hebrew, ltra and ltrm in the other runs).
- * A character is mapped to the glyph of the cmap, with the fallbacks of HarfBuzz for a character the font has no
- * glyph for: a space (U+00A0, U+2000 to U+200A, U+202F, U+205F, U+3000, not U+1680) takes the glyph of U+0020, with
- * the advance of its kind of space in opentype.Font.prototype.shape, and U+2011 the glyph of U+2010; the GSUB
- * features then apply to these glyphs. A space or U+2011 followed by a variation selector (U+FE00 to U+FE0F,
- * U+E0100 to U+E01EF) keeps the glyph of the cmap (.notdef without a glyph for the variation sequence), like
- * HarfBuzz; a Mongolian free variation selector (U+180B to U+180D, U+180F) after it keeps the fallbacks, like
- * HarfBuzz. Not yet the canonical decomposition of HarfBuzz before them (e.g. U+2001 to the glyph of U+2003), nor
- * .notdef for a space followed by combining marks and then a variation selector, like HarfBuzz.
+ * Hebrew, ltra and ltrm in the other runs). Like the Indic shaper of HarfBuzz, nukt is on by default in a run of
+ * that shaper (an Indic script whose GSUB script is not DFLT, latn or dev3...), in a stage after ccmp and locl; not
+ * yet the reordering and the other features of that shaper.
+ * Before the GSUB features, the characters of each script run are normalized like HarfBuzz and mapped to the glyphs
+ * of the cmap: a character the font has no glyph for, or a precomposed character followed by marks, is decomposed
+ * into the characters of its canonical decomposition the font has (e.g. U+00C0 into A and U+0300, U+2001 into
+ * U+2003); the marks are put in the order of the modified combining classes of HarfBuzz (the Arabic shadda before the
+ * other harakat, the Arabic modifier combining marks first in an Arabic run); a mark is composed with the base before
+ * it into their precomposed character when the font has its glyph and no mark of the same or a higher combining class
+ * is between them (e.g. e and U+0301 into U+00E9). Like HarfBuzz, the normalization is the one of the shaper of the
+ * run, from its script and the script of GSUB: the Indic, Khmer, Myanmar and USE shapers decompose every character,
+ * also when the font has it (e.g. U+09CB into U+09C7 and U+09BE, U+0958 into U+0915 and U+093C, which the nukt of the
+ * font composes again with the Indic shaper, U+2001 into U+2003 in a Khmer run), and do not compose the parts of a
+ * split vowel sign (U+0BC6 U+0BBE stay apart), the Indic one composes U+09AF U+09BC into U+09DF; the Hangul shaper
+ * keeps a syllable the font has before a mark and composes nothing; the Hebrew shaper composes the Hebrew
+ * presentation forms (e.g. U+05E9 U+05C1 into U+FB2A) in a font without a mark feature for the run (or with mark 0 or
+ * false, not mark 256). The decompositions, compositions and marks are the ones of the Unicode version of the
+ * JavaScript engine (String.prototype.normalize, \p{M}), the combining classes the ones of Unicode 16.0.0, the
+ * version of HarfBuzz 11.3.2. A character the font has no glyph for nor a decomposition into glyphs of: a space
+ * (U+00A0, U+2000 to U+200A, U+202F, U+205F, U+3000, not U+1680) takes the glyph of U+0020, with the advance of its
+ * kind of space in opentype.Font.prototype.shape, and U+2011 the glyph of U+2010; the GSUB features then apply to
+ * these glyphs. The characters of a base and its marks with a variation selector (U+FE00 to U+FE0F, U+E0100 to
+ * U+E01EF) take the glyphs of the cmap, without decompositions nor these fallbacks, but they can still be composed
+ * (e.g. e U+0301 U+FE00 into U+00E9), like HarfBuzz: a space or U+2011 the font has not is drawn with .notdef (e.g.
+ * U+00A0 U+0301 U+FE00), and a character followed directly by the selector takes the glyph of its variation sequence
+ * after GSUB when cmap 14 has one; a Mongolian free variation selector (U+180B to U+180D, U+180F) keeps the
+ * fallbacks, like HarfBuzz. Not yet the decomposition of the Thai sara am, the jamo and syllables of the Hangul
+ * shaper of HarfBuzz composed and decomposed by the glyphs of the font, the reorder hook of its Hebrew shaper, the
+ * reordering of its Indic, Khmer, Myanmar and USE shapers, the U+25CC DOTTED CIRCLE its Indic and USE shapers insert
+ * between an independent vowel and a vowel sign that must not follow it (preprocess_text_vowel_constraints), the
+ * decomposition of the Khmer split vowel signs into U+17C1 and themselves of its Khmer shaper, nor the glyph of a
+ * variation sequence before GSUB.
  * @param  {string} s
  * @param  {Object=} options
  * @return {opentype.Glyph[]}
@@ -79,7 +102,10 @@ opentype.Font.prototype.stringToGlyphs = function(s, options) {};
  * Convert the given text to the list of glyphs of stringToGlyphs, each one with
  * the UTF-16 range [start, end) of the characters of the text it represents:
  * the glyphs of a ligature and the glyphs between its components share a range,
- * each glyph of a multiple substitution has the range of the glyph it replaces.
+ * each glyph of a multiple substitution has the range of the glyph it replaces;
+ * the characters a character is decomposed into have its range, a base and the
+ * mark composed with it share a range, and so does a mark put before other marks
+ * with them (see stringToGlyphs).
  * @param  {string} s
  * @param  {Object=} options
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number}>}
@@ -181,13 +207,11 @@ opentype.Font.prototype.getKerningValue = function(leftGlyph, rightGlyph, variat
  * U+00AD), which HarfBuzz skips in the GPOS and kern table pairs, in the backtrack, the input and the lookahead of the
  * contextual rules of GPOS and GSUB, and when it looks for the base of a mark, and hides with an advance of 0, are
  * drawn with their glyph and their advance, no pair and no contextual rule matches across them, and a mark after one of
- * them but U+200D (e.g. U+00AD, U+200C, U+034F) is not attached to the base before it; a letter and a combining mark are not composed into the
- * precomposed glyph of the font (e.g. A and U+0300 into Agrave), so the kern table and the GPOS lookups with
- * IgnoreMarks kern the letter across the mark; the GPOS lookups of the Arabic forms, which HarfBuzz applies at the
- * glyphs of each form only, apply only when options.features enables them, at every glyph; the GPOS feature
- * variations (the FeatureVariations of the GPOS table) are not applied yet, the lookups of a GPOS feature are the
- * ones of its FeatureList record at every variation; nor the GSUB lookups of abvm, blwm, curs, dist, kern (with
- * options.kerning), mark and mkmk, which HarfBuzz looks up in GSUB too.
+ * them but U+200D (e.g. U+00AD, U+200C, U+034F) is not attached to the base before it; the GPOS lookups of the
+ * Arabic forms, which HarfBuzz applies at the glyphs of each form only, apply only when options.features enables
+ * them, at every glyph; the GPOS feature variations (the FeatureVariations of the GPOS table) are not applied yet, the
+ * lookups of a GPOS feature are the ones of its FeatureList record at every variation; nor the GSUB lookups of abvm,
+ * blwm, curs, dist, kern (with options.kerning), mark and mkmk, which HarfBuzz looks up in GSUB too.
  * @param  {string} text
  * @param  {Object=} options
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number, xAdvance: number, yAdvance: number, xOffset: number, yOffset: number}>}

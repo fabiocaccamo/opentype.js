@@ -27,7 +27,7 @@
  */
 
 import assert from 'assert';
-import { loadFont, shapeText, getGlyphOrigins, assertShape, itFailsUntilFixed } from './helpers.mjs';
+import { loadFont, shapeText, getGlyphOrigins, assertShape } from './helpers.mjs';
 
 const fixture = 'PlaywriteUSTrad-VF-calt-subset.ttf';
 
@@ -304,33 +304,23 @@ describe('regression: contextual alternates of a connected cursive, Playwrite US
             assert.deepStrictEqual(getGlyphsAndClusters(shape), getGlyphsAndClusters(reference));
         });
 
-        itFailsUntilFixed(
-            'composes a letter and a combining mark into the precomposed glyph of the font',
-            '_createBidi (src/font.mjs): maps each character of the text to its glyph without composing a letter and its combining ' +
-            'mark first, e.ful and acutecomb instead of eacute',
-            function() {
-                // e, combining acute accent (U+0301): eacute
-                // hb-shape --no-glyph-names --cluster-level=1 --features=-calt PlaywriteUSTrad-VF-calt-subset.ttf -u 0065,0301
-                // [7=0+526]
-                const shape = shapeText(fonts[400], 'e\u{301}', { features: { calt: false } });
-                assertShape(shape, { glyphs: [7], clusters: [0], advances: [526] }, 'e, combining acute');
-            }
-        );
+        it('composes a letter and a combining mark into the precomposed glyph of the font', function() {
+            // e, combining acute accent (U+0301): eacute
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-calt PlaywriteUSTrad-VF-calt-subset.ttf -u 0065,0301
+            // [7=0+526]
+            const shape = shapeText(fonts[400], 'e\u{301}', { features: { calt: false } });
+            assertShape(shape, { glyphs: [7], clusters: [0], advances: [526] }, 'e, combining acute');
+        });
 
-        itFailsUntilFixed(
-            'decomposes and joins a composed letter with calt, its accent in the cluster of the two characters',
-            '_createBidi (src/font.mjs): does not compose e and U+0301 into eacute, acutecomb stays in a cluster of its own: ' +
-            'the clusters [0, 0, 1, 2, 2, 3] instead of [0, 0, 0, 2, 2, 3]',
-            function() {
-                // e, combining acute accent (U+0301), l, u: e.ful.ini cnct.ful_e_f acutecomb l.lop.med cnct.mod_n_n u.mod.fin,
-                // composed into eacute and decomposed again by lookup 7: l is in cluster 2
-                // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 0065,0301,006C,0075
-                // [20=0+444|25=0+0|8=0@-267,0+0|32=2+394|18=2+0|16=3+671]
-                // the whole shape, the connectors of the composed letter included
-                const reference = { glyphs: [20, 25, 8, 32, 18, 16], clusters: [0, 0, 0, 2, 2, 3], advances: [444, 0, 0, 394, 0, 671] };
-                assertShape(shapeText(fonts[400], 'e\u{301}lu'), reference, 'e, combining acute, l, u');
-            }
-        );
+        it('decomposes and joins a composed letter with calt, its accent in the cluster of the two characters', function() {
+            // e, combining acute accent (U+0301), l, u: e.ful.ini cnct.ful_e_f acutecomb l.lop.med cnct.mod_n_n u.mod.fin,
+            // composed into eacute and decomposed again by lookup 7: l is in cluster 2
+            // hb-shape --no-glyph-names --cluster-level=1 PlaywriteUSTrad-VF-calt-subset.ttf -u 0065,0301,006C,0075
+            // [20=0+444|25=0+0|8=0@-267,0+0|32=2+394|18=2+0|16=3+671]
+            // the whole shape, the connectors of the composed letter included
+            const reference = { glyphs: [20, 25, 8, 32, 18, 16], clusters: [0, 0, 0, 2, 2, 3], advances: [444, 0, 0, 394, 0, 671] };
+            assertShape(shapeText(fonts[400], 'e\u{301}lu'), reference, 'e, combining acute, l, u');
+        });
     });
 
     describe('space between joined letters (GPOS dist, pair adjustment across the connectors)', function() {
