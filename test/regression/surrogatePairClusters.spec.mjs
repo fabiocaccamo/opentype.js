@@ -9,10 +9,11 @@
  * of a ligature belong to the cluster of their glyph. The advances come from font.shape, whose
  * glyphs and clusters are the ones of stringToGlyphClusters.
  *
- * Upstream master (5d65b6d) has no stringToGlyphClusters: the regular tests are tests of an
- * API of the fork, but the one of the cmap, which passes there. Its stringToGlyphIndexes gives
- * the same glyphs as the fork (or throws the same TypeError) for every text of this file, so
- * the known failures are bugs of upstream too.
+ * Upstream master (5d65b6d) has no stringToGlyphClusters, nor the removeDefaultIgnorables
+ * option: the tests are tests of the fork, but the one of the cmap, which passes there. Its
+ * stringToGlyphIndexes draws the default ignorables, keeps a variation selector between the
+ * components of a ligature, throws a TypeError on a text made of one variation selector and
+ * maps a lone surrogate to .notdef.
  *
  * Fixtures (the first one is a subset built for these tests, see
  * test/fonts/regression/README.md; the other three are fonts of the upstream tests):
@@ -33,22 +34,26 @@
  *
  * The references are the outputs of hb-shape (HarfBuzz 11.3.2), pasted as they are printed
  * in the calls of parseHarfBuzzShape, under their commands. Every command has
- * --remove-default-ignorables: HarfBuzz consumes the selector of a sequence of the cmap
- * format 14, and keeps an invisible glyph without advance in the place of any other selector
- * (and of the other default ignorables) unless asked to remove it; the fork deletes a selector
- * after its base in both cases.
+ * --remove-default-ignorables, and every layout the removeDefaultIgnorables option, its
+ * equivalent: HarfBuzz consumes the selector of a sequence of the cmap format 14, and keeps
+ * the space glyph without advance in the place of any other selector (and of the other default
+ * ignorables) unless asked to remove it, like the fork without the option (see
+ * test/font.spec.mjs).
  * hb-shape prints the clusters as code point indexes: parseHarfBuzzShape turns them into
  * the UTF-16 offsets of stringToGlyphClusters, and the regular tests write these offsets out
  * (the same values as the clusters of a UTF-16 buffer of libharfbuzz, hb_buffer_add_utf16).
  */
 
 import assert from 'assert';
-import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './helpers.mjs';
+import { loadFont, shapeText, assertShape } from './helpers.mjs';
 
 const notoSansJapaneseFixture = 'NotoSansJP-Regular-astral-subset.ttf';
 const notoEmojiFixture = '../noto-emoji.ttf';
 const testCmap14Fixture = '../TestCMAP14.otf';
 const robotoBlackFixture = '../Roboto-Black.ttf';
+
+// the option of the --remove-default-ignorables of the hb-shape commands of this file
+const removeDefaultIgnorables = { removeDefaultIgnorables: true };
 
 /**
  * Turn the output of hb-shape ("[glyph=cluster+advance|...]", an empty string for no glyph)
@@ -90,7 +95,6 @@ function parseHarfBuzzShape(text, harfBuzzOutput) {
 }
 
 describe('regression: UTF-16 clusters of surrogate pairs, variation selectors and emoji sequences (opengraphica 96127b0)', function() {
-    const selectorInsideLigatureReason = 'Bidi.prototype.applyFeaturesToContexts (src/bidi.mjs): the variation selectors are deleted after the GSUB lookups, a selector between two components is still in their context and the ligature is not formed';
 
     describe('Noto Sans JP subset: astral characters', function() {
         let font;
@@ -120,8 +124,8 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             // the code point indexes 0, 1, 3, 5, 6, 8 of HarfBuzz as UTF-16 offsets
             assert.deepStrictEqual(expected.clusters, [0, 1, 5, 7, 9, 11]);
             assert.deepStrictEqual(expected.ends, [1, 5, 7, 9, 11, 13]);
-            assertShape(shapeText(font, text), expected);
-            assert.deepStrictEqual(font.stringToGlyphIndexes(text), expected.glyphs);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
+            assert.deepStrictEqual(font.stringToGlyphIndexes(text, removeDefaultIgnorables), expected.glyphs);
         });
 
         it('gives UTF-16 ranges to f and i after a surrogate pair with the liga feature turned off', function() {
@@ -131,7 +135,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[3=0+563|23=1+1000|5=3+325|6=4+275|19=5+1000]');
             assert.deepStrictEqual(expected.clusters, [0, 1, 5, 6, 7]);
             assert.deepStrictEqual(expected.ends, [1, 5, 6, 7, 9]);
-            assertShape(shapeText(font, text, { features: { liga: false } }), expected);
+            assertShape(shapeText(font, text, { features: { liga: false }, removeDefaultIgnorables: true }), expected);
         });
 
         it('keeps the variation selectors in the clusters of their astral bases, with and without a sequence in the cmap format 14', function() {
@@ -142,7 +146,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const sequencesExpected = parseHarfBuzzShape(sequencesText, '[20=0+1000|21=2+1000|10=4+1000|10=6+1000|21=8+1000]');
             assert.deepStrictEqual(sequencesExpected.clusters, [0, 4, 8, 12, 15]);
             assert.deepStrictEqual(sequencesExpected.ends, [4, 8, 12, 15, 17]);
-            assertShape(shapeText(font, sequencesText), sequencesExpected);
+            assertShape(shapeText(font, sequencesText, removeDefaultIgnorables), sequencesExpected);
             // U+29E3D U+E0100 (default sequence), U+2000B U+E0101 and U+2000B U+FE00 (selectors that
             // have sequences with other bases only: the glyph of the cmap, not the glyph 10 or 23
             // of the other bases), U+242EE U+E0102 (a selector the font has not), a
@@ -151,7 +155,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const otherBasesExpected = parseHarfBuzzShape(otherBasesText, '[22=0+1000|20=2+1000|20=4+1000|21=6+1000|3=8+563]');
             assert.deepStrictEqual(otherBasesExpected.clusters, [0, 4, 8, 11, 15]);
             assert.deepStrictEqual(otherBasesExpected.ends, [4, 8, 11, 15, 16]);
-            assertShape(shapeText(font, otherBasesText), otherBasesExpected);
+            assertShape(shapeText(font, otherBasesText, removeDefaultIgnorables), otherBasesExpected);
         });
 
         it('ends the last cluster after a variation selector at the end of the text', function() {
@@ -160,13 +164,13 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 242EE,FE00
             const shortSelectorExpected = parseHarfBuzzShape(shortSelectorText, '[10=0+1000]');
             assert.deepStrictEqual(shortSelectorExpected.ends, [3]);
-            assertShape(shapeText(font, shortSelectorText), shortSelectorExpected);
+            assertShape(shapeText(font, shortSelectorText, removeDefaultIgnorables), shortSelectorExpected);
             // U+2000B U+E0100 (4 UTF-16 units)
             const astralSelectorText = '\u{2000B}\u{E0100}';
             // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 2000B,E0100
             const astralSelectorExpected = parseHarfBuzzShape(astralSelectorText, '[20=0+1000]');
             assert.deepStrictEqual(astralSelectorExpected.ends, [4]);
-            assertShape(shapeText(font, astralSelectorText), astralSelectorExpected);
+            assertShape(shapeText(font, astralSelectorText, removeDefaultIgnorables), astralSelectorExpected);
         });
 
         it('keeps a combining mark after a surrogate pair in a cluster of its own, after the two units of the pair', function() {
@@ -176,7 +180,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[20=0+1000|8=1+0|3=2+563]');
             assert.deepStrictEqual(expected.clusters, [0, 2, 3]);
             assert.deepStrictEqual(expected.ends, [2, 3, 4]);
-            assertShape(shapeText(font, text), expected);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
         });
 
         it('gives .notdef the UTF-16 units of its character: 2 for an astral character without glyph, 1 for a lone surrogate', function() {
@@ -186,7 +190,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const missingExpected = parseHarfBuzzShape(missingText, '[3=0+563|0=1+1000|4=2+618]');
             assert.deepStrictEqual(missingExpected.clusters, [0, 1, 3]);
             assert.deepStrictEqual(missingExpected.ends, [1, 3, 4]);
-            assertShape(shapeText(font, missingText), missingExpected);
+            assertShape(shapeText(font, missingText, removeDefaultIgnorables), missingExpected);
             // HarfBuzz turns a lone surrogate into U+FFFD (hb_buffer_add_utf16), which this font
             // has not: hb-shape takes code points only, so U+FFFD stands for each lone surrogate.
             // a, lone high surrogate, b, U+1F21A, lone high surrogate
@@ -195,14 +199,14 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[3=0+563|0=1+1000|4=2+618|19=3+1000|0=4+1000]');
             assert.deepStrictEqual(expected.clusters, [0, 1, 2, 3, 5]);
             assert.deepStrictEqual(expected.ends, [1, 2, 3, 5, 6]);
-            assertShape(shapeText(font, text), expected);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
             // lone low surrogate, U+1F21A, lone low surrogate, lone high surrogate, a
             const reversedPairText = '\u{DC0B}\u{1F21A}\u{DE1A}\u{D83C}a';
             // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u FFFD,1F21A,FFFD,FFFD,0061
             const reversedPairExpected = parseHarfBuzzShape(reversedPairText, '[0=0+1000|19=1+1000|0=2+1000|0=3+1000|3=4+563]');
             assert.deepStrictEqual(reversedPairExpected.clusters, [0, 1, 3, 4, 5]);
             assert.deepStrictEqual(reversedPairExpected.ends, [1, 3, 4, 5, 6]);
-            assertShape(shapeText(font, reversedPairText), reversedPairExpected);
+            assertShape(shapeText(font, reversedPairText, removeDefaultIgnorables), reversedPairExpected);
         });
 
         it('kerns the glyphs next to a surrogate pair and across a deleted variation selector', function() {
@@ -212,14 +216,14 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[20=0+1000|4=1+599|3=2+563|20=3+1000]');
             assert.deepStrictEqual(expected.clusters, [0, 2, 3, 4]);
             assert.deepStrictEqual(expected.ends, [2, 3, 4, 6]);
-            assertShape(shapeText(font, text), expected);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
             // b, U+E0100 (a selector without a sequence for b: deleted), a, U+2000B
             const selectorText = 'b\u{E0100}a\u{2000B}';
             // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 0062,E0100,0061,2000B
             const selectorExpected = parseHarfBuzzShape(selectorText, '[4=0+599|3=2+563|20=3+1000]');
             assert.deepStrictEqual(selectorExpected.clusters, [0, 3, 4]);
             assert.deepStrictEqual(selectorExpected.ends, [3, 4, 6]);
-            assertShape(shapeText(font, selectorText), selectorExpected);
+            assertShape(shapeText(font, selectorText, removeDefaultIgnorables), selectorExpected);
             // U+2000B, b, U+180B (Mongolian free variation selector one, the third range of the
             // variation selectors with U+FE00..U+FE0F and U+E0100..U+E01EF: deleted), a
             const mongolianSelectorText = '\u{2000B}b\u{180B}a';
@@ -227,20 +231,16 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const mongolianSelectorExpected = parseHarfBuzzShape(mongolianSelectorText, '[20=0+1000|4=1+599|3=3+563]');
             assert.deepStrictEqual(mongolianSelectorExpected.clusters, [0, 2, 4]);
             assert.deepStrictEqual(mongolianSelectorExpected.ends, [2, 4, 5]);
-            assertShape(shapeText(font, mongolianSelectorText), mongolianSelectorExpected);
+            assertShape(shapeText(font, mongolianSelectorText, removeDefaultIgnorables), mongolianSelectorExpected);
         });
 
-        itFailsUntilFixed(
-            'forms the fi ligature over a variation selector between f and i',
-            selectorInsideLigatureReason,
-            function() {
-                // U+1F21A, f, U+FE00 (variation selector 1), i, U+1F21A
-                const text = '\u{1F21A}f\u{FE00}i\u{1F21A}';
-                const shape = shapeText(font, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 1F21A,0066,FE00,0069,1F21A
-                assertShape(shape, parseHarfBuzzShape(text, '[19=0+1000|12=1+600|19=4+1000]'));
-            }
-        );
+        it('forms the fi ligature over a variation selector between f and i', function() {
+            // U+1F21A, f, U+FE00 (variation selector 1), i, U+1F21A
+            const text = '\u{1F21A}f\u{FE00}i\u{1F21A}';
+            const shape = shapeText(font, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 1F21A,0066,FE00,0069,1F21A
+            assertShape(shape, parseHarfBuzzShape(text, '[19=0+1000|12=1+600|19=4+1000]'));
+        });
 
         it('keeps a variation selector after a ligature in the cluster of the ligature', function() {
             // f, i (ligature, glyph 12), U+FE00 (its base is i, a component of the ligature), U+2000B
@@ -249,21 +249,55 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[12=0+600|20=3+1000]');
             assert.deepStrictEqual(expected.clusters, [0, 3]);
             assert.deepStrictEqual(expected.ends, [3, 5]);
-            assertShape(shapeText(font, text), expected);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
         });
 
         it('composes a base and its combining mark into the precomposed glyph of the font', function() {
             // U+1F21A, U+0301 (no precomposed character: the mark stays), a, U+0301 (U+00E1, glyph 7), U+1F21A
             const text = '\u{1F21A}\u{0301}a\u{0301}\u{1F21A}';
-            const shape = shapeText(font, text);
+            const shape = shapeText(font, text, removeDefaultIgnorables);
             // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 1F21A,0301,0061,0301,1F21A
             assertShape(shape, parseHarfBuzzShape(text, '[19=0+1000|8=1+0|7=2+563|19=4+1000]'));
+        });
+
+        it('hides the variation selectors without a sequence with the space glyph and no advance, in their UTF-16 clusters', function() {
+            // without the option: the space glyph (1) of each selector, in its own cluster
+            const harfBuzzShapes = {
+                // U+E0101 (at the start of the text), a
+                // hb-shape --no-glyph-names --cluster-level=1 NotoSansJP-Regular-astral-subset.ttf -u E0101,0061
+                '\u{E0101}a': '[1=0+0|3=1+563]',
+                // b, U+E0100 (a selector without a sequence for b), a, U+2000B
+                // hb-shape --no-glyph-names --cluster-level=1 NotoSansJP-Regular-astral-subset.ttf -u 0062,E0100,0061,2000B
+                'b\u{E0100}a\u{2000B}': '[4=0+599|1=1+0|3=2+563|20=3+1000]',
+                // f, i (ligature), U+FE00, U+2000B
+                // hb-shape --no-glyph-names --cluster-level=1 NotoSansJP-Regular-astral-subset.ttf -u 0066,0069,FE00,2000B
+                'fi\u{FE00}\u{2000B}': '[12=0+600|1=2+0|20=3+1000]',
+                // U+2000B, b, U+180B (Mongolian free variation selector one), a
+                // hb-shape --no-glyph-names --cluster-level=1 NotoSansJP-Regular-astral-subset.ttf -u 2000B,0062,180B,0061
+                '\u{2000B}b\u{180B}a': '[20=0+1000|4=1+599|1=2+0|3=3+563]'
+            };
+            for (const [text, harfBuzzShape] of Object.entries(harfBuzzShapes)) {
+                assertShape(shapeText(font, text), parseHarfBuzzShape(text, harfBuzzShape), harfBuzzShape);
+            }
+        });
+
+        it('consumes the selector of a default variation sequence in each default range of the cmap format 14 without the option', function() {
+            // the default sequences of U+E0100 are three ranges (U+2000B, U+242EE, U+29E3D): no space glyph for the selector
+            const harfBuzzShapes = {
+                // hb-shape --no-glyph-names --cluster-level=1 NotoSansJP-Regular-astral-subset.ttf -u 2000B,E0100
+                '\u{2000B}\u{E0100}': '[20=0+1000]',
+                // hb-shape --no-glyph-names --cluster-level=1 NotoSansJP-Regular-astral-subset.ttf -u 242EE,E0100
+                '\u{242EE}\u{E0100}': '[21=0+1000]',
+                // hb-shape --no-glyph-names --cluster-level=1 NotoSansJP-Regular-astral-subset.ttf -u 29E3D,E0100,0061
+                '\u{29E3D}\u{E0100}a': '[22=0+1000|3=2+563]'
+            };
+            for (const [text, harfBuzzShape] of Object.entries(harfBuzzShapes)) {
+                assertShape(shapeText(font, text), parseHarfBuzzShape(text, harfBuzzShape), harfBuzzShape);
+            }
         });
     });
 
     describe('Noto Sans JP subset and Noto Emoji: variation selectors without a base, default ignorables', function() {
-        const loneSelectorReason = 'unicodeVariationSequence (src/features/unicode/variationSequences.mjs): TypeError, the range of a text made of one variation selector has one token and tokens[1] is undefined';
-        const loneSelectorError = /setState/;
         let japaneseFont;
         let emojiFont;
 
@@ -274,94 +308,70 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
 
         // without --remove-default-ignorables hb-shape prints an invisible glyph without advance
         // for the three lone selectors below: [1=0+0], [3=0+0] and [1=0+0]
-        itFailsUntilFixed(
-            'shapes a text made of one variation selector the font has not to no glyph',
-            loneSelectorReason,
-            function() {
-                // U+E0100 (2 UTF-16 units, not in the cmap of the font)
-                const text = '\u{E0100}';
-                const shape = shapeText(japaneseFont, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u E0100
-                // prints an empty line
-                assertShape(shape, parseHarfBuzzShape(text, ''));
-            },
-            loneSelectorError
-        );
+        it('shapes a text made of one variation selector the font has not to no glyph', function() {
+            // U+E0100 (2 UTF-16 units, not in the cmap of the font)
+            const text = '\u{E0100}';
+            const shape = shapeText(japaneseFont, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u E0100
+            // prints an empty line
+            assertShape(shape, parseHarfBuzzShape(text, ''));
+        });
 
-        itFailsUntilFixed(
-            'shapes a text made of one variation selector the font has a glyph for to no glyph',
-            loneSelectorReason,
-            function() {
-                // U+FE0F (glyph 1852 of the cmap of Noto Emoji)
-                const text = '\u{FE0F}';
-                const shape = shapeText(emojiFont, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables ../noto-emoji.ttf -u FE0F
-                // prints an empty line
-                assertShape(shape, parseHarfBuzzShape(text, ''));
-            },
-            loneSelectorError
-        );
+        it('shapes a text made of one variation selector the font has a glyph for to no glyph', function() {
+            // U+FE0F (glyph 1852 of the cmap of Noto Emoji)
+            const text = '\u{FE0F}';
+            const shape = shapeText(emojiFont, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables ../noto-emoji.ttf -u FE0F
+            // prints an empty line
+            assertShape(shape, parseHarfBuzzShape(text, ''));
+        });
 
-        itFailsUntilFixed(
-            'gives no width to a text made of one variation selector',
-            loneSelectorReason,
-            function() {
-                // U+FE00 (not in the cmap of the font, whose .notdef has an advance of 1000)
-                const width = japaneseFont.getAdvanceWidth('\u{FE00}', japaneseFont.unitsPerEm);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u FE00
-                // prints an empty line: no glyph, no advance
-                assert.strictEqual(width, 0);
-            },
-            loneSelectorError
-        );
+        it('hides a text made of one variation selector with the space glyph without the option', function() {
+            // U+E0100: hb-shape --no-glyph-names --cluster-level=1 NotoSansJP-Regular-astral-subset.ttf -u E0100
+            assertShape(shapeText(japaneseFont, '\u{E0100}'), parseHarfBuzzShape('\u{E0100}', '[1=0+0]'));
+            // U+FE0F: hb-shape --no-glyph-names --cluster-level=1 ../noto-emoji.ttf -u FE0F
+            assertShape(shapeText(emojiFont, '\u{FE0F}'), parseHarfBuzzShape('\u{FE0F}', '[3=0+0]'));
+        });
 
-        itFailsUntilFixed(
-            'hides a variation selector at the start of the text',
-            'unicodeVariationSequenceStartCheck (src/features/unicode/contextCheck/variationSequenceCheck.mjs): a selector at the start of a longer text opens no variation sequence, nothing deletes it and it is drawn (as .notdef in this font)',
-            function() {
-                // U+E0101, a
-                const text = '\u{E0101}a';
-                const shape = shapeText(japaneseFont, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u E0101,0061
-                assertShape(shape, parseHarfBuzzShape(text, '[3=0+563]'));
-            }
-        );
+        it('gives no width to a text made of one variation selector', function() {
+            // U+FE00 (not in the cmap of the font, whose .notdef has an advance of 1000)
+            const width = japaneseFont.getAdvanceWidth('\u{FE00}', japaneseFont.unitsPerEm, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u FE00
+            // prints an empty line: no glyph, no advance
+            assert.strictEqual(width, 0);
+        });
 
-        itFailsUntilFixed(
-            'hides a second variation selector after a variation sequence',
-            'unicodeVariationSequence (src/features/unicode/variationSequences.mjs): only the first selector after a base (tokens[1]) is deleted, a second one is drawn (as .notdef in this font)',
-            function() {
-                // U+29E3D, U+E0101 twice, a
-                const text = '\u{29E3D}\u{E0101}\u{E0101}a';
-                const shape = shapeText(japaneseFont, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 29E3D,E0101,E0101,0061
-                assertShape(shape, parseHarfBuzzShape(text, '[23=0+1000|3=3+563]'));
-            }
-        );
+        it('hides a variation selector at the start of the text', function() {
+            // U+E0101, a
+            const text = '\u{E0101}a';
+            const shape = shapeText(japaneseFont, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u E0101,0061
+            assertShape(shape, parseHarfBuzzShape(text, '[3=0+563]'));
+        });
 
-        itFailsUntilFixed(
-            'hides a default ignorable character the font has no glyph for: zero width joiner',
-            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character the font has not (U+200D) is drawn as .notdef',
-            function() {
-                // a, U+200D (zero width joiner, not in the cmap), b
-                const text = 'a\u{200D}b';
-                const shape = shapeText(japaneseFont, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 0061,200D,0062
-                assertShape(shape, parseHarfBuzzShape(text, '[3=0+563|4=2+618]'));
-            }
-        );
+        it('hides a second variation selector after a variation sequence', function() {
+            // U+29E3D, U+E0101 twice, a
+            const text = '\u{29E3D}\u{E0101}\u{E0101}a';
+            const shape = shapeText(japaneseFont, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 29E3D,E0101,E0101,0061
+            assertShape(shape, parseHarfBuzzShape(text, '[23=0+1000|3=3+563]'));
+        });
 
-        itFailsUntilFixed(
-            'hides a default ignorable character the font has a glyph for: soft hyphen',
-            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character the font has (U+00AD) is drawn with its glyph and its advance',
-            function() {
-                // U+1F21A, U+00AD (soft hyphen, glyph 2 of the cmap with an advance of 347), U+1F21A
-                const text = '\u{1F21A}\u{00AD}\u{1F21A}';
-                const shape = shapeText(japaneseFont, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 1F21A,00AD,1F21A
-                assertShape(shape, parseHarfBuzzShape(text, '[19=0+1000|19=2+1000]'));
-            }
-        );
+        it('hides a default ignorable character the font has no glyph for: zero width joiner', function() {
+            // a, U+200D (zero width joiner, not in the cmap), b
+            const text = 'a\u{200D}b';
+            const shape = shapeText(japaneseFont, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 0061,200D,0062
+            assertShape(shape, parseHarfBuzzShape(text, '[3=0+563|4=2+618]'));
+        });
+
+        it('hides a default ignorable character the font has a glyph for: soft hyphen', function() {
+            // U+1F21A, U+00AD (soft hyphen, glyph 2 of the cmap with an advance of 347), U+1F21A
+            const text = '\u{1F21A}\u{00AD}\u{1F21A}';
+            const shape = shapeText(japaneseFont, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 1F21A,00AD,1F21A
+            assertShape(shape, parseHarfBuzzShape(text, '[19=0+1000|19=2+1000]'));
+        });
     });
 
     describe('Noto Emoji: emoji sequences', function() {
@@ -379,7 +389,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[882=0+2600|1462=1+2600|168=6+2600|882=8+2600]');
             assert.deepStrictEqual(expected.clusters, [0, 2, 10, 12]);
             assert.deepStrictEqual(expected.ends, [2, 10, 12, 14]);
-            assertShape(shapeText(font, text), expected);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
         });
 
         it('gives one glyph and one UTF-16 range to the ligatures of astral components: flag, skin tone, tag sequence', function() {
@@ -391,7 +401,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[1711=0+2600|567=2+2600|1664=4+2600|882=11+2600]');
             assert.deepStrictEqual(expected.clusters, [0, 4, 8, 22]);
             assert.deepStrictEqual(expected.ends, [4, 8, 22, 24]);
-            assertShape(shapeText(font, text), expected);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
         });
 
         it('joins the deleted second regional indicator of an unknown flag to the cluster of the first one', function() {
@@ -404,7 +414,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[882=0+2600|1850=1+2600|882=3+2600]');
             assert.deepStrictEqual(expected.clusters, [0, 2, 6]);
             assert.deepStrictEqual(expected.ends, [2, 6, 8]);
-            assertShape(shapeText(font, text), expected);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
         });
 
         // the same sequences as the known failure below, without their selectors
@@ -415,20 +425,16 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const expected = parseHarfBuzzShape(text, '[882=0+2600|1847=1+2600|1527=4+2600]');
             assert.deepStrictEqual(expected.clusters, [0, 2, 7]);
             assert.deepStrictEqual(expected.ends, [2, 7, 9]);
-            assertShape(shapeText(font, text), expected);
+            assertShape(shapeText(font, text, removeDefaultIgnorables), expected);
         });
 
-        itFailsUntilFixed(
-            'ligates the fully qualified sequences of a flag and of a keycap, with U+FE0F inside',
-            selectorInsideLigatureReason,
-            function() {
-                // U+1F600, U+1F3F3 U+FE0F U+200D U+1F308 (rainbow flag), 1 U+FE0F U+20E3 (keycap)
-                const text = '\u{1F600}\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}1\u{FE0F}\u{20E3}';
-                const shape = shapeText(font, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables ../noto-emoji.ttf -u 1F600,1F3F3,FE0F,200D,1F308,0031,FE0F,20E3
-                assertShape(shape, parseHarfBuzzShape(text, '[882=0+2600|1847=1+2600|1527=5+2600]'));
-            }
-        );
+        it('ligates the fully qualified sequences of a flag and of a keycap, with U+FE0F inside', function() {
+            // U+1F600, U+1F3F3 U+FE0F U+200D U+1F308 (rainbow flag), 1 U+FE0F U+20E3 (keycap)
+            const text = '\u{1F600}\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}1\u{FE0F}\u{20E3}';
+            const shape = shapeText(font, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables ../noto-emoji.ttf -u 1F600,1F3F3,FE0F,200D,1F308,0031,FE0F,20E3
+            assertShape(shape, parseHarfBuzzShape(text, '[882=0+2600|1847=1+2600|1527=5+2600]'));
+        });
     });
 
     describe('TestCMAP14: BMP bases with astral selectors', function() {
@@ -445,14 +451,14 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             const ideographsExpected = parseHarfBuzzShape(ideographsText, '[2=0+1000|1=2+1000]');
             assert.deepStrictEqual(ideographsExpected.clusters, [0, 3]);
             assert.deepStrictEqual(ideographsExpected.ends, [3, 6]);
-            assertShape(shapeText(font, ideographsText), ideographsExpected);
+            assertShape(shapeText(font, ideographsText, removeDefaultIgnorables), ideographsExpected);
             // U+82A6 U+E0100, U+2269 U+FE00 (greater than but not equal to, non default sequence, glyph 3)
             const mixedText = '\u{82A6}\u{E0100}\u{2269}\u{FE00}';
             // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables ../TestCMAP14.otf -u 82A6,E0100,2269,FE00
             const mixedExpected = parseHarfBuzzShape(mixedText, '[1=0+1000|3=2+723]');
             assert.deepStrictEqual(mixedExpected.clusters, [0, 3]);
             assert.deepStrictEqual(mixedExpected.ends, [3, 5]);
-            assertShape(shapeText(font, mixedText), mixedExpected);
+            assertShape(shapeText(font, mixedText, removeDefaultIgnorables), mixedExpected);
         });
     });
 
@@ -463,16 +469,12 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             font = loadFont(robotoBlackFixture);
         });
 
-        itFailsUntilFixed(
-            'draws a lone surrogate with the glyph of U+FFFD',
-            'getTextCharacters (src/tokenizer.mjs): a lone surrogate is a character as it is, mapped to .notdef, not U+FFFD',
-            function() {
-                // a, lone high surrogate, b: HarfBuzz (hb_buffer_add_utf16) and the browsers turn it into U+FFFD
-                const text = 'a\u{D83C}b';
-                const shape = shapeText(font, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables --language=en ../Roboto-Black.ttf -u 0061,FFFD,0062
-                assertShape(shape, parseHarfBuzzShape(text, '[69=0+1087|452=1+2101|70=2+1153]'));
-            }
-        );
+        it('draws a lone surrogate with the glyph of U+FFFD', function() {
+            // a, lone high surrogate, b: HarfBuzz (hb_buffer_add_utf16) and the browsers turn it into U+FFFD
+            const text = 'a\u{D83C}b';
+            const shape = shapeText(font, text, removeDefaultIgnorables);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables --language=en ../Roboto-Black.ttf -u 0061,FFFD,0062
+            assertShape(shape, parseHarfBuzzShape(text, '[69=0+1087|452=1+2101|70=2+1153]'));
+        });
     });
 });

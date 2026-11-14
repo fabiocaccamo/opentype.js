@@ -94,9 +94,9 @@ function arabicPresentationForms(tokens, script, tag, withRequiredFeature = fals
         const lookupTable = featureLookup.lookupTable;
         if (featureLookup.isRequiredFeatureLookup) {
             const requiredValue = getLookupFeatureValue(this.query, featureLookup);
-            applyLookupToTokens(this.query, lookupTable, tag, tokens, () => requiredValue);
+            applyLookupToTokens(this.query, lookupTable, tag, tokens, () => requiredValue, featureLookup.joinerFlags);
         } else {
-            applyLookupToTokens(this.query, lookupTable, tag, tokens, getTokenFormValue);
+            applyLookupToTokens(this.query, lookupTable, tag, tokens, getTokenFormValue, featureLookup.joinerFlags);
         }
     }
 }

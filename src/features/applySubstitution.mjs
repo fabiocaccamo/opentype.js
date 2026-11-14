@@ -1,8 +1,10 @@
 import { ContextParams } from '../tokenizer.mjs';
+import { DEFAULT_IGNORABLE_TYPES } from '../char.mjs';
 import { SubstitutionAction, getSubstitutionGlyphEdits } from './featureQuery.mjs';
+import { getLookupJoinerFlags } from './featureValues.mjs';
 import {
     getLayoutGdefTable, getGdefGlyphClass, getLigatureId, getLigatureComponent, BASE_GLYPH_CLASS, LIGATURE_GLYPH_CLASS,
-    MARK_GLYPH_CLASS, getCachedLayoutValue
+    MARK_GLYPH_CLASS, getCachedLayoutValue, createIgnorableMatching, AUTO_JOINER_FLAGS
 } from '../layout.mjs';
 
 /**
@@ -38,12 +40,27 @@ function getTokenLigatedGlyphs(token) {
 }
 
 /**
+ * The kind of default ignorable of the glyph of a token (see DEFAULT_IGNORABLE_TYPES in char.mjs), like
+ * _hb_glyph_info_is_default_ignorable of HarfBuzz: the one of its character (see Bidi.registerNormalizer), until a
+ * substitution replaces its glyph
+ * @param {Token} token
+ * @returns {number}
+ */
+function getTokenDefaultIgnorableType(token) {
+    if (token.isSubstituted || !token.defaultIgnorableType) {
+        return DEFAULT_IGNORABLE_TYPES.NOT_IGNORABLE;
+    }
+    return token.defaultIgnorableType;
+}
+
+/**
  * The glyphs of a list of tokens, like the glyph buffer of HarfBuzz: each glyph of a multiple substitution
  * is a glyph of its own, a deleted token has none. applySubstitution updates the sequence with its tokens.
  * @typedef GlyphSequence
  * @type Object
  * @property {number[]} glyphIndexes glyph indexes, in the order of the tokens
  * @property {Token[]} glyphTokens the token of each glyph
+ * @property {number[]} ignorableTypes the kind of default ignorable of each glyph (see getTokenDefaultIgnorableType)
  * @property {Object|undefined} gdef the GDEF table of the layout, whose glyph classes the ligature substitutions read
  * @property {Map<Token, Object>} savedTokenStates the state of each token the substitutions changed, as it was before
  * the first change (see saveTokenState and restoreTokenStates)
@@ -56,14 +73,16 @@ function getTokenLigatedGlyphs(token) {
  * @returns {GlyphSequence}
  */
 function getGlyphSequence(tokens, gdef) {
-    const glyphSequence = { glyphIndexes: [], glyphTokens: [], gdef, savedTokenStates: new Map() };
+    const glyphSequence = { glyphIndexes: [], glyphTokens: [], ignorableTypes: [], gdef, savedTokenStates: new Map() };
     for (const token of tokens) {
         if (token.state.deleted) {
             continue;
         }
+        const ignorableType = getTokenDefaultIgnorableType(token);
         for (const glyphIndex of getTokenGlyphIndexes(token)) {
             glyphSequence.glyphIndexes.push(glyphIndex);
             glyphSequence.glyphTokens.push(token);
+            glyphSequence.ignorableTypes.push(ignorableType);
         }
     }
     return glyphSequence;
@@ -71,7 +90,7 @@ function getGlyphSequence(tokens, gdef) {
 
 /**
  * Save the state of a token of a glyph sequence before a substitution changes it, once: its glyphs (see
- * getTokenGlyphIndexes), its ligature properties, its ligated glyphs and its cluster
+ * getTokenGlyphIndexes), its ligature properties, its ligated glyphs, its cluster and whether it is substituted
  * @param {GlyphSequence} glyphSequence
  * @param {Token} token
  */
@@ -84,7 +103,8 @@ function saveTokenState(glyphSequence, token) {
         activeState: token.activeState,
         ligatureProperties: token.ligatureProperties && token.ligatureProperties.slice(),
         ligatedGlyphs: token.ligatedGlyphs && token.ligatedGlyphs.slice(),
-        cluster: token.cluster
+        cluster: token.cluster,
+        isSubstituted: token.isSubstituted
     });
 }
 
@@ -161,7 +181,8 @@ function getReplacementLigatureProperties(ligatureProperties, glyphCount) {
 /**
  * Replace the glyph at a position of a glyph sequence with a sequence of glyphs, in the glyph sequence and in its token:
  * the token holds one glyph, several glyphs, or none and is deleted. The glyphs that replace it take their ligature
- * properties from it (see getReplacementLigatureProperties) and whether it is ligated (see getTokenLigatedGlyphs).
+ * properties from it (see getReplacementLigatureProperties) and whether it is ligated (see getTokenLigatedGlyphs); like
+ * the glyphs HarfBuzz substitutes, they are not default ignorables (see getTokenDefaultIgnorableType).
  * @param {GlyphSequence} glyphSequence
  * @param {number} position
  * @param {number[]} glyphIndexes the glyphs that replace the glyph, none deletes it
@@ -189,8 +210,10 @@ function replaceGlyph(glyphSequence, position, glyphIndexes, tag) {
     } else {
         token.setState(tag, tokenGlyphIndexes.length === 1 ? tokenGlyphIndexes[0] : tokenGlyphIndexes);
     }
+    token.isSubstituted = true;
     glyphSequence.glyphIndexes.splice(position, 1, ...glyphIndexes);
     glyphSequence.glyphTokens.splice(position, 1, ...glyphIndexes.map(() => token));
+    glyphSequence.ignorableTypes.splice(position, 1, ...glyphIndexes.map(() => DEFAULT_IGNORABLE_TYPES.NOT_IGNORABLE));
 }
 
 /**
@@ -465,8 +488,12 @@ function getLookupFirstGlyphCoverages(lookupTable) {
  * lookup cannot start (e.g. the arabic form of the lookup outside the letters of the form), where a nested alternate
  * substitution has the value 0, like the mask of HarfBuzz there; 1 at every glyph if omitted. Unlike the feature mask
  * of HarfBuzz, the later input glyphs of a rule and the components of a ligature are matched whatever their token
+ * @param {JoinerFlags} [joinerFlags] whether the lookup skips the zero width joiners and non-joiners where HarfBuzz
+ * skips them by default (see getLookupJoinerFlags in featureValues.mjs), the default if omitted: like HarfBuzz, the
+ * lookup skips the default ignorables when it matches the other glyphs of a rule or of a ligature (see
+ * createIgnorableMatching in layout.mjs)
  */
-function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureValue = () => 1) {
+function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureValue = () => 1, joinerFlags = AUTO_JOINER_FLAGS) {
     if (query.isMaxGlyphCountExceeded) {
         return;
     }
@@ -481,6 +508,7 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureVal
     };
     // applySubstitution updates the glyphs of the sequence, the context of the lookup
     const glyphSequence = getGlyphSequence(tokens, getLayoutGdefTable(query.font));
+    const ignorableMatching = createIgnorableMatching(glyphSequence.ignorableTypes, false, joinerFlags);
     const contextParams = new ContextParams(glyphSequence.glyphIndexes, 0);
     const getGlyphFeatureValue = glyphPosition => getTokenFeatureValue(glyphSequence.glyphTokens[glyphPosition]) || 0;
     for (let position = 0; position < glyphSequence.glyphIndexes.length; position++) {
@@ -489,7 +517,7 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureVal
             continue;
         }
         contextParams.setCurrentIndex(position);
-        const action = query.lookupSubstitution(lookupTable, contextParams, tag, getGlyphFeatureValue);
+        const action = query.lookupSubstitution(lookupTable, contextParams, tag, getGlyphFeatureValue, ignorableMatching);
         if (!action) {
             continue;
         }
@@ -511,13 +539,16 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureVal
  * @property {boolean} isEnabledFeatureLookup whether an enabled feature has the lookup, not only the required feature
  * @property {boolean} isRequiredFeatureLookup whether the required feature has the lookup, which then applies at every
  * glyph like the global mask that HarfBuzz gives it
+ * @property {JoinerFlags} joinerFlags how the lookup skips the zero width joiners and non-joiners, from the features
+ * that have it (see getLookupJoinerFlags in featureValues.mjs)
  */
 
 /**
  * Get the lookups of features in lookup list order, like HarfBuzz: each lookup once, with the tag of the (first)
- * feature it belongs to, without the indexes past the lookup list. They are computed once for the GSUB table, the
- * features, the language system and the feature variation record of the variation of the query (see
- * getCachedLayoutValue in layout.mjs).
+ * feature it belongs to and the joiner flags of all the features it belongs to in the shaper of the run of the query
+ * (see FeatureQuery.startScriptRun), without the indexes past the lookup list. They are computed once for the GSUB
+ * table, the features, the language system, the shaper and the feature variation record of the variation of the query
+ * (see getCachedLayoutValue in layout.mjs).
  * @param {FeatureQuery} query
  * @param {string[]} tags feature tags
  * @param {string} script script tag
@@ -527,14 +558,15 @@ function applyLookupToTokens(query, lookupTable, tag, tokens, getTokenFeatureVal
  * @returns {FeatureLookup[]}
  */
 function getFeaturesLookups(query, tags, script, language, withRequiredFeature = false) {
-    const key = JSON.stringify(['lookups', tags, script, language, withRequiredFeature, query.getFeatureVariationIndex()]);
+    const key = JSON.stringify(['lookups', tags, script, language, withRequiredFeature, query.shaper, query.getFeatureVariationIndex()]);
     return getCachedLayoutValue(query.font, 'gsub', key, () => {
         const features = tags.map(tag => ({ tag, feature: query.getFeature({ tag, script, language }), isRequired: false }));
         const requiredFeature = withRequiredFeature && query.getRequiredFeature(script, language);
         if (requiredFeature) {
             features.push({ tag: requiredFeature.tag, feature: requiredFeature.feature, isRequired: true });
         }
-        // the tag of the first feature of each lookup, and whether an enabled feature and the required feature have it
+        // the tag of the first feature of each lookup, whether an enabled feature and the required feature have it, and the
+        // tags of the enabled features that have it
         const lookupOrigins = new Map();
         for (const { tag, feature, isRequired } of features) {
             if (!feature || !feature.lookupListIndexes) {
@@ -542,9 +574,12 @@ function getFeaturesLookups(query, tags, script, language, withRequiredFeature =
             }
             for (const lookupIndex of feature.lookupListIndexes) {
                 const lookupOrigin = lookupOrigins.get(lookupIndex) ||
-                    { tag, isEnabledFeatureLookup: false, isRequiredFeatureLookup: false };
+                    { tag, isEnabledFeatureLookup: false, isRequiredFeatureLookup: false, featureTags: [] };
                 lookupOrigin.isEnabledFeatureLookup = lookupOrigin.isEnabledFeatureLookup || !isRequired;
                 lookupOrigin.isRequiredFeatureLookup = lookupOrigin.isRequiredFeatureLookup || isRequired;
+                if (!isRequired) {
+                    lookupOrigin.featureTags.push(tag);
+                }
                 lookupOrigins.set(lookupIndex, lookupOrigin);
             }
         }
@@ -553,7 +588,8 @@ function getFeaturesLookups(query, tags, script, language, withRequiredFeature =
         for (const lookupIndex of lookupIndexes) {
             const lookupTable = query.getLookupByIndex(lookupIndex);
             if (lookupTable) {
-                lookups.push({ lookupTable, ...lookupOrigins.get(lookupIndex) });
+                const { featureTags, ...lookupOrigin } = lookupOrigins.get(lookupIndex);
+                lookups.push({ lookupTable, ...lookupOrigin, joinerFlags: getLookupJoinerFlags(query.shaper, featureTags) });
             }
         }
         return lookups;
@@ -590,7 +626,7 @@ function getLookupFeatureValue(query, featureLookup) {
 function applyFeaturesToTokens(query, tags, script, language, tokens, withRequiredFeature = false) {
     for (const featureLookup of getFeaturesLookups(query, tags, script, language, withRequiredFeature)) {
         const featureValue = getLookupFeatureValue(query, featureLookup);
-        applyLookupToTokens(query, featureLookup.lookupTable, featureLookup.tag, tokens, () => featureValue);
+        applyLookupToTokens(query, featureLookup.lookupTable, featureLookup.tag, tokens, () => featureValue, featureLookup.joinerFlags);
     }
 }
 
@@ -639,6 +675,7 @@ export {
     getTokenGlyphIndexes,
     getTokenLigatureProperties,
     getTokenLigatedGlyphs,
+    getTokenDefaultIgnorableType,
     getGlyphSequence,
     applyLookupToTokens,
     getFeaturesLookups,

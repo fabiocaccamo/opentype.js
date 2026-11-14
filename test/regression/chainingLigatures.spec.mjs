@@ -34,7 +34,7 @@
  */
 
 import assert from 'assert';
-import { loadFont, shapeText, assertShape, getPathOutline, assertOutlineClose, itFailsUntilFixed } from './helpers.mjs';
+import { loadFont, shapeText, assertShape, getPathOutline, assertOutlineClose } from './helpers.mjs';
 
 const fixture = 'TestGSUB-ChainingLigatures-subset.otf';
 
@@ -317,87 +317,83 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
     });
 
     describe('ligature control characters', function() {
-        // The fixture has no glyph for the joiners. --remove-default-ignorables: a character without a glyph of
-        // its own belongs to the cluster of the glyph before it (stringToGlyphClusters), where HarfBuzz by
-        // default keeps it as an invisible glyph without advance ([12=0+267|38=1+0|12=2+267|38=3+0|40=4+282],
-        // [13=0+783|38=0+0|38=0+0], [5=0+526|38=1+0|11=2+534] and [3=0+511|38=1+0|36=2+481] for the four texts
-        // below). The ends are the start of the next cluster, or the length of the text
+        // The fixture has no glyph for the joiners. --remove-default-ignorables, the removeDefaultIgnorables option: a
+        // character without a glyph of its own belongs to the cluster of the glyph before it (stringToGlyphClusters),
+        // where HarfBuzz by default keeps it as the space glyph without advance (see the last test). The ends are the
+        // start of the next cluster, or the length of the text
 
-        itFailsUntilFixed(
-            'keeps f f t apart around zero width non-joiners, which are not drawn',
-            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character without a glyph in the cmap is drawn with .notdef, 385 units wide',
-            function() {
-                // f, U+200C (zero width non-joiner), f, U+200C, t
-                const shape = shapeText(font, 'f\u{200C}f\u{200C}t');
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestGSUB-ChainingLigatures-subset.otf -u 0066,200C,0066,200C,0074
-                // [12=0+267|12=2+267|40=4+282]
-                // (f f t.end; the fork gives f .notdef f .notdef t.end)
-                assertShape(shape, {
-                    glyphs: [12, 12, 40],
-                    clusters: [0, 2, 4],
-                    advances: [267, 267, 282],
-                    ends: [2, 4, 5]
-                });
-            }
-        );
+        it('keeps f f t apart around zero width non-joiners, which are not drawn', function() {
+            // f, U+200C (zero width non-joiner), f, U+200C, t
+            const shape = shapeText(font, 'f\u{200C}f\u{200C}t', { removeDefaultIgnorables: true });
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestGSUB-ChainingLigatures-subset.otf -u 0066,200C,0066,200C,0074
+            // [12=0+267|12=2+267|40=4+282]
+            // (f f t.end)
+            assertShape(shape, {
+                glyphs: [12, 12, 40],
+                clusters: [0, 2, 4],
+                advances: [267, 267, 282],
+                ends: [2, 4, 5]
+            });
+        });
 
-        itFailsUntilFixed(
-            'forms the f_f_t ligature across zero width joiners, which are not drawn',
-            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character without a glyph in the cmap is drawn with .notdef, ' +
-            'and applyLookupToTokens (src/features/applySubstitution.mjs) does not skip it between the components of a ligature',
-            function() {
-                // f, U+200D (zero width joiner), f, U+200D, t
-                const shape = shapeText(font, 'f\u{200D}f\u{200D}t');
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestGSUB-ChainingLigatures-subset.otf -u 0066,200D,0066,200D,0074
-                // [13=0+783]
-                // (f_f_t; the fork gives f .notdef f .notdef t.end)
-                assertShape(shape, {
-                    glyphs: [13],
-                    clusters: [0],
-                    advances: [783],
-                    ends: [5]
-                });
-            }
-        );
+        it('forms the f_f_t ligature across zero width joiners, which are not drawn', function() {
+            // f, U+200D (zero width joiner), f, U+200D, t
+            const shape = shapeText(font, 'f\u{200D}f\u{200D}t', { removeDefaultIgnorables: true });
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestGSUB-ChainingLigatures-subset.otf -u 0066,200D,0066,200D,0074
+            // [13=0+783]
+            // (f_f_t)
+            assertShape(shape, {
+                glyphs: [13],
+                clusters: [0],
+                advances: [783],
+                ends: [5]
+            });
+        });
 
-        itFailsUntilFixed(
-            'skips a zero width non-joiner in the lookahead of a chaining rule: an a followed by it and a letter keeps its plain form',
-            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character without a glyph in the cmap is drawn with .notdef, ' +
-            'and applyLookupToTokens (src/features/applySubstitution.mjs) keeps it in the context of the chaining rules: the lookahead of the first rule ' +
-            'of lookup 5 sees .notdef instead of d, the second rule gives a its end form',
-            function() {
-                // a, U+200C (zero width non-joiner), d
-                const shape = shapeText(font, 'a\u{200C}d');
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestGSUB-ChainingLigatures-subset.otf -u 0061,200C,0064
-                // [5=0+526|11=2+534]
-                // (a d.end, as without the joiner; the fork gives a.end .notdef d.end)
-                assertShape(shape, {
-                    glyphs: [5, 11],
-                    clusters: [0, 2],
-                    advances: [526, 534],
-                    ends: [2, 3]
-                });
-            }
-        );
+        it('skips a zero width non-joiner in the lookahead of a chaining rule: an a followed by it and a letter keeps its plain form', function() {
+            // a, U+200C (zero width non-joiner), d
+            const shape = shapeText(font, 'a\u{200C}d', { removeDefaultIgnorables: true });
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestGSUB-ChainingLigatures-subset.otf -u 0061,200C,0064
+            // [5=0+526|11=2+534]
+            // (a d.end, as without the joiner)
+            assertShape(shape, {
+                glyphs: [5, 11],
+                clusters: [0, 2],
+                advances: [526, 534],
+                ends: [2, 3]
+            });
+        });
 
-        itFailsUntilFixed(
-            'kerns the glyphs around a zero width non-joiner, which is not drawn',
-            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character without a glyph in the cmap is drawn with .notdef, ' +
-            '385 units wide, and the pairs T .notdef and .notdef o.end are looked up instead of T o.end',
-            function() {
-                // T, U+200C (zero width non-joiner), o
-                const shape = shapeText(font, 'T\u{200C}o');
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestGSUB-ChainingLigatures-subset.otf -u 0054,200C,006F
-                // [3=0+511|36=2+481]
-                // (T o.end, kerned by -161 like "To"; the fork gives T .notdef o.end, 672, 385 and 481 wide)
-                assertShape(shape, {
-                    glyphs: [3, 36],
-                    clusters: [0, 2],
-                    advances: [511, 481],
-                    ends: [2, 3]
-                });
+        it('kerns the glyphs around a zero width non-joiner, which is not drawn', function() {
+            // T, U+200C (zero width non-joiner), o
+            const shape = shapeText(font, 'T\u{200C}o', { removeDefaultIgnorables: true });
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestGSUB-ChainingLigatures-subset.otf -u 0054,200C,006F
+            // [3=0+511|36=2+481]
+            // (T o.end, kerned by -161 like "To")
+            assertShape(shape, {
+                glyphs: [3, 36],
+                clusters: [0, 2],
+                advances: [511, 481],
+                ends: [2, 3]
+            });
+        });
+
+        it('hides the zero width joiners and non-joiners with the space glyph without advance, in their own clusters or in the ligature', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 TestGSUB-ChainingLigatures-subset.otf -u <the code points of each text>
+            const expectedShapes = {
+                // -u 0066,200C,0066,200C,0074: [12=0+267|38=1+0|12=2+267|38=3+0|40=4+282]
+                'f\u{200C}f\u{200C}t': { glyphs: [12, 38, 12, 38, 40], clusters: [0, 1, 2, 3, 4], advances: [267, 0, 267, 0, 282] },
+                // -u 0066,200D,0066,200D,0074: [13=0+783|38=0+0|38=0+0]
+                'f\u{200D}f\u{200D}t': { glyphs: [13, 38, 38], clusters: [0, 0, 0], advances: [783, 0, 0], ends: [5, 5, 5] },
+                // -u 0061,200C,0064: [5=0+526|38=1+0|11=2+534]
+                'a\u{200C}d': { glyphs: [5, 38, 11], clusters: [0, 1, 2], advances: [526, 0, 534] },
+                // -u 0054,200C,006F: [3=0+511|38=1+0|36=2+481]
+                'T\u{200C}o': { glyphs: [3, 38, 36], clusters: [0, 1, 2], advances: [511, 0, 481] }
+            };
+            for (const [text, expectedShape] of Object.entries(expectedShapes)) {
+                assertShape(shapeText(font, text), expectedShape, text);
             }
-        );
+        });
     });
 
     describe('GPOS pair kerning after the substitutions', function() {

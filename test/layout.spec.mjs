@@ -13,7 +13,10 @@ import Layout, {
     isMarkIgnoredWithoutGlyphClasses,
     isGlyphIgnoredByLookup,
     findNextNotIgnoredGlyphPosition,
-    getNotIgnoredGlyphPositions,
+    matchGlyphSequence,
+    matchesGlyphIndex,
+    createIgnorableMatching,
+    AUTO_JOINER_FLAGS,
     matchSequenceContext,
     matchChainedSequenceContext,
     getRequiredFeatureIndex,
@@ -23,6 +26,7 @@ import Layout, {
     selectScriptTag
 } from '../src/layout.mjs';
 import { glyphIndexes, createLookupFlagsGdef } from './lookup-flags-font.mjs';
+import { DEFAULT_IGNORABLE_TYPES } from '../src/char.mjs';
 
 describe('layout.mjs', function() {
     let font;
@@ -712,7 +716,7 @@ describe('layout.mjs', function() {
         });
     });
 
-    describe('findNextNotIgnoredGlyphPosition and getNotIgnoredGlyphPositions', function() {
+    describe('findNextNotIgnoredGlyphPosition and matchGlyphSequence', function() {
         const gdef = createLookupFlagsGdef();
         const { a: glyphA, b: glyphB, c: glyphC, acute, dotbelow } = glyphIndexes;
         const ignoreMarks = { lookupFlag: 0x0008 };
@@ -733,12 +737,57 @@ describe('layout.mjs', function() {
             assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, [glyphA, glyphB, acute, glyphC], 1, 1), 3);
         });
 
-        it('lists the positions of the glyphs that the lookup does not ignore, at most the count given', function() {
+        it('matches a sequence on the glyphs that the lookup does not ignore, null when the glyphs end before it', function() {
             const glyphs = [glyphA, acute, glyphB, dotbelow, glyphC, acute];
-            assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 0, 1, 2), [2, 4]);
-            assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 0, 1, 3), [2, 4]);
-            assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 4, -1, 2), [2, 0]);
-            assert.deepStrictEqual(getNotIgnoredGlyphPositions(gdef, ignoreMarks, glyphs, 0, 1, 0), []);
+            const sequence = items => ({ items, matchesItem: matchesGlyphIndex });
+            assert.deepStrictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 0, 1, sequence([glyphB, glyphC])), [2, 4]);
+            assert.strictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 0, 1, sequence([glyphB, glyphC, glyphA])), null);
+            assert.strictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 0, 1, sequence([glyphC])), null);
+            assert.deepStrictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 4, -1, sequence([glyphB, glyphA])), [2, 0]);
+            assert.deepStrictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 0, 1, sequence([])), []);
+        });
+
+        // the matcher_t of the skipping iterators of HarfBuzz 11.3.2 (hb-ot-layout-gsubgpos.hh): a default ignorable it
+        // may skip (may_skip SKIP_MAYBE) is matched when it matches the item there (MATCH_YES), skipped otherwise
+        it('skips a default ignorable the lookup may skip unless it matches the item there', function() {
+            const glyphs = [glyphA, glyphC, glyphB];
+            const isSkippedIgnorable = position => position === 1;
+            const sequence = items => ({ items, matchesItem: matchesGlyphIndex });
+            assert.deepStrictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 0, 1, sequence([glyphB]), isSkippedIgnorable), [2]);
+            assert.deepStrictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 0, 1, sequence([glyphC, glyphB]), isSkippedIgnorable), [1, 2]);
+            assert.strictEqual(matchGlyphSequence(gdef, ignoreMarks, glyphs, 0, 1, sequence([glyphB])), null);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, glyphs, 0, 1, isSkippedIgnorable), 2);
+            assert.equal(findNextNotIgnoredGlyphPosition(gdef, ignoreMarks, glyphs, 2, -1, isSkippedIgnorable), 0);
+        });
+    });
+
+    describe('createIgnorableMatching', function() {
+        const {
+            IGNORABLE, ZERO_WIDTH_NON_JOINER, ZERO_WIDTH_JOINER, HIDDEN, NOT_IGNORABLE
+        } = DEFAULT_IGNORABLE_TYPES;
+        const ignorableTypes = [NOT_IGNORABLE, IGNORABLE, ZERO_WIDTH_NON_JOINER, ZERO_WIDTH_JOINER, HIDDEN];
+        const getSkippedPositions = isSkipped => ignorableTypes.map((ignorableType, position) => position).filter(isSkipped);
+        const manualJoinerFlags = { autoZeroWidthNonJoiner: false, autoZeroWidthJoiner: false };
+
+        // matcher_t::init of HarfBuzz 11.3.2: ignore_zwnj = table_index == 1 || (context_match && auto_zwnj),
+        // ignore_zwj = context_match || auto_zwj, ignore_hidden = table_index == 1
+        it('skips in the input of a GSUB lookup the default ignorables but the zero width non-joiner and the hidden ones, the zero width joiner with its flag', function() {
+            assert.deepStrictEqual(getSkippedPositions(createIgnorableMatching(ignorableTypes, false, AUTO_JOINER_FLAGS).isSkippedInInput), [1, 3]);
+            assert.deepStrictEqual(getSkippedPositions(createIgnorableMatching(ignorableTypes, false, manualJoinerFlags).isSkippedInInput), [1]);
+        });
+
+        it('skips in the context of a GSUB lookup the zero width joiner always, the zero width non-joiner with its flag, never the hidden ones', function() {
+            assert.deepStrictEqual(getSkippedPositions(createIgnorableMatching(ignorableTypes, false, AUTO_JOINER_FLAGS).isSkippedInContext), [1, 2, 3]);
+            assert.deepStrictEqual(getSkippedPositions(createIgnorableMatching(ignorableTypes, false, manualJoinerFlags).isSkippedInContext), [1, 3]);
+        });
+
+        it('skips in a GPOS lookup every default ignorable, but the zero width joiner of its input without its flag', function() {
+            const autoMatching = createIgnorableMatching(ignorableTypes, true, AUTO_JOINER_FLAGS);
+            const manualMatching = createIgnorableMatching(ignorableTypes, true, manualJoinerFlags);
+            assert.deepStrictEqual(getSkippedPositions(autoMatching.isSkippedInInput), [1, 2, 3, 4]);
+            assert.deepStrictEqual(getSkippedPositions(autoMatching.isSkippedInContext), [1, 2, 3, 4]);
+            assert.deepStrictEqual(getSkippedPositions(manualMatching.isSkippedInInput), [1, 2, 4]);
+            assert.deepStrictEqual(getSkippedPositions(manualMatching.isSkippedInContext), [1, 2, 3, 4]);
         });
     });
 

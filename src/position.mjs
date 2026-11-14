@@ -4,9 +4,11 @@
 import Layout, {
     getLayoutGdefTable, isGlyphIgnoredByLookup, findNextNotIgnoredGlyphPosition, isMarkGlyph, getLigatureId,
     getLigatureComponent, isMarkIgnoredWithoutGlyphClasses, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES, IGNORE_MARKS, RIGHT_TO_LEFT, getRequiredFeatureIndex,
-    matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue, HarfBuzzShaper, getHarfBuzzShaper
+    matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue, HarfBuzzShaper, getHarfBuzzShaper,
+    createIgnorableMatching, AUTO_JOINER_FLAGS, NO_IGNORABLE_MATCHING
 } from './layout.mjs';
-import { SPACE_TYPES } from './char.mjs';
+import { DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from './char.mjs';
+import { getLookupJoinerFlags } from './features/featureValues.mjs';
 
 // the features of common_features and horizontal_features (hb-ot-shape.cc) that are not default GSUB features of a
 // shaper of the fork (see Font.defaultRenderOptions.features): HarfBuzz looks each feature up in GSUB and in GPOS, so
@@ -224,22 +226,19 @@ function applySingleAdjustment(position, lookupTable, subtable, glyphRun, index)
 }
 
 /**
- * Find the adjustment of a glyph pair in a pair adjustment subtable, if the subtable applies to the
- * pair: format 1 applies to the pairs it lists, format 2 to any right glyph once it covers the left
- * glyph (a class record of class 0 included), unless a class is out of the class counts (HarfBuzz).
+ * Find the adjustment of a glyph pair in a pair adjustment subtable that covers the left glyph, if the subtable
+ * applies to the pair: format 1 applies to the pairs it lists, format 2 to any right glyph (a class record of class 0
+ * included), unless a class is out of the class counts (HarfBuzz).
  *
- * @param {opentype.Layout} layout - the GPOS layout, for its coverage and class definition lookups
+ * @param {opentype.Layout} layout - the GPOS layout, for its class definition lookups
  * @param {object} subtable - a pair adjustment subtable
+ * @param {integer} coverageIndex - the coverage index of the left glyph in the subtable
  * @param {integer} leftIndex - left glyph index
  * @param {integer} rightIndex - right glyph index
  * @returns {{value1: object, value2: object}|undefined} the record with the value records of the two
  * glyphs (each one undefined when its value format is 0), undefined when the subtable does not apply
  */
-function findPairAdjustment(layout, subtable, leftIndex, rightIndex) {
-    const coverageIndex = layout.getCoverageIndex(subtable.coverage, leftIndex);
-    if (coverageIndex < 0) {
-        return;
-    }
+function findPairAdjustment(layout, subtable, coverageIndex, leftIndex, rightIndex) {
     switch (subtable.posFormat) {
         case 1: {
             const pairSet = subtable.pairSets[coverageIndex];
@@ -253,8 +252,10 @@ function findPairAdjustment(layout, subtable, leftIndex, rightIndex) {
 }
 
 /**
- * Apply a pair adjustment subtable at a glyph of a run, like HarfBuzz (PairPosFormat1 and PairPosFormat2): the
- * second glyph of the pair is the next glyph of the run that the lookup does not ignore, the first value record
+ * Apply a pair adjustment subtable at a glyph of a run, like HarfBuzz (PairPosFormat1 and PairPosFormat2): when the
+ * subtable covers the glyph (checked first, so that a run of glyphs it does not cover is not searched for the second
+ * glyph at each of them), the second glyph of the pair is the next glyph of the run that the lookup does not ignore
+ * nor skip as a default ignorable (see GlyphRun.ignorableMatching), the first value record
  * adjusts the first glyph and the second value record the second glyph. After a subtable with a second value
  * format the lookup goes on after the second glyph, otherwise at the second glyph, which can start a pair.
  * @param {Position} position
@@ -265,12 +266,20 @@ function findPairAdjustment(layout, subtable, leftIndex, rightIndex) {
  * @returns {number} the position the lookup goes on at, -1 when the subtable does not apply
  */
 function applyPairAdjustment(position, lookupTable, subtable, glyphRun, index) {
+    const coverageIndex = position.getCoverageIndex(subtable.coverage, glyphRun.glyphIndexes[index]);
+    if (coverageIndex < 0) {
+        return -1;
+    }
     const gdef = getLayoutGdefTable(position.font);
-    const secondIndex = findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphRun.glyphIndexes, index, 1);
+    const secondIndex = findNextNotIgnoredGlyphPosition(
+        gdef, lookupTable, glyphRun.glyphIndexes, index, 1, glyphRun.ignorableMatching.isSkippedInInput
+    );
     if (secondIndex < 0) {
         return -1;
     }
-    const pairAdjustment = findPairAdjustment(position, subtable, glyphRun.glyphIndexes[index], glyphRun.glyphIndexes[secondIndex]);
+    const pairAdjustment = findPairAdjustment(
+        position, subtable, coverageIndex, glyphRun.glyphIndexes[index], glyphRun.glyphIndexes[secondIndex]
+    );
     if (!pairAdjustment) {
         return -1;
     }
@@ -373,7 +382,8 @@ function attachCursiveGlyph(glyphRun, childIndex, parentIndex, yOffset) {
 
 /**
  * Apply a cursive attachment subtable at a glyph of a run, like HarfBuzz (CursivePosFormat1): the entry anchor of the
- * glyph joins the exit anchor of the glyph before it that the lookup does not ignore, along the direction of the run
+ * glyph joins the exit anchor of the glyph before it that the lookup does not ignore nor skip as a default ignorable
+ * (see GlyphRun.ignorableMatching), along the direction of the run
  * (see joinCursiveAdvances), and across it the glyph before is attached to the glyph after with the RightToLeft flag
  * of the lookupFlag (the last glyph of the text stays on the baseline), otherwise the glyph after to the glyph before
  * (see attachCursiveGlyph).
@@ -390,7 +400,9 @@ function applyCursiveAttachment(position, lookupTable, subtable, glyphRun, index
         return -1;
     }
     const gdef = getLayoutGdefTable(position.font);
-    const previousIndex = findNextNotIgnoredGlyphPosition(gdef, lookupTable, glyphRun.glyphIndexes, index, -1);
+    const previousIndex = findNextNotIgnoredGlyphPosition(
+        gdef, lookupTable, glyphRun.glyphIndexes, index, -1, glyphRun.ignorableMatching.isSkippedInInput
+    );
     const exitAnchor = previousIndex < 0 ? undefined : getCursiveAnchor(position, subtable, glyphRun.glyphIndexes[previousIndex], 'exitAnchor');
     if (!exitAnchor) {
         return -1;
@@ -435,19 +447,22 @@ function attachMark(position, glyphRun, index, markRecord, parentAnchors, parent
 }
 
 /**
- * The position of the glyph before each glyph of a run that is not a GDEF mark, the base or the ligature a mark
- * attaches to, like MarkBasePos and MarkLigPos of HarfBuzz: whatever the lookupFlag of the lookup. One pass over the
- * run, as GPOS changes no glyph, like HarfBuzz caches the base of the marks after it (last_base).
+ * The position of the glyph before each glyph of a run that is not a GDEF mark nor a default ignorable the lookup
+ * skips, the base or the ligature a mark attaches to, like MarkBasePos and MarkLigPos of HarfBuzz: whatever the
+ * lookupFlag of the lookup. One pass over the run, as GPOS changes no glyph, like HarfBuzz caches the base of the marks
+ * after it (last_base).
  * @param {object|undefined} gdef - the GDEF table of the font
  * @param {number[]} glyphIndexes - the glyph indexes of the run
+ * @param {function(number): boolean} isSkippedIgnorable - whether the glyph at a position of the run is a default
+ * ignorable the lookup skips (see IgnorableMatching in layout.mjs)
  * @returns {number[]} -1 for a glyph without one
  */
-function getMarkBaseIndexes(gdef, glyphIndexes) {
+function getMarkBaseIndexes(gdef, glyphIndexes, isSkippedIgnorable) {
     const markBaseIndexes = [];
     let baseIndex = -1;
     for (let i = 0; i < glyphIndexes.length; i++) {
         markBaseIndexes.push(baseIndex);
-        if (!isMarkGlyph(gdef, glyphIndexes[i])) {
+        if (!isMarkGlyph(gdef, glyphIndexes[i]) && !isSkippedIgnorable(i)) {
             baseIndex = i;
         }
     }
@@ -455,8 +470,26 @@ function getMarkBaseIndexes(gdef, glyphIndexes) {
 }
 
 /**
+ * The position of the base or the ligature of each glyph of a run for the lookup that applies to it (see
+ * getMarkBaseIndexes): like HarfBuzz, a lookup skips a zero width joiner before a mark only with the
+ * autoZeroWidthJoiner flag (not the lookups of mark and mkmk), so the positions are computed once for each flag
+ * @param {object|undefined} gdef - the GDEF table of the font
+ * @param {GlyphRun} glyphRun - its markBaseIndexes updated
+ * @returns {number[]}
+ */
+function getRunMarkBaseIndexes(gdef, glyphRun) {
+    const ignorableMatching = glyphRun.ignorableMatching;
+    const autoZeroWidthJoiner = ignorableMatching.joinerFlags.autoZeroWidthJoiner;
+    if (!glyphRun.markBaseIndexes.has(autoZeroWidthJoiner)) {
+        glyphRun.markBaseIndexes.set(autoZeroWidthJoiner, getMarkBaseIndexes(gdef, glyphRun.glyphIndexes, ignorableMatching.isSkippedInInput));
+    }
+    return glyphRun.markBaseIndexes.get(autoZeroWidthJoiner);
+}
+
+/**
  * Apply a mark-to-base attachment subtable at a mark of a run, like HarfBuzz (MarkBasePosFormat1): the mark attaches
- * to the glyph before it that is not a GDEF mark (see getMarkBaseIndexes) when the subtable covers both, whatever the
+ * to the glyph before it that is not a GDEF mark nor a default ignorable the lookup skips (see getRunMarkBaseIndexes)
+ * when the subtable covers both, whatever the
  * lookupFlag of the lookup. Not yet like HarfBuzz: a mark after the second glyph of a multiple substitution attaches to
  * that glyph when the subtable covers it, otherwise to nothing, where HarfBuzz attaches it to the first glyph of the
  * substitution (https://github.com/harfbuzz/harfbuzz/issues/740).
@@ -473,7 +506,7 @@ function applyMarkToBaseAttachment(position, lookupTable, subtable, glyphRun, in
     if (markCoverageIndex < 0) {
         return -1;
     }
-    const baseIndex = glyphRun.markBaseIndexes[index];
+    const baseIndex = getRunMarkBaseIndexes(getLayoutGdefTable(position.font), glyphRun)[index];
     const baseCoverageIndex = baseIndex < 0 ? -1 : position.getCoverageIndex(subtable.baseCoverage, glyphRun.glyphIndexes[baseIndex]);
     if (baseCoverageIndex < 0) {
         return -1;
@@ -517,7 +550,7 @@ function applyMarkToLigatureAttachment(position, lookupTable, subtable, glyphRun
     if (markCoverageIndex < 0) {
         return -1;
     }
-    const ligatureIndex = glyphRun.markBaseIndexes[index];
+    const ligatureIndex = getRunMarkBaseIndexes(getLayoutGdefTable(position.font), glyphRun)[index];
     const ligatureCoverageIndex = ligatureIndex < 0 ? -1 : position.getCoverageIndex(subtable.ligatureCoverage, glyphRun.glyphIndexes[ligatureIndex]);
     const componentAnchors = ligatureCoverageIndex < 0 ? undefined : subtable.ligatureArray[ligatureCoverageIndex];
     if (!componentAnchors || !componentAnchors.length) {
@@ -552,7 +585,8 @@ function areMarksOfSameGlyph(markProperties, previousMarkProperties) {
 /**
  * Apply a mark-to-mark attachment subtable at a mark of a run, like HarfBuzz (MarkMarkPosFormat1): the mark attaches
  * to the glyph before it that the mark filtering set and the mark attachment type of the lookup do not skip (its
- * IgnoreBaseGlyphs, IgnoreLigatures and IgnoreMarks do not apply), when that glyph is a GDEF mark of the same glyph
+ * IgnoreBaseGlyphs, IgnoreLigatures and IgnoreMarks do not apply), nor a default ignorable the lookup skips (see
+ * GlyphRun.ignorableMatching), when that glyph is a GDEF mark of the same glyph
  * (see areMarksOfSameGlyph) and the subtable covers both.
  * @param {Position} position
  * @param {object} lookupTable - the lookup of the subtable, for its lookupFlag
@@ -571,7 +605,9 @@ function applyMarkToMarkAttachment(position, lookupTable, subtable, glyphRun, in
         lookupFlag: lookupTable.lookupFlag & ~(IGNORE_BASE_GLYPHS | IGNORE_LIGATURES | IGNORE_MARKS),
         markFilteringSet: lookupTable.markFilteringSet
     };
-    const previousIndex = findNextNotIgnoredGlyphPosition(gdef, markFilterLookup, glyphRun.glyphIndexes, index, -1);
+    const previousIndex = findNextNotIgnoredGlyphPosition(
+        gdef, markFilterLookup, glyphRun.glyphIndexes, index, -1, glyphRun.ignorableMatching.isSkippedInInput
+    );
     if (previousIndex < 0 || !isMarkGlyph(gdef, glyphRun.glyphIndexes[previousIndex]) ||
         !areMarksOfSameGlyph(glyphRun.ligatureProperties[index], glyphRun.ligatureProperties[previousIndex])) {
         return -1;
@@ -649,7 +685,8 @@ function applyContextRuleMatch(position, contextRuleMatch, glyphRun) {
  */
 function applyContextualPositioning(position, lookupTable, subtable, glyphRun, index) {
     const contextRuleMatch = matchSequenceContext(
-        getLayoutGdefTable(position.font), lookupTable, subtable, subtable.posFormat, glyphRun.glyphIndexes, index
+        getLayoutGdefTable(position.font), lookupTable, subtable, subtable.posFormat, glyphRun.glyphIndexes, index,
+        glyphRun.ignorableMatching
     );
     return applyContextRuleMatch(position, contextRuleMatch, glyphRun);
 }
@@ -667,7 +704,8 @@ function applyContextualPositioning(position, lookupTable, subtable, glyphRun, i
  */
 function applyChainedContextualPositioning(position, lookupTable, subtable, glyphRun, index) {
     const contextRuleMatch = matchChainedSequenceContext(
-        getLayoutGdefTable(position.font), lookupTable, subtable, subtable.posFormat, glyphRun.glyphIndexes, index
+        getLayoutGdefTable(position.font), lookupTable, subtable, subtable.posFormat, glyphRun.glyphIndexes, index,
+        glyphRun.ignorableMatching
     );
     return applyContextRuleMatch(position, contextRuleMatch, glyphRun);
 }
@@ -783,8 +821,13 @@ function applyLookupSubtables(position, lookupTable, lookupSubtables, glyphRun, 
  * positions of the glyphs, in font units, which the lookups adjust
  * @property {Array<LigatureProperties|undefined>} ligatureProperties - the ligature properties of the glyphs, which
  * the mark-to-ligature and mark-to-mark attachments read
- * @property {number[]} markBaseIndexes - the position of the base or of the ligature of each mark (see
- * getMarkBaseIndexes)
+ * @property {number[]} ignorableTypes - the kind of default ignorable of each glyph (see DEFAULT_IGNORABLE_TYPES in
+ * char.mjs)
+ * @property {IgnorableMatching} ignorableMatching - how the lookup that applies skips the default ignorables, like
+ * HarfBuzz (see createIgnorableMatching in layout.mjs): with the joiner flags of the top-level lookup, which the
+ * lookups of its contextual rules keep (see applyPositioningLookups)
+ * @property {Map<boolean, number[]>} markBaseIndexes - the position of the base or of the ligature of each mark, by
+ * autoZeroWidthJoiner flag (see getRunMarkBaseIndexes)
  * @property {Array<{type: string, parentIndex: number}|undefined>} attachments - the glyph each glyph is attached to
  * by the lookups, with the type of the attachment (see MARK_ATTACHMENT and CURSIVE_ATTACHMENT), like the
  * attach_chain and attach_type of HarfBuzz
@@ -799,18 +842,20 @@ function applyLookupSubtables(position, lookupTable, lookupSubtables, glyphRun, 
 
 /**
  * Create a run of glyphs for the GPOS lookups, without attachments.
- * @param {object|undefined} gdef - the GDEF table of the font, for the bases of the marks
  * @param {number[]} glyphIndexes - in the order of the text
  * @param {object[]} glyphPositions - in the order of the text
- * @param {{ligatureProperties: Array<LigatureProperties|undefined>, rightToLeft: boolean, variation: object|undefined}} runProperties
+ * @param {{ligatureProperties: Array<LigatureProperties|undefined>, ignorableTypes: number[], rightToLeft: boolean,
+ * variation: object|undefined}} runProperties
  * @returns {GlyphRun}
  */
-function createGlyphRun(gdef, glyphIndexes, glyphPositions, runProperties) {
+function createGlyphRun(glyphIndexes, glyphPositions, runProperties) {
     return {
         glyphIndexes,
         glyphPositions,
         ligatureProperties: runProperties.ligatureProperties,
-        markBaseIndexes: getMarkBaseIndexes(gdef, glyphIndexes),
+        ignorableTypes: runProperties.ignorableTypes,
+        ignorableMatching: createIgnorableMatching(runProperties.ignorableTypes, true, AUTO_JOINER_FLAGS),
+        markBaseIndexes: new Map(),
         attachments: [],
         rightToLeft: runProperties.rightToLeft,
         variation: runProperties.variation,
@@ -867,15 +912,25 @@ function applyPositioningLookup(position, lookupTable, glyphRun, lastIndex) {
 }
 
 /**
- * Apply GPOS lookups to a run of glyphs, one lookup after the other.
+ * A lookup of the GPOS features of a run, with its joiner flags (see getLookupJoinerFlags in featureValues.mjs)
+ * @typedef PositioningLookup
+ * @type Object
+ * @property {object} lookupTable
+ * @property {JoinerFlags} joinerFlags
+ */
+
+/**
+ * Apply GPOS lookups to a run of glyphs, one lookup after the other, each one skipping the default ignorables with its
+ * joiner flags (see GlyphRun.ignorableMatching).
  * @param {Position} position
- * @param {object[]} lookupTables - in the order they apply in
+ * @param {PositioningLookup[]} lookups - in the order they apply in
  * @param {GlyphRun} glyphRun - updated
  * @param {number} lastIndex - the position in the run of the last glyph the lookups apply at (see
  * applyPositioningLookup)
  */
-function applyPositioningLookups(position, lookupTables, glyphRun, lastIndex) {
-    for (const lookupTable of lookupTables) {
+function applyPositioningLookups(position, lookups, glyphRun, lastIndex) {
+    for (const { lookupTable, joinerFlags } of lookups) {
+        glyphRun.ignorableMatching = createIgnorableMatching(glyphRun.ignorableTypes, true, joinerFlags);
         applyPositioningLookup(position, lookupTable, glyphRun, lastIndex);
     }
 }
@@ -892,24 +947,34 @@ function isGposAppliedToScript(position, script) {
 }
 
 /**
- * The lookup tables of feature tables, each one once, in LookupList order, the order they apply in, like the GPOS
- * map of HarfBuzz.
+ * The lookups of features, each one once, in LookupList order, the order they apply in, like the GPOS map of
+ * HarfBuzz, with the joiner flags of the features that have it in the shaper of the run (see getLookupJoinerFlags in
+ * featureValues.mjs).
  * @param {Position} position
- * @param {object[]} featureTables
- * @returns {object[]}
+ * @param {Array<{tag: string|undefined, feature: object}>} features - the feature tables with their tags, none for the
+ * required feature
+ * @param {string|undefined} shaper - the shaper of the run (see getScriptRunShaper in bidi.mjs)
+ * @returns {PositioningLookup[]}
  */
-function getLookupTablesOfFeatureTables(position, featureTables) {
-    const lookupListIndexes = new Set();
-    for (const featureTable of featureTables) {
-        for (const lookupListIndex of featureTable.lookupListIndexes) {
-            lookupListIndexes.add(lookupListIndex);
+function getFeatureLookups(position, features, shaper) {
+    const lookupFeatureTags = new Map();
+    for (const { tag, feature } of features) {
+        for (const lookupListIndex of feature.lookupListIndexes) {
+            const featureTags = lookupFeatureTags.get(lookupListIndex) || [];
+            if (tag !== undefined) {
+                featureTags.push(tag);
+            }
+            lookupFeatureTags.set(lookupListIndex, featureTags);
         }
     }
     const allLookups = position.font.tables.gpos.lookups;
-    return Array.from(lookupListIndexes)
+    return Array.from(lookupFeatureTags.keys())
         .sort((indexA, indexB) => indexA - indexB)
-        .map(lookupListIndex => allLookups[lookupListIndex])
-        .filter(lookupTable => lookupTable);
+        .filter(lookupListIndex => allLookups[lookupListIndex])
+        .map(lookupListIndex => ({
+            lookupTable: allLookups[lookupListIndex],
+            joinerFlags: getLookupJoinerFlags(shaper, lookupFeatureTags.get(lookupListIndex))
+        }));
 }
 
 /**
@@ -926,54 +991,55 @@ function getRequiredFeatureTable(position, langSysTable) {
 }
 
 /**
- * The feature tables of the features of a GPOS language system whose tag is one of the feature tags, for each tag
+ * The feature records of the features of a GPOS language system whose tag is one of the feature tags, for each tag
  * its first feature in FeatureIndex order, like Layout.getFeatureTable for each tag, in one pass over the
  * FeatureIndex; like HarfBuzz, a feature index past the FeatureList is ignored.
  * @param {Position} position
  * @param {object} langSysTable
  * @param {string[]} featureTags
- * @returns {object[]}
+ * @returns {Array<{tag: string, feature: object}>}
  */
-function getTaggedFeatureTables(position, langSysTable, featureTags) {
+function getTaggedFeatureRecords(position, langSysTable, featureTags) {
     const featureRecords = position.font.tables.gpos.features;
     const remainingFeatureTags = new Set(featureTags);
-    const featureTables = [];
+    const taggedFeatureRecords = [];
     for (const featureIndex of langSysTable.featureIndexes) {
         const featureRecord = featureRecords[featureIndex];
         if (featureRecord && remainingFeatureTags.delete(featureRecord.tag)) {
-            featureTables.push(featureRecord.feature);
+            taggedFeatureRecords.push(featureRecord);
         }
     }
-    return featureTables;
+    return taggedFeatureRecords;
 }
 
 /**
- * The lookup tables of the GPOS features of a script and language that the language system has (with the
+ * The lookups of the GPOS features of a script and language that the language system has (with the
  * fallbacks of getLangSysTable) and of its required feature, whatever the feature tags, like HarfBuzz
- * (hb_ot_map_builder_t), in the order they apply in (see getLookupTablesOfFeatureTables); none without a GPOS
- * table or a language system, or when GPOS does not apply to the script (see isGposAppliedToScript). They are
- * computed once for the GPOS table, the script, the language and the feature tags (see getCachedLayoutValue in
- * layout.mjs).
+ * (hb_ot_map_builder_t), in the order they apply in, with their joiner flags in the shaper of the run (see
+ * getFeatureLookups); none without a GPOS table or a language system, or when GPOS does not apply to the script (see
+ * isGposAppliedToScript). They are computed once for the GPOS table, the script, the language, the feature tags and
+ * the shaper (see getCachedLayoutValue in layout.mjs).
  * @param {Position} position
  * @param {string} script
  * @param {string} [language]
  * @param {string[]} featureTags
- * @returns {object[]}
+ * @param {string} [shaper] - the shaper of the run (see getScriptRunShaper in bidi.mjs), the default shaper if omitted
+ * @returns {PositioningLookup[]}
  */
-function getPositioningLookupTables(position, script, language, featureTags) {
+function getPositioningLookups(position, script, language, featureTags, shaper) {
     const table = position.getTable();
     if (!table) {
         return [];
     }
-    return getCachedLayoutValue(position.font, 'gpos', JSON.stringify(['lookups', script, language, featureTags]), () => {
+    return getCachedLayoutValue(position.font, 'gpos', JSON.stringify(['lookups', script, language, featureTags, shaper]), () => {
         const langSysTable = isGposAppliedToScript(position, script) && position.getLangSysTable(script, language);
         if (!langSysTable) {
             return [];
         }
-        const featureTables = [getRequiredFeatureTable(position, langSysTable)]
-            .filter(featureTable => featureTable)
-            .concat(getTaggedFeatureTables(position, langSysTable, featureTags));
-        return getLookupTablesOfFeatureTables(position, featureTables);
+        const requiredFeature = getRequiredFeatureTable(position, langSysTable);
+        const features = (requiredFeature ? [{ tag: undefined, feature: requiredFeature }] : [])
+            .concat(getTaggedFeatureRecords(position, langSysTable, featureTags));
+        return getFeatureLookups(position, features, shaper);
     });
 }
 
@@ -993,20 +1059,22 @@ function getKernFeatureTable(position, script, language) {
 
 /**
  * The pair of the kern table that starts at a glyph of a run, like hb_kern_machine_t of HarfBuzz: from the first
- * glyph, each glyph is kerned with the next glyph that is not a GDEF mark, and the next pair starts at that glyph,
- * so a pair starts at the first glyph of the run and at each glyph that is not a GDEF mark.
+ * glyph, each glyph is kerned with the next glyph that is not a GDEF mark nor a default ignorable, and the next pair
+ * starts at that glyph, so a pair starts at the first glyph of the run and at each glyph that is neither.
  * @param {opentype.Font} font
  * @param {number[]} glyphIndexes - the glyph indexes of the run, in visual order
  * @param {number} first - the position of the glyph in the run
+ * @param {function(number): boolean} isSkippedIgnorable - whether the glyph at a position of the run is a default
+ * ignorable the pairs skip (see IgnorableMatching in layout.mjs)
  * @returns {{first: number, second: number, value: number}|undefined} the positions in the run of the two glyphs of
  * the pair, with its value; undefined when no pair of the kern table starts at the glyph
  */
-function getKernTablePair(font, glyphIndexes, first) {
+function getKernTablePair(font, glyphIndexes, first, isSkippedIgnorable) {
     const gdef = getLayoutGdefTable(font);
-    if (first > 0 && isGlyphIgnoredByLookup(gdef, KERN_TABLE_LOOKUP, glyphIndexes[first])) {
+    if (first > 0 && (isGlyphIgnoredByLookup(gdef, KERN_TABLE_LOOKUP, glyphIndexes[first]) || isSkippedIgnorable(first))) {
         return;
     }
-    const second = findNextNotIgnoredGlyphPosition(gdef, KERN_TABLE_LOOKUP, glyphIndexes, first, 1);
+    const second = findNextNotIgnoredGlyphPosition(gdef, KERN_TABLE_LOOKUP, glyphIndexes, first, 1, isSkippedIgnorable);
     const value = second < 0 ? 0 : font.kerningPairs[glyphIndexes[first] + ',' + glyphIndexes[second]];
     if (value) {
         return { first, second, value };
@@ -1017,11 +1085,13 @@ function getKernTablePair(font, glyphIndexes, first) {
  * The pairs of the kern table in a run of glyphs (see getKernTablePair).
  * @param {opentype.Font} font
  * @param {number[]} glyphIndexes - the glyph indexes of the run, in visual order
+ * @param {number[]} ignorableTypes - the kind of default ignorable of each glyph of the run
  * @returns {Array<{first: number, second: number, value: number}>}
  */
-function getKernTablePairs(font, glyphIndexes) {
+function getKernTablePairs(font, glyphIndexes, ignorableTypes) {
+    const isSkippedIgnorable = createIgnorableMatching(ignorableTypes, true, AUTO_JOINER_FLAGS).isSkippedInInput;
     return glyphIndexes
-        .map((glyphIndex, first) => getKernTablePair(font, glyphIndexes, first))
+        .map((glyphIndex, first) => getKernTablePair(font, glyphIndexes, first, isSkippedIgnorable))
         .filter(pair => pair);
 }
 
@@ -1030,11 +1100,11 @@ function getKernTablePairs(font, glyphIndexes) {
  * pair is split between its two glyphs, half of it (rounded down) added to the advance of the first glyph, the
  * rest to the advance and to the x offset of the second glyph, which moves by the whole value.
  * @param {opentype.Font} font
- * @param {{glyphIndexes: number[], glyphPositions: object[]}} glyphRun - in visual order, its glyph positions
- * updated (see GlyphRun)
+ * @param {{glyphIndexes: number[], glyphPositions: object[], ignorableTypes: number[]}} glyphRun - in visual order,
+ * its glyph positions updated (see GlyphRun)
  */
 function applyKernTable(font, glyphRun) {
-    for (const { first, second, value } of getKernTablePairs(font, glyphRun.glyphIndexes)) {
+    for (const { first, second, value } of getKernTablePairs(font, glyphRun.glyphIndexes, glyphRun.ignorableTypes)) {
         const firstValue = Math.floor(value / 2);
         const secondValue = value - firstValue;
         glyphRun.glyphPositions[first].xAdvance += firstValue;
@@ -1073,13 +1143,30 @@ function getMarkAdvanceZeroing(scriptTags, gsubScriptTag) {
 }
 
 /**
+ * Set the advances and the offsets of the default ignorables of a run to 0, like hb_ot_zero_width_default_ignorables
+ * of HarfBuzz, before the offsets of the attached glyphs follow the glyphs they are attached to
+ * @param {Array<{xAdvance: number, yAdvance: number, xOffset: number, yOffset: number}>} glyphPositions - updated
+ * @param {number[]} ignorableTypes - the kind of default ignorable of each glyph (see DEFAULT_IGNORABLE_TYPES in
+ * char.mjs), in the order of glyphPositions
+ */
+function zeroDefaultIgnorablePositions(glyphPositions, ignorableTypes) {
+    for (let i = 0; i < glyphPositions.length; i++) {
+        if (ignorableTypes[i] !== undefined && ignorableTypes[i] !== DEFAULT_IGNORABLE_TYPES.NOT_IGNORABLE) {
+            Object.assign(glyphPositions[i], { xAdvance: 0, yAdvance: 0, xOffset: 0, yOffset: 0 });
+        }
+    }
+}
+
+/**
  * Position the glyphs of a run of one script and one direction, like hb_ot_position_complex of HarfBuzz: the lookups
- * of the GPOS features of the script and language and of its required feature (see getPositioningLookupTables) apply
+ * of the GPOS features of the script and language and of its required feature (see getPositioningLookups) apply
  * to the glyphs in the order of the text (the reverse of the visual order in a right-to-left run), in LookupList
- * order; then, when kern is one of the features and GPOS has no kern feature for the script and language, the kern
- * table applies, in visual order. The advances of the GDEF marks are set to 0 before or after these adjustments (see
+ * order, each one skipping the default ignorables like HarfBuzz (see createIgnorableMatching in layout.mjs); then,
+ * when kern is one of the features and GPOS has no kern feature for the script and language, the kern table applies,
+ * in visual order. The advances of the GDEF marks are set to 0 before or after these adjustments (see
  * getMarkAdvanceZeroing; like HarfBuzz, without a GPOS table the x offset of a mark of a left-to-right run moves back
- * by the advance it loses), then the offsets of the attached glyphs follow the glyphs they are attached to (see
+ * by the advance it loses), the advances and the offsets of the default ignorables to 0 unless they are removed (see
+ * zeroDefaultIgnorablePositions), then the offsets of the attached glyphs follow the glyphs they are attached to (see
  * propagateAttachmentOffsets).
  * @param {Position} position
  * @param {number[]} glyphIndexes - the glyph indexes of the run, in visual order
@@ -1087,22 +1174,29 @@ function getMarkAdvanceZeroing(scriptTags, gsubScriptTag) {
  * positions of the glyphs, in visual order, in font units, updated
  * @param {{rightToLeft: boolean, script: string, language: string|undefined, featureTags: string[],
  * variation: object|undefined, markAdvanceZeroing: MarkAdvanceZeroing,
- * ligatureProperties: Array<LigatureProperties|undefined>|undefined}} runOptions - the direction of the run, its
- * OpenType script and language tags, the GPOS features to apply, the variation coordinates, when the advances of the
- * marks are set to 0 (see getMarkAdvanceZeroing), and the ligature properties of the glyphs in visual order (see
- * LigatureProperties), none if omitted
+ * ligatureProperties: Array<LigatureProperties|undefined>|undefined, shaper: string|undefined,
+ * defaultIgnorableTypes: number[]|undefined, removesDefaultIgnorables: boolean|undefined}} runOptions - the direction
+ * of the run, its OpenType script and language tags, the GPOS features to apply, the variation coordinates, when the
+ * advances of the marks are set to 0 (see getMarkAdvanceZeroing), the ligature properties of the glyphs in visual
+ * order (see LigatureProperties), none if omitted, the shaper of the run (see getScriptRunShaper in bidi.mjs), the
+ * default shaper if omitted, the kind of default ignorable of each glyph in visual order (see DEFAULT_IGNORABLE_TYPES
+ * in char.mjs), none if omitted, and whether the default ignorables are removed after the positioning (see
+ * GlyphRenderOptions.removeDefaultIgnorables), which keep their positions then
  */
 function positionGlyphRun(position, glyphIndexes, glyphPositions, runOptions) {
-    const { rightToLeft, script, language, featureTags, variation, markAdvanceZeroing } = runOptions;
+    const { rightToLeft, script, language, featureTags, variation, markAdvanceZeroing, shaper } = runOptions;
     if (!Object.values(MarkAdvanceZeroing).includes(markAdvanceZeroing)) {
         throw new Error(`Unknown mark advance zeroing: ${markAdvanceZeroing}`);
     }
     const ligatureProperties = runOptions.ligatureProperties || [];
+    const ignorableTypes = runOptions.defaultIgnorableTypes || [];
+    // one entry per glyph, so that the reversal of a right-to-left run keeps them with their glyphs
     const toTextOrder = glyphs => rightToLeft ? glyphs.slice().reverse() : glyphs;
+    const toGlyphEntries = values => glyphIndexes.map((glyphIndex, runPosition) => values[runPosition]);
     const gdef = getLayoutGdefTable(position.font);
-    const glyphRun = createGlyphRun(gdef, toTextOrder(glyphIndexes), toTextOrder(glyphPositions), {
-        // one entry per glyph, so that the reversal of a right-to-left run keeps them with their glyphs
-        ligatureProperties: toTextOrder(glyphIndexes.map((glyphIndex, runPosition) => ligatureProperties[runPosition])),
+    const glyphRun = createGlyphRun(toTextOrder(glyphIndexes), toTextOrder(glyphPositions), {
+        ligatureProperties: toTextOrder(toGlyphEntries(ligatureProperties)),
+        ignorableTypes: toTextOrder(toGlyphEntries(ignorableTypes)),
         rightToLeft,
         variation
     });
@@ -1110,12 +1204,16 @@ function positionGlyphRun(position, glyphIndexes, glyphPositions, runOptions) {
     if (markAdvanceZeroing === MarkAdvanceZeroing.BEFORE_POSITIONING) {
         zeroMarkAdvances(gdef, glyphRun, isMarkOffsetMovedBack);
     }
-    applyPositioningLookups(position, getPositioningLookupTables(position, script, language, featureTags), glyphRun, glyphIndexes.length - 1);
+    const lookups = getPositioningLookups(position, script, language, featureTags, shaper);
+    applyPositioningLookups(position, lookups, glyphRun, glyphIndexes.length - 1);
     if (featureTags.includes('kern') && !getKernFeatureTable(position, script, language)) {
-        applyKernTable(position.font, { glyphIndexes, glyphPositions });
+        applyKernTable(position.font, { glyphIndexes, glyphPositions, ignorableTypes });
     }
     if (markAdvanceZeroing === MarkAdvanceZeroing.AFTER_POSITIONING) {
         zeroMarkAdvances(gdef, glyphRun, isMarkOffsetMovedBack);
+    }
+    if (!runOptions.removesDefaultIgnorables) {
+        zeroDefaultIgnorablePositions(glyphPositions, ignorableTypes);
     }
     for (let i = 0; i < glyphIndexes.length; i++) {
         propagateAttachmentOffsets(glyphRun, i, MAX_NESTING_LEVEL);
@@ -1174,13 +1272,14 @@ Position.prototype.getGlyphRunKerningValue = function(kerningLookups, glyphIndex
         return 0;
     }
     if (!kerningLookups) {
-        const kernTablePair = getKernTablePair(this.font, glyphIndexes, position);
+        const kernTablePair = getKernTablePair(this.font, glyphIndexes, position, NO_IGNORABLE_MATCHING.isSkippedInInput);
         return kernTablePair ? kernTablePair.value : 0;
     }
     const glyphPositions = glyphIndexes.map(() => ({ xAdvance: 0, yAdvance: 0, xOffset: 0, yOffset: 0 }));
-    const glyphRun = createGlyphRun(getLayoutGdefTable(this.font), glyphIndexes, glyphPositions, { ligatureProperties: [], rightToLeft: false, variation });
+    const glyphRun = createGlyphRun(glyphIndexes, glyphPositions, { ligatureProperties: [], ignorableTypes: [], rightToLeft: false, variation });
+    const lookups = kerningLookups.map(lookupTable => ({ lookupTable, joinerFlags: AUTO_JOINER_FLAGS }));
     // a pair that starts after the glyph does not adjust it
-    applyPositioningLookups(this, kerningLookups, glyphRun, position);
+    applyPositioningLookups(this, lookups, glyphRun, position);
     return glyphRun.glyphPositions[position].xAdvance;
 };
 
@@ -1206,7 +1305,7 @@ Position.prototype.getKerningTables = function(script, language) {
         return;
     }
     const kerningTables = [];
-    for (const lookupTable of getLookupTablesOfFeatureTables(this, [featureTable])) {
+    for (const { lookupTable } of getFeatureLookups(this, [{ tag: 'kern', feature: featureTable }])) {
         if (lookupTable.lookupType === PAIR_ADJUSTMENT_LOOKUP_TYPE) {
             kerningTables.push(lookupTable);
         } else if (lookupTable.lookupType === EXTENSION_LOOKUP_TYPE) {

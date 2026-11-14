@@ -23,6 +23,14 @@ describe('tokenizer.mjs', function() {
             ]);
             assert.deepStrictEqual(getTextCharacters(''), []);
         });
+        it('gives U+FFFD REPLACEMENT CHARACTER for a lone surrogate, at the UTF-16 offset of its code unit, like HarfBuzz', function() {
+            // hb_buffer_add_utf16 (hb-utf.hh of HarfBuzz 11.3.2): a high surrogate without a low one after it, and a low
+            // surrogate without a high one before it, are the replacement code point of the buffer, U+FFFD
+            assert.deepStrictEqual(getTextCharacters('a\u{D83C}\u{1F600}\u{DE00}\u{DC0B}\u{D83C}'), [
+                { char: 'a', cluster: 0 }, { char: '\u{FFFD}', cluster: 1 }, { char: '\u{1F600}', cluster: 2 },
+                { char: '\u{FFFD}', cluster: 4 }, { char: '\u{FFFD}', cluster: 5 }, { char: '\u{FFFD}', cluster: 6 }
+            ]);
+        });
         it('maps a list of characters to tokens with their chars and clusters', function() {
             // e.g. the characters of a normalized text: U+00C0 decomposed into A and U+0300, in its cluster
             const tokens = tokenizer.tokenizeCharacters([{ char: 'A', cluster: 0 }, { char: '\u{300}', cluster: 0 }, { char: 'b', cluster: 1 }]);

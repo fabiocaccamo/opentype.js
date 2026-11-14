@@ -23,6 +23,22 @@ const ARABIC_FORM_TAGS = ['isol', 'fina', 'medi', 'init'];
 // (rtlm_mask), every glyph of a run of a right-to-left script (no character is mirrored yet)
 const GLYPH_MASK_FEATURE_TAGS = ARABIC_FORM_TAGS.concat(['rtlm']);
 
+// the features whose lookups do not skip U+200C ZERO WIDTH NON-JOINER and U+200D ZERO WIDTH JOINER where HarfBuzz
+// skips them by default, its F_MANUAL_ZWNJ and F_MANUAL_ZWJ flags (hb-ot-map.hh of HarfBuzz 11.3.2): mark and mkmk
+// in every shaper (common_features, hb-ot-shape.cc), the features of the Indic shaper (indic_features,
+// hb-ot-shaper-indic.cc)
+const MANUAL_JOINERS_FEATURE_TAGS = ['mark', 'mkmk'];
+const INDIC_MANUAL_JOINERS_FEATURE_TAGS = [
+    'nukt', 'akhn', 'rphf', 'rkrf', 'pref', 'blwf', 'abvf', 'half', 'pstf', 'vatu', 'cjct', 'init', 'pres', 'abvs',
+    'blws', 'psts', 'haln'
+];
+// the features of the Arabic shaper of HarfBuzz whose lookups do not skip U+200D ZERO WIDTH JOINER in their input,
+// its F_MANUAL_ZWJ flag (collect_features_arabic, hb-ot-shaper-arabic.cc): a zero width joiner keeps an Arabic
+// ligature from forming, like a zero width non-joiner
+const ARABIC_MANUAL_ZERO_WIDTH_JOINER_FEATURE_TAGS = [
+    'ccmp', 'locl', 'isol', 'fina', 'fin2', 'fin3', 'medi', 'med2', 'init', 'rlig', 'calt', 'liga', 'clig', 'mset'
+];
+
 /**
  * The feature values that a features option sets
  * @param {Object|Array|undefined} featuresOption feature tags with their value; the defaults when absent (or a
@@ -178,6 +194,42 @@ function getDirectionFeatureTags(scriptTags) {
     return isRightToLeftScript(scriptTags) ? RIGHT_TO_LEFT_FEATURE_TAGS : LEFT_TO_RIGHT_FEATURE_TAGS;
 }
 
+/**
+ * The joiner flags of a feature in a shaper of the fork, like the auto_zwnj and auto_zwj of a feature of HarfBuzz:
+ * whether its lookups skip U+200C ZERO WIDTH NON-JOINER in the backtrack and the lookahead of their rules, and U+200D
+ * ZERO WIDTH JOINER in their input (see createIgnorableMatching in layout.mjs). Like HarfBuzz, mark and mkmk, and with
+ * the Indic shaper the features it adds (INDIC_MANUAL_JOINERS_FEATURE_TAGS, nukt to haln), skip neither; with the
+ * Arabic shaper, ccmp, locl, the Arabic forms, rlig, calt, liga, clig and mset
+ * (ARABIC_MANUAL_ZERO_WIDTH_JOINER_FEATURE_TAGS) do not skip the zero width joiner; the other features skip both.
+ * @param {string|undefined} shaper the shaper of the run (see getScriptRunShaper in bidi.mjs), the default shaper if
+ * undefined
+ * @param {string} tag
+ * @returns {JoinerFlags}
+ */
+function getFeatureJoinerFlags(shaper, tag) {
+    const hasManualJoiners = MANUAL_JOINERS_FEATURE_TAGS.includes(tag) ||
+        (shaper === 'indic' && INDIC_MANUAL_JOINERS_FEATURE_TAGS.includes(tag));
+    const hasManualZeroWidthJoiner = hasManualJoiners ||
+        (shaper === 'arab' && ARABIC_MANUAL_ZERO_WIDTH_JOINER_FEATURE_TAGS.includes(tag));
+    return { autoZeroWidthNonJoiner: !hasManualJoiners, autoZeroWidthJoiner: !hasManualZeroWidthJoiner };
+}
+
+/**
+ * The joiner flags of a lookup of features (see getFeatureJoinerFlags), like the lookups of the map of HarfBuzz
+ * (hb_ot_map_builder_t::compile): a lookup of several features skips a joiner only when each of them does; a lookup of
+ * the required feature only, like the lookups of no feature, skips both
+ * @param {string|undefined} shaper the shaper of the run (see getScriptRunShaper in bidi.mjs)
+ * @param {string[]} featureTags the tags of the features of the lookup, but the required feature
+ * @returns {JoinerFlags}
+ */
+function getLookupJoinerFlags(shaper, featureTags) {
+    const featureJoinerFlags = featureTags.map(tag => getFeatureJoinerFlags(shaper, tag));
+    return {
+        autoZeroWidthNonJoiner: featureJoinerFlags.every(joinerFlags => joinerFlags.autoZeroWidthNonJoiner),
+        autoZeroWidthJoiner: featureJoinerFlags.every(joinerFlags => joinerFlags.autoZeroWidthJoiner)
+    };
+}
+
 export {
     RANDOM_FEATURE_TAG,
     MAX_FEATURE_VALUE,
@@ -189,5 +241,6 @@ export {
     isDefaultFeatureInMap,
     isDefaultFeatureEnabled,
     getEnabledFeatureTags,
-    getDirectionFeatureTags
+    getDirectionFeatureTags,
+    getLookupJoinerFlags
 };

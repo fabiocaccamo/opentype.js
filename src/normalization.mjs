@@ -3,8 +3,8 @@
 // characters the font has, the marks put in order, a base and a mark composed into the precomposed character of the font
 
 import {
-    getCanonicalComposition, getCanonicalDecomposition, getModifiedCombiningClass, getSpaceFallbackType, isUnicodeMark,
-    isVariationSelector, SPACE_TYPES
+    getCanonicalComposition, getCanonicalDecomposition, getDefaultIgnorableType, getModifiedCombiningClass,
+    getSpaceFallbackType, isUnicodeMark, isVariationSelector, DEFAULT_IGNORABLE_TYPES, SPACE_TYPES
 } from './char.mjs';
 import { HarfBuzzShaper } from './layout.mjs';
 
@@ -20,6 +20,9 @@ const ARABIC_MODIFIER_COMBINING_MARKS = new Set([
 // the modified combining classes the Arabic shaper of HarfBuzz gives the modifier combining marks it moves before the
 // other marks, below (220) and above (230): HB_MODIFIED_COMBINING_CLASS_CCC22 and HB_MODIFIED_COMBINING_CLASS_CCC26
 const ARABIC_MOVED_MARK_COMBINING_CLASSES = new Map([[220, 25], [230, 26]]);
+
+// the default ignorable that HarfBuzz no longer hides in a sequence of marks it did not keep from being reordered
+const COMBINING_GRAPHEME_JOINER = '\u{34F}';
 
 // the characters the Indic shaper of HarfBuzz does not decompose (decompose_indic, hb-ot-shaper-indic.cc): U+0931
 // DEVANAGARI LETTER RRA, U+09DC BENGALI LETTER RRA, U+09DD BENGALI LETTER RHA, U+0B94 TAMIL LETTER AU
@@ -95,6 +98,9 @@ const NormalizationMode = Object.freeze({
  * getSpaceFallbackType in char.mjs), NOT_SPACE for the other glyphs
  * @property {number} combiningClass the modified combining class of the character (see getModifiedCombiningClass in
  * char.mjs), the one the Arabic shaper gives a mark it moves
+ * @property {number} defaultIgnorableType the kind of default ignorable of the character (see getDefaultIgnorableType
+ * in char.mjs), which tells the lookups that skip its glyph; a U+034F COMBINING GRAPHEME JOINER that HarfBuzz unhides is
+ * IGNORABLE (see unhideCombiningGraphemeJoiners)
  */
 
 /**
@@ -106,7 +112,14 @@ const NormalizationMode = Object.freeze({
  * @returns {NormalizedCharacter}
  */
 function createNormalizedCharacter(char, cluster, glyphIndex, spaceFallbackType) {
-    return { char, cluster, glyphIndex, spaceFallbackType, combiningClass: getModifiedCombiningClass(char) };
+    return {
+        char,
+        cluster,
+        glyphIndex,
+        spaceFallbackType,
+        combiningClass: getModifiedCombiningClass(char),
+        defaultIgnorableType: getDefaultIgnorableType(char)
+    };
 }
 
 /**
@@ -298,12 +311,97 @@ function decomposeCharacter(font, character, shortest, decompose, normalizedChar
 }
 
 /**
+ * Check if a code point is in the ranges of a default UVS table of the cmap format 14, sorted by their first code
+ * point, with a binary search like HarfBuzz (DefaultUVS bfind)
+ * @param {Array<{startUnicodeValue: number, additionalCount: number}>} ranges
+ * @param {number} codePoint
+ * @returns {boolean}
+ */
+function isInDefaultVariationRanges(ranges, codePoint) {
+    let low = 0;
+    let high = ranges.length - 1;
+    while (low <= high) {
+        const middle = (low + high) >> 1;
+        const range = ranges[middle];
+        if (codePoint < range.startUnicodeValue) {
+            high = middle - 1;
+        } else if (codePoint > range.startUnicodeValue + range.additionalCount) {
+            low = middle + 1;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * The glyph of a variation sequence in the cmap format 14, like get_variation_glyph of HarfBuzz: the glyph of the
+ * character (see Font.charToGlyphIndex) for a default variation sequence (in the default UVS table of the selector),
+ * the glyph of a non default variation sequence, otherwise none
+ * @param {Font} font
+ * @param {string} char
+ * @param {string} selector the variation selector after the character (see isVariationSelector in char.mjs)
+ * @returns {number} 0 when the cmap has no such variation sequence, or the font no glyph for its default one
+ */
+function getVariationGlyphIndex(font, char, selector) {
+    const cmap = font.tables.cmap;
+    const selectorRecord = cmap && cmap.varSelectorList && cmap.varSelectorList[selector.codePointAt(0)];
+    if (!selectorRecord) {
+        return 0;
+    }
+    const codePoint = char.codePointAt(0);
+    if (selectorRecord.defaultUVS && isInDefaultVariationRanges(selectorRecord.defaultUVS.ranges, codePoint)) {
+        const glyphIndex = font.charToGlyphIndex(char);
+        return isFontGlyph(glyphIndex) ? glyphIndex : 0;
+    }
+    const mapping = selectorRecord.nonDefaultUVS && selectorRecord.nonDefaultUVS.uvsMappings[codePoint];
+    return mapping ? mapping.glyphID : 0;
+}
+
+/**
+ * Map the characters of a cluster with a variation selector (see isVariationSelector in char.mjs) to their glyphs,
+ * like handle_variation_selector_cluster of HarfBuzz, without decomposition nor the fallbacks of the spaces: a
+ * character followed by a selector takes the glyph of their variation sequence (see getVariationGlyphIndex) and the
+ * selector is consumed, in the cluster of the character; otherwise the character and the selector keep the glyphs of
+ * the cmap, the selector a glyph of its own (a default ignorable, which Font.shape hides), and so do the selectors after
+ * them
+ * @param {Font} font
+ * @param {TextCharacter[]} clusterCharacters
+ * @param {NormalizedCharacter[]} normalizedCharacters the characters the cluster is added to
+ */
+function mapVariationSelectorCluster(font, clusterCharacters, normalizedCharacters) {
+    const addCmapCharacter = ({ char, cluster }) => {
+        normalizedCharacters.push(createNormalizedCharacter(char, cluster, font.charToGlyphIndex(char), SPACE_TYPES.NOT_SPACE));
+    };
+    let index = 0;
+    while (index < clusterCharacters.length) {
+        const character = clusterCharacters[index];
+        const selector = clusterCharacters[index + 1];
+        if (!selector || !isVariationSelector(selector.char)) {
+            addCmapCharacter(character);
+            index++;
+            continue;
+        }
+        const variationGlyphIndex = getVariationGlyphIndex(font, character.char, selector.char);
+        if (variationGlyphIndex) {
+            normalizedCharacters.push(createNormalizedCharacter(character.char, character.cluster, variationGlyphIndex, SPACE_TYPES.NOT_SPACE));
+        } else {
+            addCmapCharacter(character);
+            addCmapCharacter(selector);
+        }
+        index += 2;
+        while (index < clusterCharacters.length && isVariationSelector(clusterCharacters[index].char)) {
+            addCmapCharacter(clusterCharacters[index]);
+            index++;
+        }
+    }
+}
+
+/**
  * Map the characters of a cluster of a base and its marks to their glyphs, like decompose_multi_char_cluster of
  * HarfBuzz: each character decomposed (see decomposeCharacter), not the shortest way but in the NONE mode, so that the
- * marks of the precomposed characters can be put in order with the marks after them; in a cluster with a variation
- * selector (see isVariationSelector in char.mjs), like handle_variation_selector_cluster, each character with the
- * glyph of the cmap, without decomposition nor the fallbacks of the spaces (the glyph of a variation sequence is
- * applied later, see unicodeVariationSequence in features/unicode/variationSequences.mjs)
+ * marks of the precomposed characters can be put in order with the marks after them; a cluster with a variation
+ * selector with the glyphs of the cmap and of its variation sequences (see mapVariationSelectorCluster)
  * @param {Font} font
  * @param {TextCharacter[]} clusterCharacters
  * @param {boolean} shortest whether to decompose the characters the shortest way, the always_short_circuit of HarfBuzz
@@ -312,9 +410,7 @@ function decomposeCharacter(font, character, shortest, decompose, normalizedChar
  */
 function decomposeMarkCluster(font, clusterCharacters, shortest, decompose, normalizedCharacters) {
     if (clusterCharacters.some(character => isVariationSelector(character.char))) {
-        for (const { char, cluster } of clusterCharacters) {
-            normalizedCharacters.push(createNormalizedCharacter(char, cluster, font.charToGlyphIndex(char), SPACE_TYPES.NOT_SPACE));
-        }
+        mapVariationSelectorCluster(font, clusterCharacters, normalizedCharacters);
         return;
     }
     for (const character of clusterCharacters) {
@@ -490,6 +586,23 @@ function reorderMarks(characters, reorderShaperMarks) {
 }
 
 /**
+ * Unhide each U+034F COMBINING GRAPHEME JOINER that kept no mark from being reordered, like HarfBuzz after its reorder
+ * round (https://github.com/harfbuzz/harfbuzz/issues/554): one between two characters, the one after it of the modified
+ * combining class 0 or of a class not lower than the one before it, becomes a default ignorable that the GSUB lookups
+ * skip (IGNORABLE, see DEFAULT_IGNORABLE_TYPES in char.mjs)
+ * @param {NormalizedCharacter[]} characters
+ */
+function unhideCombiningGraphemeJoiners(characters) {
+    for (let i = 1; i + 1 < characters.length; i++) {
+        const nextCombiningClass = characters[i + 1].combiningClass;
+        if (characters[i].char === COMBINING_GRAPHEME_JOINER &&
+            (nextCombiningClass === 0 || characters[i - 1].combiningClass <= nextCombiningClass)) {
+            characters[i].defaultIgnorableType = DEFAULT_IGNORABLE_TYPES.IGNORABLE;
+        }
+    }
+}
+
+/**
  * Merge the clusters of a composed character and the mark composed with it, like merge_out_clusters of HarfBuzz
  * (from the composed character to the mark, which is the last of the composed characters): the characters of the
  * range, and the characters still to compose in the cluster of the mark, take the cluster of the composed character,
@@ -551,7 +664,8 @@ function composeCharacters(font, characters, compose) {
 /**
  * Normalize the characters of a script run and map them to their glyphs, like _hb_ot_shape_normalize of HarfBuzz with
  * the shaper of the run (see getShaperNormalization): decompose (see decomposeCharacters), then, when the text has
- * marks, put the marks in order (see reorderMarks) and compose (see composeCharacters), but in the NONE mode of the
+ * marks, put the marks in order (see reorderMarks), unhide the combining grapheme joiners that kept no mark from being
+ * reordered (see unhideCombiningGraphemeJoiners) and compose (see composeCharacters), but in the NONE mode of the
  * Hangul shaper. A text without marks only takes the glyphs of the cmap (but in the COMPOSED_DIACRITICS_NO_SHORT_CIRCUIT
  * mode), the decompositions of the characters the font has not and the fallbacks of the spaces and of U+2011.
  * Not yet the preprocessing of the Thai shaper of HarfBuzz (the decomposition of sara am, preprocess_text_thai) nor of
@@ -559,8 +673,7 @@ function composeCharacters(font, characters, compose) {
  * preprocess_text_hangul), the U+25CC DOTTED CIRCLE its Indic and USE shapers insert between an independent vowel and
  * a vowel sign that must not follow it (preprocess_text_vowel_constraints), the reorder_marks hook of its Hebrew shaper
  * (a meteg or a mark below after a patah or a qamats), the decomposition of the Khmer split vowel signs of its Khmer
- * shaper (see getShaperNormalization), the visibility of U+034F COMBINING GRAPHEME JOINER, nor the glyph of a variation
- * sequence before GSUB.
+ * shaper (see getShaperNormalization).
  * @param {Font} font
  * @param {TextCharacter[]} characters the characters of the run, in the order of the text
  * @param {HarfBuzzShaper} shaper the shaper of HarfBuzz of the run (see getHarfBuzzShaper in layout.mjs)
@@ -575,6 +688,7 @@ function normalizeCharacters(font, characters, shaper, hasMarkFeature) {
         return normalizedCharacters;
     }
     reorderMarks(normalizedCharacters, normalization.reorderMarks);
+    unhideCombiningGraphemeJoiners(normalizedCharacters);
     if (normalization.mode === NormalizationMode.NONE) {
         return normalizedCharacters;
     }

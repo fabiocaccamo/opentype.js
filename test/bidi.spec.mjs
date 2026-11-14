@@ -1,8 +1,8 @@
 import assert from 'assert';
-import Bidi from '../src/bidi.mjs';
+import Bidi, { getClusterRanges } from '../src/bidi.mjs';
 import FeatureQuery from '../src/features/featureQuery.mjs';
 import { parse } from '../src/opentype.mjs';
-import { SPACE_TYPES } from '../src/char.mjs';
+import { DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from '../src/char.mjs';
 import { normalizeCharacters } from '../src/normalization.mjs';
 import { HarfBuzzShaper } from '../src/layout.mjs';
 import { readFileSync } from 'fs';
@@ -18,6 +18,17 @@ import {
     createMultipleLookup
 } from './lookup-flags-font.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
+
+/**
+ * The glyph indexes of a text in visual order, before Font.shape hides the default ignorables (see
+ * Bidi.getTextGlyphClusters)
+ * @param {Bidi} bidi
+ * @param {string} text
+ * @returns {number[]}
+ */
+function getTextGlyphIndexes(bidi, text) {
+    return bidi.getTextGlyphClusters(text).map(cluster => cluster.index);
+}
 
 /**
  * The clusters of a text in visual order, each one with the start and the end of its characters and its glyphs in
@@ -60,7 +71,7 @@ describe('bidi.mjs', function() {
             tags: ['init', 'medi', 'fina', 'rlig']
         }];
         bidiScheherazade.applyFeatures(arabicFont, requiredArabicFeatures);
-        bidiScheherazade.getTextGlyphs(''); // initialize bidi.
+        getTextGlyphIndexes(bidiScheherazade, ''); // initialize bidi.
         arabicTokenizer = bidiScheherazade.tokenizer;
         /**
          * latin
@@ -109,7 +120,7 @@ describe('bidi.mjs', function() {
                 return characters.map(({ char, cluster }) => ({ char, cluster, glyphIndex: 0, spaceFallbackType: SPACE_TYPES.NOT_SPACE }));
             });
             bidi.applyFeatures(latinFont, [], { script: 'arab' });
-            assert.deepStrictEqual(bidi.getTextGlyphs('ab'), [0, 0]);
+            assert.deepStrictEqual(getTextGlyphIndexes(bidi, 'ab'), [0, 0]);
             assert.deepStrictEqual(runScriptTags, [['arab']]);
         });
     });
@@ -273,7 +284,7 @@ describe('bidi.mjs', function() {
     });
     describe('applyFeatures', function () {
         it('should apply arabic presentation forms', function() {
-            bidiScheherazade.getTextGlyphs('Hello السلام عليكم');
+            getTextGlyphIndexes(bidiScheherazade, 'Hello السلام عليكم');
             const arabicRun = bidiScheherazade.scriptRuns.find(run => run.scriptTags.includes('arab'));
             const forms = arabicRun.tokens.map(token => ['init', 'medi', 'fina'].find(tag => token.state[tag]) || null);
             // in the order of the text, isol not registered: hb-shape --shapers=ot --cluster-level=1
@@ -283,29 +294,48 @@ describe('bidi.mjs', function() {
             assert.deepEqual(forms, [null, 'init', 'medi', 'medi', 'fina', null, null, 'init', 'medi', 'medi', 'medi', 'fina']);
         });
         it('should apply arabic required letter ligature', function () {
-            let glyphIndexes = bidiScheherazade.getTextGlyphs('لا'); // Arabic word 'لا' : 'no'
+            let glyphIndexes = getTextGlyphIndexes(bidiScheherazade, 'لا'); // Arabic word 'لا' : 'no'
             assert.deepEqual(glyphIndexes, [1341, 1330]);
         });
         it('should apply arabic required composition ligature', function () {
             // beh, fatha, shadda: the marks of the Inherited script take the Arabic script of the beh
             // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 Scheherazade-Bold.ttf -u 0628,064E,0651
             // [1311=1@560,-322+0|373=0+1505]
-            let glyphIndexes = bidiScheherazade.getTextGlyphs('\u{628}\u{64E}\u{651}');
+            let glyphIndexes = getTextGlyphIndexes(bidiScheherazade, '\u{628}\u{64E}\u{651}');
             assert.deepEqual(glyphIndexes, [1311, 373]);
         });
         it('does not apply the arabic features to a text of marks of no script, like HarfBuzz', function () {
             // fatha, shadda: a text of the Inherited script only takes the DFLT script, which falls back to latn
             // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 Scheherazade-Bold.ttf -u 064E,0651
             // [1081=0+0|1075=0@30,370+0]; with --script=arab [1311=0+0]
-            assert.deepStrictEqual(bidiScheherazade.getTextGlyphs('\u{64E}\u{651}'), [1081, 1075]);
+            assert.deepStrictEqual(getTextGlyphIndexes(bidiScheherazade, '\u{64E}\u{651}'), [1081, 1075]);
         });
         it('should apply latin ligature', function () {
-            let glyphIndexes = bidiFira.getTextGlyphs('fi'); // fi => ﬁ
+            let glyphIndexes = getTextGlyphIndexes(bidiFira, 'fi'); // fi => ﬁ
             assert.deepEqual(glyphIndexes, [1145]);
         });
     });
 
+    describe('getClusterRanges', function() {
+        it('gives each cluster the UTF-16 range from its start to the start of the next cluster of the text, like the monotone clusters of HarfBuzz', function() {
+            // the first cluster from the start of the text, the last one to its end, in any order of the clusters
+            assert.deepStrictEqual(getClusterRanges([3, 1, 5, 3], 7), new Map([[1, { start: 0, end: 3 }], [3, { start: 3, end: 5 }], [5, { start: 5, end: 7 }]]));
+            assert.deepStrictEqual(getClusterRanges([], 0), new Map());
+        });
+    });
+
     describe('getTextGlyphClusters', function() {
+        it('gives each glyph the cluster of its token and the kind of default ignorable of its glyph', function() {
+            // TestDefaultIgnorables.ttf (see font.spec.mjs): f, the zero width non-joiner (.notdef), i; f, the zero width
+            // joiner skipped by the ligature f_i (12), in its cluster
+            const ignorablesFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf');
+            const { NOT_IGNORABLE, ZERO_WIDTH_NON_JOINER, ZERO_WIDTH_JOINER } = DEFAULT_IGNORABLE_TYPES;
+            const describeClusters = text => ignorablesFont._createBidi().getTextGlyphClusters(text)
+                .map(({ index, cluster, start, end, defaultIgnorableType }) => [index, cluster, start, end, defaultIgnorableType]);
+            assert.deepStrictEqual(describeClusters('f\u{200C}i'), [[4, 0, 0, 1, NOT_IGNORABLE], [0, 1, 1, 2, ZERO_WIDTH_NON_JOINER], [5, 2, 2, 3, NOT_IGNORABLE]]);
+            assert.deepStrictEqual(describeClusters('f\u{200D}i'), [[12, 0, 0, 3, NOT_IGNORABLE], [8, 0, 0, 3, ZERO_WIDTH_JOINER]]);
+        });
+
         it('gives the direction of the run of each glyph', function() {
             // 'Hi ' then the arabic sentence of beh, fatha, alef, in visual order: H, i, space, alef, fatha, beh
             const clusters = bidiScheherazade.getTextGlyphClusters('Hi \u{628}\u{64E}\u{627}');
@@ -952,8 +982,8 @@ describe('bidi.mjs', function() {
             // the zero width joiner has no glyph in the font, so HarfBuzz removes it: lam, zero width joiner:
             // hb-shape --no-glyph-names --cluster-level=1 --features=-kern LookupFlagsArabicJoining.ttf -u 0644,200D [25=0+500]
             assert.strictEqual(glyphOfChar('\u{644}\u{200D}', 0), glyphIndexes['lam.init']);
-            // zero width joiner, dal: -u 200D,062F [17=0+500]
-            assert.strictEqual(glyphOfChar('\u{200D}\u{62F}', 1), dalAlternate);
+            // zero width joiner, dal: -u 200D,062F [17=0+500], the removed zero width joiner in the cluster of the dal
+            assert.strictEqual(glyphOfChar('\u{200D}\u{62F}', 0), dalAlternate);
             // lam, zero width non-joiner, dal: -u 0644,200C,062F [15=1+500|18=0+500]
             assert.deepStrictEqual([glyphOfChar('\u{644}\u{200C}\u{62F}', 0), glyphOfChar('\u{644}\u{200C}\u{62F}', 2)], [lam, dal]);
         });
@@ -1241,7 +1271,7 @@ describe('bidi.mjs', function() {
 
         it('puts a tatweel between a Latin word and an Arabic letter in the run of the Arabic letter, like Chromium', function() {
             bidi.applyFeatures(font, font.defaultRenderOptions.features);
-            bidi.getTextGlyphs('a \u{640}\u{633}');
+            getTextGlyphIndexes(bidi, 'a \u{640}\u{633}');
             assert.deepStrictEqual(runTexts(), ['a ', '\u{640}\u{633}']);
             // the Arabic run: --script=arab -u 0640,0633 [seen.fina=1+500|tatweel.init=0+500]
             assert.deepStrictEqual(glyphNames('a \u{640}\u{633}'), ['a', 'space', 'seen.fina', 'tatweel.init']);
@@ -1249,7 +1279,7 @@ describe('bidi.mjs', function() {
 
         it('keeps an Arabic haraka after a Latin letter in the run of its base, and after a tatweel in the Arabic run, like the browsers', function() {
             bidi.applyFeatures(font, font.defaultRenderOptions.features);
-            bidi.getTextGlyphs('a\u{64E}\u{633}\u{62F}');
+            getTextGlyphIndexes(bidi, 'a\u{64E}\u{633}\u{62F}');
             assert.deepStrictEqual(runTexts(), ['a\u{64E}', '\u{633}\u{62F}']);
             // after a tatweel, which joins the seen: the Arabic run --script=arab -u 0640,064E,0633
             // [seen.fina=2+500|.notdef=1+500|tatweel.init=0+500]
@@ -1373,7 +1403,7 @@ describe('bidi.mjs', function() {
             // (--features=-rvrn,-ccmp,...,-mset -u 0633,062F [dal=1+500|seen=0+500]); the Latin run: --script=latn
             // -u 0061,0062,0020 [a_b=0+500|space=2+500]
             bidi.applyFeatures(font, [{ script: 'latn', tags: ['liga'] }]);
-            const names = bidi.getTextGlyphs('ab \u{633}\u{62F}').map(index => font.glyphs.get(index).name);
+            const names = getTextGlyphIndexes(bidi, 'ab \u{633}\u{62F}').map(index => font.glyphs.get(index).name);
             assert.deepStrictEqual(names, ['a_b', 'space', 'dal', 'seen']);
         });
 
@@ -1431,7 +1461,7 @@ describe('bidi.mjs', function() {
 
         it('shapes an empty text with the script option as one script run without glyphs', function() {
             bidi.applyFeatures(font, font.defaultRenderOptions.features, { script: 'arab' });
-            assert.deepStrictEqual(bidi.getTextGlyphs(''), []);
+            assert.deepStrictEqual(getTextGlyphIndexes(bidi, ''), []);
             assert.deepStrictEqual(runTexts(), ['']);
             assert.deepStrictEqual(glyphNames('', { script: 'arab' }), []);
         });
@@ -1856,7 +1886,12 @@ describe('bidi.mjs', function() {
             const font = loadSync('./test/fonts/TestCMAP14.otf');
             // the string '芦芦󠄀芦󠄁芦󠄂≩≩︀', containing (invisible) variation selectors after some of the characters
             const string = [33446, 33446, 917760, 33446, 917761, 33446, 917762, 8809, 8809, 65024].map(p => String.fromCodePoint(p)).join('');
-            assert.deepEqual(font.stringToGlyphIndexes(string), [1, 1, 2, 1, 4, 3]);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables TestCMAP14.otf -u
+            // 82A6,82A6,E0100,82A6,E0101,82A6,E0102,2269,2269,FE00: [1=0+1000|1=1+1000|2=3+1000|1=5+1000|4=7+723|3=8+723],
+            // without --remove-default-ignorables the selector U+E0102, which has no sequence with U+82A6, is the space
+            // glyph 5: [...|1=5+1000|5=6+0|4=7+723|3=8+723]
+            assert.deepEqual(font.stringToGlyphIndexes(string, { removeDefaultIgnorables: true }), [1, 1, 2, 1, 4, 3]);
+            assert.deepEqual(font.stringToGlyphIndexes(string), [1, 1, 2, 1, 5, 4, 3]);
         });
     });
 
@@ -1880,17 +1915,17 @@ describe('bidi.mjs', function() {
 
         describe('thai features', function () {
             it('should apply glyph composition', () => {
-                let glyphIndexes = bidiThai.getTextGlyphs('่ํ');
+                let glyphIndexes = getTextGlyphIndexes(bidiThai, '่ํ');
                 assert.deepEqual(glyphIndexes, [451]);
             });
 
             it('should apply glyph ligatures', () => {
-                let glyphIndexes = bidiThai.getTextGlyphs('ฤๅ');
+                let glyphIndexes = getTextGlyphIndexes(bidiThai, 'ฤๅ');
                 assert.deepEqual(glyphIndexes, [459]);
             });
 
             it('should apply glyph required ligatures', () => {
-                let glyphIndexes = bidiThai.getTextGlyphs('ลล');
+                let glyphIndexes = getTextGlyphIndexes(bidiThai, 'ลล');
                 assert.deepEqual(glyphIndexes, [352]);
             });
 
@@ -1910,7 +1945,7 @@ describe('bidi.mjs', function() {
                 () => {
                     // hb-shape --no-glyph-names --cluster-level=1 NotoSansThai-Medium-Testing-v1.ttf -u 0E19,0E49,0E33
                     // [341=0+623|389=1+0|444=1@-29,0+0|366=1+415]
-                    assert.deepStrictEqual(bidiThai.getTextGlyphs('\u{E19}\u{E49}\u{E33}'), [341, 389, 444, 366]);
+                    assert.deepStrictEqual(getTextGlyphIndexes(bidiThai, '\u{E19}\u{E49}\u{E33}'), [341, 389, 444, 366]);
                 });
         });
 

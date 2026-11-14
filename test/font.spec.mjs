@@ -1474,7 +1474,7 @@ describe('font.mjs', function() {
         });
 
         itFailsUntilFixed('applies the GPOS feature variations at the variation of the options, like HarfBuzz',
-            'getPositioningLookupTables and getRequiredFeatureTable (src/position.mjs): the feature tables of the GPOS ' +
+            'getPositioningLookups and getRequiredFeatureTable (src/position.mjs): the feature tables of the GPOS ' +
             'FeatureVariations (tables.gpos.variations) are never substituted, Layout.getFeatureTable gives the one of the ' +
             'FeatureList at every variation; FeatureQuery.getFeatureVariationSubstitutions selects them for GSUB only',
             function() {
@@ -1589,15 +1589,10 @@ describe('font.mjs', function() {
             assert.strictEqual(formatShape(lastKernFont.shape('AV')), '[2=0@10,20+570|4=1@-5,15+575]');
         });
 
-        itFailsUntilFixed('applies a GPOS pair across a default ignorable, hidden with an advance of 0, like HarfBuzz',
-            'Font.shape (src/font.mjs) and findNextNotIgnoredGlyphPosition (src/layout.mjs): the zero width joiner U+200D, ' +
-            'which the font has not, is drawn as .notdef with its advance, and the pair A V skips only the glyphs the GDEF ' +
-            'classes and the lookupFlag ignore; HarfBuzz skips the default ignorables in the GPOS pairs (ignore_zwj) and ' +
-            'hides them with the space glyph and an advance of 0 (hb_ot_hide_default_ignorables)',
-            function() {
-                // -u 0041,200D,0056: [2=0@10,20+570|1=1+0|4=2@-5,15+575], the same with U+00AD, U+200C, U+034F and U+2060
-                assert.strictEqual(formatShape(pairFont.shape('A\u{200D}V')), '[2=0@10,20+570|1=1+0|4=2@-5,15+575]');
-            });
+        it('applies a GPOS pair across a default ignorable, hidden with an advance of 0, like HarfBuzz', function() {
+            // -u 0041,200D,0056: [2=0@10,20+570|1=1+0|4=2@-5,15+575], the same with U+00AD, U+200C, U+034F and U+2060
+            assert.strictEqual(formatShape(pairFont.shape('A\u{200D}V')), '[2=0@10,20+570|1=1+0|4=2@-5,15+575]');
+        });
 
         describe('a GDEF mark with an advance width', function() {
             // TestPairPositioning.ttf with an advance of 100 for acutecomb, a GDEF mark, in hmtx (fontTools)
@@ -1753,15 +1748,10 @@ describe('font.mjs', function() {
                 assert.strictEqual(kernTableFont.getAdvanceWidth('A\u{300}V', 1000), 1000);
             });
 
-            itFailsUntilFixed('kerns a pair of the kern table across a default ignorable, which HarfBuzz deletes without a space glyph',
-                'getKernTablePair (src/position.mjs) and Font.shape (src/font.mjs): the zero width joiner U+200D, which the font ' +
-                'has not, is drawn as .notdef with its advance and ends the pair a b; HarfBuzz skips the default ignorables in ' +
-                'the pairs of the kern table (hb_kern_machine_t) and deletes them in a font without a space glyph ' +
-                '(hb_ot_hide_default_ignorables)',
-                function() {
-                    // -u 0061,200D,0062: [1=0+470|2=2@-30,0+470]
-                    assert.deepStrictEqual(shapeKernTableText('a\u{200D}b'), [[glyphIndexes.a, 470, 0, 0], [glyphIndexes.b, 470, -30, 0]]);
-                });
+            it('kerns a pair of the kern table across a default ignorable, which HarfBuzz deletes without a space glyph', function() {
+                // -u 0061,200D,0062: [1=0+470|2=2@-30,0+470]
+                assert.deepStrictEqual(shapeKernTableText('a\u{200D}b'), [[glyphIndexes.a, 470, 0, 0], [glyphIndexes.b, 470, -30, 0]]);
+            });
 
             it('splits the value of a pair of a right-to-left run in visual order, like HarfBuzz', function() {
                 // TestPairPositioning.ttf without GPOS, with the kern table alef reh -101, reh alef -50 and reh dal -21
@@ -1845,6 +1835,320 @@ describe('font.mjs', function() {
             }
             assert.deepStrictEqual(warnings, []);
         });
+
+        describe('the default ignorables and the variation selectors', function() {
+            // TestDefaultIgnorables.ttf, built by test/generate-default-ignorables-font.py: glyphs 1 space, 2 a, 3 b, 4 f, 5 i,
+            // 6 x, 7 uni00AD, 8 uni200D, 9 acutecomb, 10 alef, 11 dal, 12 f_i, 13 a_zwj_b, 14 dal_alef, 15 x.alt, 16 a.alt,
+            // 18 zwj.visible, 19 a_b, 20 beh, 21 beh_beh, 22 madda (U+0653, a GDEF mark); no glyph for U+034F, U+061C, U+0622,
+            // U+180B, U+200C, U+2060 nor the variation selectors. GSUB liga: sub f i by f_i, sub a uni200D b by a_zwj_b, sub dal alef by dal_alef; calt: sub x' b by
+            // x.alt; ss01: sub uni200D by zwj.visible; ss02: sub a' lookup ALT_A lookup LIGA_ALT_A_B (sub a by a.alt, sub a.alt
+            // b by a_b); ss03: the same with uni200D' lookup ZWJ_VISIBLE (sub uni200D by zwj.visible) b', whose record applies
+            // first; medi: sub beh beh by beh_beh. GPOS kern: pos a b -50; mark: acutecomb on a. cmap format 14: b U+FE00 (default), a U+FE01 (a.alt),
+            // a U+180B (a.fvs, which HarfBuzz never reads). The references, run in test/fonts:
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 TestDefaultIgnorables.ttf -u <code points>
+            let ignorablesFont;
+
+            before(function() {
+                ignorablesFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf');
+            });
+
+            function assertShapes(font, expectedShapes, options) {
+                for (const [text, expectedShape] of Object.entries(expectedShapes)) {
+                    const codePoints = Array.from(text, char => char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0'));
+                    assert.strictEqual(formatShape(font.shape(text, options)), expectedShape, codePoints.join());
+                }
+            }
+
+            it('hides the default ignorables with the space glyph and an advance of 0, in their own clusters, like HarfBuzz', function() {
+                assertShapes(ignorablesFont, {
+                    // the soft hyphen, which the font has: -u 0061,00AD,0062: [2=0+450|1=1+0|3=2+500], kerned across it
+                    'a\u{AD}b': '[2=0+450|1=1+0|3=2+500]',
+                    // a default ignorable the font has not: -u 0061,2060,0062: [2=0+450|1=1+0|3=2+500]
+                    'a\u{2060}b': '[2=0+450|1=1+0|3=2+500]',
+                    // a selector without a sequence for a: -u 0061,FE02: [2=0+500|1=1+0]
+                    'a\u{FE02}': '[2=0+500|1=1+0]',
+                    // a selector at the start of the text: -u FE01,0061: [1=0+0|2=1+500]
+                    '\u{FE01}a': '[1=0+0|2=1+500]',
+                    // a selector after a sequence: -u 0061,FE01,FE01: [16=0+520|1=2+0]
+                    'a\u{FE01}\u{FE01}': '[16=0+520|1=2+0]',
+                    // in an Arabic run, after the ligature of the run in reverse order: -u 062F,061C,0627: [1=0+0|14=0+650]
+                    '\u{62F}\u{61C}\u{627}': '[1=0+0|14=0+650]',
+                    // -u 0627,061C,062F: [11=2+400|1=1+0|10=0+300]
+                    '\u{627}\u{61C}\u{62F}': '[11=2+400|1=1+0|10=0+300]'
+                });
+            });
+
+            it('maps a character and a variation selector to the glyph of their variation sequence before GSUB, like HarfBuzz', function() {
+                // -u 0062,FE00: [3=0+500], the default sequence; -u 0061,FE01: [16=0+520]; -u 0061,180B: [2=0+500|1=1+0],
+                // not a.fvs: HarfBuzz leaves the Mongolian free variation selectors to the GSUB of the font
+                assertShapes(ignorablesFont, { 'b\u{FE00}': '[3=0+500]', 'a\u{FE01}': '[16=0+520]', 'a\u{180B}': '[2=0+500|1=1+0]' });
+            });
+
+            it('skips the default ignorables in the input of a ligature but the zero width non-joiner and the hidden ones, like HarfBuzz', function() {
+                assertShapes(ignorablesFont, {
+                    // -u 0066,200D,0069: [12=0+550|1=0+0], the hidden joiner in the cluster of the ligature
+                    'f\u{200D}i': '[12=0+550|1=0+0]',
+                    // -u 0066,00AD,0069: [12=0+550|1=0+0]
+                    'f\u{AD}i': '[12=0+550|1=0+0]',
+                    // -u 0066,200C,0069: [4=0+300|1=1+0|5=2+250]
+                    'f\u{200C}i': '[4=0+300|1=1+0|5=2+250]',
+                    // -u 0066,180B,0069: [4=0+300|1=1+0|5=2+250], a hidden default ignorable
+                    'f\u{180B}i': '[4=0+300|1=1+0|5=2+250]',
+                    // -u 0066,034F,0069: [12=0+550|1=0+0], the combining grapheme joiner unhidden before i (see normalization.mjs)
+                    'f\u{34F}i': '[12=0+550|1=0+0]',
+                    // -u 0061,200D,0062: [13=0+900], the zero width joiner matched as a component
+                    'a\u{200D}b': '[13=0+900]'
+                });
+            });
+
+            it('skips the zero width joiner and non-joiner in the lookahead of a contextual rule, not the hidden default ignorables, like HarfBuzz', function() {
+                assertShapes(ignorablesFont, {
+                    // -u 0078,200C,0062: [15=0+450|1=1+0|3=2+500], the same with U+200D
+                    'x\u{200C}b': '[15=0+450|1=1+0|3=2+500]',
+                    'x\u{200D}b': '[15=0+450|1=1+0|3=2+500]',
+                    // -u 0078,180B,0062: [6=0+500|1=1+0|3=2+500]
+                    'x\u{180B}b': '[6=0+500|1=1+0|3=2+500]'
+                });
+            });
+
+            it('keeps a zero width joiner from forming the ligatures of the Arabic shaper, like HarfBuzz', function() {
+                // -u 062F,0627: [14=0+650]; -u 062F,200D,0627: [10=2+300|1=1+0|11=0+400], no dal_alef: the Arabic shaper does not
+                // skip it in the input of liga (F_MANUAL_ZWJ); the glyph and the advance of each cluster, whatever the order of
+                // the glyphs (see the known failure below)
+                assert.strictEqual(formatShape(ignorablesFont.shape('\u{62F}\u{627}')), '[14=0+650]');
+                const clusterGlyphs = ignorablesFont.shape('\u{62F}\u{200D}\u{627}')
+                    .map(({ glyph, start, xAdvance }) => [start, glyph.index, xAdvance])
+                    .sort(([startA], [startB]) => startA - startB);
+                assert.deepStrictEqual(clusterGlyphs, [[0, 11, 400], [1, 1, 0], [2, 10, 300]]);
+            });
+
+            itFailsUntilFixed('lays an Arabic word with a zero width joiner out from right to left, like HarfBuzz',
+                'arabicSentenceEndCheck (src/features/arab/contextCheck/arabicSentence.mjs): a default ignorable ends the arabic ' +
+                'sentence, so the dal and the alef are two right-to-left runs laid out from left to right (point 26, the bidi algorithm)',
+                function() {
+                    // -u 062F,200D,0627: [10=2+300|1=1+0|11=0+400]
+                    assert.strictEqual(formatShape(ignorablesFont.shape('\u{62F}\u{200D}\u{627}')), '[10=2+300|1=1+0|11=0+400]');
+                });
+
+            it('skips the default ignorables in the GPOS pairs and the mark attachments, but the zero width joiner before a mark, like HarfBuzz', function() {
+                assertShapes(ignorablesFont, {
+                    // -u 0061,200C,0062: [2=0+450|1=1+0|3=2+500], the same with U+034F and U+180B
+                    'a\u{200C}b': '[2=0+450|1=1+0|3=2+500]',
+                    'a\u{34F}b': '[2=0+450|1=1+0|3=2+500]',
+                    'a\u{180B}b': '[2=0+450|1=1+0|3=2+500]',
+                    // -u 0061,200C,0301: [2=0+500|1=1+0|9=2@-250,0+0], the same with U+00AD and U+034F
+                    'a\u{200C}\u{301}': '[2=0+500|1=1+0|9=2@-250,0+0]',
+                    'a\u{AD}\u{301}': '[2=0+500|1=1+0|9=2@-250,0+0]',
+                    'a\u{34F}\u{301}': '[2=0+500|1=1+0|9=2@-250,0+0]',
+                    // -u 0061,200D,0301: [2=0+500|1=1+0|9=2+0], mark does not skip it (F_MANUAL_ZWJ)
+                    'a\u{200D}\u{301}': '[2=0+500|1=1+0|9=2+0]'
+                });
+            });
+
+            it('skips the default ignorables in the input of a ligature of a lookup record, after the substitution of a previous record, like HarfBuzz', function() {
+                // --features=-liga,+ss02 -u 0061,200D,0062: [19=0+800|1=0+0]; -u 0061,200C,0062: [16=0+520|1=1+0|3=2+500];
+                // -u 0062,0061,200D,0062: [3=0+500|19=1+800|1=1+0], the rule matched after the first glyph of the text
+                assertShapes(ignorablesFont, {
+                    'a\u{200D}b': '[19=0+800|1=0+0]',
+                    'a\u{200C}b': '[16=0+520|1=1+0|3=2+500]',
+                    'ba\u{200D}b': '[3=0+500|19=1+800|1=1+0]'
+                }, { features: { liga: false, ss02: true } });
+            });
+
+            it('does not skip a default ignorable that a previous lookup record substituted, like HarfBuzz', function() {
+                // --features=-liga,+ss03 -u 0061,200D,0062: [16=0+520|18=1+200|3=2+500], no a_b across the zwj.visible of the
+                // first record; -u 0062,0061,200D,0062: [3=0+500|16=1+520|18=2+200|3=3+500]
+                assertShapes(ignorablesFont, {
+                    'a\u{200D}b': '[16=0+520|18=1+200|3=2+500]',
+                    'ba\u{200D}b': '[3=0+500|16=1+520|18=2+200|3=3+500]'
+                }, { features: { liga: false, ss03: true } });
+            });
+
+            it('keeps a zero width joiner from forming the ligatures of the Arabic form features, like HarfBuzz', function() {
+                // the two medial behs of beh beh beh dal, then across a soft hyphen and across a zero width joiner, which the
+                // lookups of medi do not skip in the Arabic shaper (F_MANUAL_ZWJ): the glyph and the advance of each cluster,
+                // whatever the order of the glyphs (see the known failures of the default ignorables in a right-to-left run)
+                const describeClusterGlyphs = text => ignorablesFont.shape(text)
+                    .map(({ glyph, start, xAdvance }) => [start, glyph.index, xAdvance])
+                    .sort(([startA, indexA], [startB, indexB]) => startA - startB || indexA - indexB);
+                // -u 0628,0628,0628,062F: [11=3+400|21=1+600|20=0+350]
+                assert.deepStrictEqual(describeClusterGlyphs('\u{628}\u{628}\u{628}\u{62F}'), [[0, 20, 350], [1, 21, 600], [3, 11, 400]]);
+                // -u 0628,0628,00AD,0628,062F: [11=4+400|1=1+0|21=1+600|20=0+350]
+                assert.deepStrictEqual(describeClusterGlyphs('\u{628}\u{628}\u{AD}\u{628}\u{62F}'), [[0, 20, 350], [1, 1, 0], [1, 21, 600], [4, 11, 400]]);
+                // -u 0628,0628,200D,0628,062F: [11=4+400|20=3+350|1=2+0|20=1+350|20=0+350]
+                assert.deepStrictEqual(describeClusterGlyphs('\u{628}\u{628}\u{200D}\u{628}\u{62F}'), [
+                    [0, 20, 350], [1, 20, 350], [2, 1, 0], [3, 20, 350], [4, 11, 400]
+                ]);
+            });
+
+            it('draws a default ignorable that GSUB substituted, like HarfBuzz', function() {
+                // --features=+ss01 -u 0061,200D: [2=0+500|18=1+200]; -u 0066,200D,0069: [12=0+550|18=0+200]
+                assertShapes(ignorablesFont, { 'a\u{200D}': '[2=0+500|18=1+200]', 'f\u{200D}i': '[12=0+550|18=0+200]' }, { features: { ss01: true } });
+            });
+
+            it('removes the default ignorables with the removeDefaultIgnorables option, merging their clusters, like HarfBuzz', function() {
+                // hb-shape --remove-default-ignorables
+                assertShapes(ignorablesFont, {
+                    // -u 0066,200D,0069: [12=0+550]; -u 0061,FE02: [2=0+500]
+                    'f\u{200D}i': '[12=0+550]',
+                    'a\u{FE02}': '[2=0+500]',
+                    // -u FE01,0061: [2=0+500], the cluster of the first glyph merged forward
+                    '\u{FE01}a': '[2=0+500]',
+                    // -u 0627,061C,062F: [11=1+400|10=0+300], -u 061C,0627,062F: [11=2+400|10=0+300]: in a right-to-left run, the
+                    // cluster of the glyph on its left merged backward
+                    '\u{627}\u{61C}\u{62F}': '[11=1+400|10=0+300]',
+                    '\u{61C}\u{627}\u{62F}': '[11=2+400|10=0+300]',
+                    // -u 0061,00AD,0301: [2=0+500|9=2@-550,0+0], the advance of the soft hyphen still in the offset of the mark
+                    'a\u{AD}\u{301}': '[2=0+500|9=2@-550,0+0]'
+                }, { removeDefaultIgnorables: true });
+            });
+
+            it('removes the default ignorables of a font without a space glyph, after their advances are set to 0, like HarfBuzz', function() {
+                // TestDefaultIgnorables.ttf without U+0020 in its cmap (fontTools), -u 0066,200D,0069: [12=0+550];
+                // -u 0061,00AD,0301: [2=0+500|9=2@-250,0+0]; -u 0627,061C,062F: [11=1+400|10=0+300]
+                const noSpaceFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf');
+                delete noSpaceFont.tables.cmap.glyphIndexMap[0x20];
+                assertShapes(noSpaceFont, {
+                    'f\u{200D}i': '[12=0+550]',
+                    'a\u{AD}\u{301}': '[2=0+500|9=2@-250,0+0]',
+                    '\u{627}\u{61C}\u{62F}': '[11=1+400|10=0+300]'
+                });
+            });
+
+            it('gives the glyphs and the clusters of shape to the other layout methods', function() {
+                // -u 0066,200C,0069: [4=0+300|1=1+0|5=2+250]; --remove-default-ignorables: [4=0+300|5=2+250]
+                const text = 'f\u{200C}i';
+                const [glyphF, space, glyphI] = [ignorablesFont.charToGlyph('f'), ignorablesFont.charToGlyph(' '), ignorablesFont.charToGlyph('i')];
+                assert.deepStrictEqual(ignorablesFont.stringToGlyphIndexes(text), [4, 1, 5]);
+                assert.deepStrictEqual(ignorablesFont.stringToGlyphs(text), [glyphF, space, glyphI]);
+                assert.deepStrictEqual(ignorablesFont.stringToGlyphClusters(text), [
+                    { glyph: glyphF, start: 0, end: 1 }, { glyph: space, start: 1, end: 2 }, { glyph: glyphI, start: 2, end: 3 }
+                ]);
+                const removeOptions = { removeDefaultIgnorables: true };
+                assert.deepStrictEqual(ignorablesFont.stringToGlyphIndexes(text, removeOptions), [4, 5]);
+                assert.deepStrictEqual(ignorablesFont.stringToGlyphs(text, removeOptions), [glyphF, glyphI]);
+                assert.deepStrictEqual(ignorablesFont.stringToGlyphClusters(text, removeOptions), [
+                    { glyph: glyphF, start: 0, end: 2 }, { glyph: glyphI, start: 2, end: 3 }
+                ]);
+                assert.strictEqual(ignorablesFont.getAdvanceWidth(text, 1000), 550);
+                assert.strictEqual(ignorablesFont.getAdvanceWidth(text, 1000, removeOptions), 550);
+                // the space glyph draws nothing, where the .notdef of the zero width non-joiner was drawn
+                assert.strictEqual(ignorablesFont.getPath('\u{200C}', 0, 0, 1000).commands.length, 0);
+            });
+
+            it('removes the default ignorables with the removeDefaultIgnorables of defaultRenderOptions in every layout method', function() {
+                // --remove-default-ignorables -u 0066,200C,0069: [4=0+300|5=2+250]
+                const defaultsFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf');
+                defaultsFont.defaultRenderOptions = Object.assign({}, defaultsFont.defaultRenderOptions, { removeDefaultIgnorables: true });
+                const text = 'f\u{200C}i';
+                const [glyphF, glyphI] = [defaultsFont.charToGlyph('f'), defaultsFont.charToGlyph('i')];
+                assert.deepStrictEqual(
+                    defaultsFont.shape(text).map(({ glyph, start, end }) => [glyph.index, start, end]), [[4, 0, 2], [5, 2, 3]]
+                );
+                assert.deepStrictEqual(defaultsFont.stringToGlyphIndexes(text), [4, 5]);
+                assert.deepStrictEqual(defaultsFont.stringToGlyphs(text), [glyphF, glyphI]);
+                assert.deepStrictEqual(defaultsFont.stringToGlyphClusters(text), [
+                    { glyph: glyphF, start: 0, end: 2 }, { glyph: glyphI, start: 2, end: 3 }
+                ]);
+                // the option still turns it off
+                assert.deepStrictEqual(defaultsFont.stringToGlyphIndexes(text, { removeDefaultIgnorables: false }), [4, 1, 5]);
+            });
+
+            it('merges the cluster of a removed default ignorable within its run, like HarfBuzz shaping each run on its own', function() {
+                const describeRemovedClusters = text => ignorablesFont.stringToGlyphClusters(text, { removeDefaultIgnorables: true })
+                    .map(({ glyph, start, end }) => [glyph.index, start, end]);
+                // a word joiner or a variation selector before an Arabic word, in a run of its own (see the known failures of
+                // the default ignorables in a right-to-left run): --remove-default-ignorables -u 2060,0627,062F
+                // [11=2+400|10=0+300], the same with U+FE02: its character in the cluster of the alef
+                assert.deepStrictEqual(describeRemovedClusters('\u{2060}\u{627}\u{62F}'), [[11, 2, 3], [10, 0, 2]]);
+                assert.deepStrictEqual(describeRemovedClusters('\u{FE02}\u{627}\u{62F}'), [[11, 2, 3], [10, 0, 2]]);
+                // a Mongolian free variation selector at the start of the Mongolian run of a text, merged forward in the cluster
+                // of the Mongolian letter (.notdef): --script=latn --remove-default-ignorables -u 0061 [2=0+500];
+                // --script=mong --remove-default-ignorables -u 180B,1820 [0=0+500]
+                assert.deepStrictEqual(describeRemovedClusters('a\u{180B}\u{1820}'), [[2, 0, 1], [0, 1, 3]]);
+                // a removed U+061C that the dal alef ligature skipped, in the cluster of the ligature after it in visual order,
+                // which keeps the cluster of the dal on its left: --remove-default-ignorables -u 062F,061C,0627,062F
+                // [11=3+400|14=0+650]
+                assert.deepStrictEqual(describeRemovedClusters('\u{62F}\u{61C}\u{627}\u{62F}'), [[11, 3, 4], [14, 0, 3]]);
+                // a removed U+061C after the two glyphs of a larger cluster in visual order, the alef and the madda that U+0622
+                // is decomposed into: both take its cluster (delete_glyphs_inplace): --remove-default-ignorables
+                // -u 0628,061C,0622 [22=1+0|10=1+300|20=0+350] (the offset of the madda left out)
+                assert.deepStrictEqual(describeRemovedClusters('\u{628}\u{61C}\u{622}'), [[22, 1, 3], [10, 1, 3], [20, 0, 1]]);
+            });
+
+            it('gives the glyph indexes of a font parsed with lowMemory without loading its glyphs, like HarfBuzz', function() {
+                // the glyphs of hb-shape, with the default ignorables hidden and with --remove-default-ignorables: -u 0061,00AD,0062
+                // [2|1|3] and [2|3]; -u 0066,200D,0069 [12|1] and [12]; -u 0628,061C,0622 [22|10|1|20] and [22|10|20];
+                // -u 0062,FE00,0078,180B,0062 [3|6|1|3] and [3|6|3]; with the glyph of a U+FE01 set to 200, past the glyphs of
+                // the font (see below), -u 0061,FE01 [200]
+                const lowMemoryFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf', { lowMemory: true });
+                lowMemoryFont.tables.cmap.varSelectorList[0xFE01].nonDefaultUVS.uvsMappings[0x61].glyphID = 200;
+                const expectedIndexes = {
+                    'a\u{AD}b': [[2, 1, 3], [2, 3]],
+                    'f\u{200D}i': [[12, 1], [12]],
+                    '\u{628}\u{61C}\u{622}': [[22, 10, 1, 20], [22, 10, 20]],
+                    'b\u{FE00}x\u{180B}b': [[3, 6, 1, 3], [3, 6, 3]],
+                    'a\u{FE01}': [[200], [200]]
+                };
+                for (const [text, [hiddenIndexes, removedIndexes]] of Object.entries(expectedIndexes)) {
+                    assert.deepStrictEqual(lowMemoryFont.stringToGlyphIndexes(text), hiddenIndexes, text);
+                    assert.deepStrictEqual(lowMemoryFont.stringToGlyphIndexes(text, { removeDefaultIgnorables: true }), removedIndexes, text);
+                }
+                assert.deepStrictEqual(Object.keys(lowMemoryFont.glyphs.glyphs), []);
+            });
+
+            it('shapes the default ignorables and the variation sequences of a font parsed with lowMemory, whose glyphs load on request, like HarfBuzz', function() {
+                // the references of the tests above
+                const lowMemoryFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf', { lowMemory: true });
+                assertShapes(lowMemoryFont, {
+                    'a\u{AD}b': '[2=0+450|1=1+0|3=2+500]',
+                    'b\u{FE00}': '[3=0+500]',
+                    'a\u{FE01}': '[16=0+520]',
+                    'a\u{180B}': '[2=0+500|1=1+0]',
+                    'f\u{200D}i': '[12=0+550|1=0+0]',
+                    'x\u{180B}b': '[6=0+500|1=1+0|3=2+500]'
+                });
+                assertShapes(lowMemoryFont, { 'f\u{200D}i': '[12=0+550]', 'a\u{AD}\u{301}': '[2=0+500|9=2@-550,0+0]' }, { removeDefaultIgnorables: true });
+                assert.deepStrictEqual(
+                    lowMemoryFont.stringToGlyphClusters('a\u{FE02}', { removeDefaultIgnorables: true }),
+                    [{ glyph: lowMemoryFont.glyphs.get(2), start: 0, end: 2 }]
+                );
+            });
+
+            describe('a variation sequence whose glyph is past the glyphs of the font', function() {
+                // TestDefaultIgnorables.ttf (23 glyphs) with the glyph of a U+FE01 set to 200 in the cmap format 14, saved as
+                // uvs-past-glyphs.ttf: -u 0061,FE01 [200=0+0]
+                let pastGlyphsFont;
+
+                before(function() {
+                    pastGlyphsFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf');
+                    pastGlyphsFont.tables.cmap.varSelectorList[0xFE01].nonDefaultUVS.uvsMappings[0x61].glyphID = 200;
+                });
+
+                it('maps the character and the selector to that glyph index, like HarfBuzz', function() {
+                    assert.deepStrictEqual(pastGlyphsFont.stringToGlyphIndexes('a\u{FE01}'), [200]);
+                });
+
+                itFailsUntilFixed('gives that glyph no advance, like HarfBuzz',
+                    '_stringToDirectionalGlyphClusters (src/font.mjs): a glyph index past the glyphs of the font takes the .notdef ' +
+                    'glyph and its advance, where HarfBuzz gives it an advance of 0 (hmtx, a glyph past numGlyphs)',
+                    function() {
+                        assert.deepStrictEqual(pastGlyphsFont.shape('a\u{FE01}').map(glyphPosition => glyphPosition.xAdvance), [0]);
+                    });
+            });
+
+            it('hides the variation selector of an emoji presentation sequence that the cmap has not, like HarfBuzz', function() {
+                // noto-emoji.ttf, -u 2764,FE0F: [168=0+2600|3=1+0], the space glyph of the selector in its own cluster, with the
+                // advanceWidth of the space: only Font.shape gives it an advance of 0; --remove-default-ignorables [168=0+2600]
+                const emojiFont = loadSync('./test/fonts/noto-emoji.ttf');
+                const [heart, space] = [emojiFont.glyphs.get(168), emojiFont.glyphs.get(3)];
+                const text = '\u{2764}\u{FE0F}';
+                assert.deepStrictEqual(emojiFont.stringToGlyphs(text), [heart, space]);
+                assert.deepStrictEqual(emojiFont.stringToGlyphClusters(text), [{ glyph: heart, start: 0, end: 1 }, { glyph: space, start: 1, end: 2 }]);
+                assert.strictEqual(formatShape(emojiFont.shape(text)), '[168=0+2600|3=1+0]');
+                assert.deepStrictEqual(emojiFont.stringToGlyphClusters(text, { removeDefaultIgnorables: true }), [{ glyph: heart, start: 0, end: 2 }]);
+            });
+        });
     });
 
     describe('forEachGlyph', function() {
@@ -1873,6 +2177,17 @@ describe('font.mjs', function() {
             expectedPath.extend(pairFont.charToGlyph('T').getPath(0, 0, fontSize, {}, pairFont));
             expectedPath.extend(pairFont.charToGlyph('o').getPath(475, 10, fontSize, {}, pairFont));
             assert.deepStrictEqual(pairFont.getPath('To', 0, 0, fontSize).commands, expectedPath.commands);
+        });
+
+        it('adds no letter spacing after a glyph that hides a default ignorable', function() {
+            // TestDefaultIgnorables.ttf (see shape), -u 0061,FE0F,0062: [2=0+450|1=1+0|3=2+500], the spacing of a and b only
+            const ignorablesFont = loadSync('./test/fonts/TestDefaultIgnorables.ttf');
+            assert.strictEqual(ignorablesFont.getAdvanceWidth('a\u{FE0F}b', 1000, { letterSpacing: 0.1 }), 450 + 500 + 2 * 100);
+            assert.strictEqual(ignorablesFont.getAdvanceWidth('a\u{FE0F}b', 1000, { tracking: 100 }), 450 + 500 + 2 * 100);
+            // noto-emoji.ttf, -u 2764,FE0F,2764,FE0F: [168=0+2600|3=1+0|168=2+2600|3=3+0]
+            const emojiFont = loadSync('./test/fonts/noto-emoji.ttf');
+            const fontSize = emojiFont.unitsPerEm;
+            assert.strictEqual(emojiFont.getAdvanceWidth('\u{2764}\u{FE0F}\u{2764}\u{FE0F}', fontSize, { letterSpacing: 0.125 }), 2 * (2600 + 0.125 * fontSize));
         });
     });
 
@@ -2007,28 +2322,24 @@ describe('font.mjs', function() {
         });
 
         it('draws a space or U+2011 followed by a variation selector with the glyph of the cmap, like HarfBuzz', function() {
-            // handle_variation_selector_cluster maps the character to its nominal glyph, without the fallbacks:
-            // -u 00A0,FE00: [0=0+1000|1=1+0]; -u 2011,FE00: [0=0+1000|1=1+0];
-            // -u 0041,2009,FE0F,0041: [5=0+1300|0=1+1000|1=2+0|5=3+1300]; the glyph of the selector, hidden with the space
-            // glyph, is for point 23
-            assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{FE00}').slice(0, 1)), '[0=0+1000]');
-            assert.strictEqual(formatShape(spaceFont.shape('\u{2011}\u{FE00}').slice(0, 1)), '[0=0+1000]');
-            const glyphPositions = spaceFont.shape('A\u{2009}\u{FE0F}A');
-            const glyphPositionsWithoutSelector = [0, 1, glyphPositions.length - 1].map(index => glyphPositions[index]);
-            assert.strictEqual(formatShape(glyphPositionsWithoutSelector), '[5=0+1300|0=1+1000|5=3+1300]');
-            // -u 0041,2009,E0100,0041: [5=0+1300|0=1+1000|1=2+0|5=3+1300]
-            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{E0100}A').slice(0, 2)), '[5=0+1300|0=1+1000]');
+            // handle_variation_selector_cluster maps the character to its nominal glyph, without the fallbacks, and the
+            // selector is hidden with the space glyph: -u 00A0,FE00: [0=0+1000|1=1+0]; -u 2011,FE00: [0=0+1000|1=1+0];
+            // -u 0041,2009,FE0F,0041: [5=0+1300|0=1+1000|1=2+0|5=3+1300]
+            assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{FE00}')), '[0=0+1000|1=1+0]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{2011}\u{FE00}')), '[0=0+1000|1=1+0]');
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{FE0F}A')), '[5=0+1300|0=1+1000|1=2+0|5=3+1300]');
+            // -u 0041,2009,E0100,0041: [5=0+1300|0=1+1000|1=2+0|5=3+1300], the cluster of the last A at the UTF-16 offset 4
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{E0100}A')), '[5=0+1300|0=1+1000|1=2+0|5=4+1300]');
         });
 
         it('keeps the fallback of a space or U+2011 followed by a Mongolian free variation selector, like HarfBuzz', function() {
-            // is_variation_selector of HarfBuzz leaves out U+180B to U+180D: -u 0041,2009,180B,0041:
-            // [5=0+1300|1=1+350|1=2+0|5=3+1300] (1/5 em, 410, minus the kerning of space A); -u 2011,180C: [9=0+640|1=1+0];
-            // -u 00A0,180D: [1=0+501|1=1+0]; -u 202F,180B,0041: [1=0+190|1=1+0|5=2+1300]; the glyph of the selector is for
-            // point 23
-            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{180B}A').slice(0, 2)), '[5=0+1300|1=1+350]');
-            assert.strictEqual(formatShape(spaceFont.shape('\u{2011}\u{180C}').slice(0, 1)), '[9=0+640]');
-            assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{180D}').slice(0, 1)), '[1=0+501]');
-            assert.strictEqual(formatShape(spaceFont.shape('\u{202F}\u{180B}A').slice(0, 1)), '[1=0+190]');
+            // is_variation_selector of HarfBuzz leaves out U+180B to U+180D, hidden with the space glyph: -u 0041,2009,180B,0041:
+            // [5=0+1300|1=1+350|1=2+0|5=3+1300] (1/5 em, 410, minus the kerning of space A, across the selector);
+            // -u 2011,180C: [9=0+640|1=1+0]; -u 00A0,180D: [1=0+501|1=1+0]; -u 202F,180B,0041: [1=0+190|1=1+0|5=2+1300]
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{180B}A')), '[5=0+1300|1=1+350|1=2+0|5=3+1300]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{2011}\u{180C}')), '[9=0+640|1=1+0]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{180D}')), '[1=0+501|1=1+0]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{202F}\u{180B}A')), '[1=0+190|1=1+0|5=2+1300]');
         });
 
         it('draws a space with the glyph of its variation sequence and the advance of that glyph, like HarfBuzz', function() {

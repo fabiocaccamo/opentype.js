@@ -7,7 +7,8 @@ import {
     isDefaultFeatureInMap,
     isDefaultFeatureEnabled,
     getEnabledFeatureTags,
-    getDirectionFeatureTags
+    getDirectionFeatureTags,
+    getLookupJoinerFlags
 } from '../src/features/featureValues.mjs';
 
 // the values of the features of HarfBuzz 11.3.2: hb_feature_t values (hb-shape --features=aalt=2, +salt, -liga), the
@@ -145,6 +146,61 @@ describe('featureValues.mjs', function() {
             for (const scriptTags of [['arab'], ['hebr'], ['syrc'], ['nko ']]) {
                 assert.deepStrictEqual(getDirectionFeatureTags(scriptTags), ['rtla', 'rtlm'], scriptTags.join());
             }
+        });
+    });
+
+    describe('getLookupJoinerFlags', function() {
+        // the F_MANUAL_ZWNJ and F_MANUAL_ZWJ flags of the features of HarfBuzz 11.3.2: F_GLOBAL_MANUAL_JOINERS for mark and
+        // mkmk (common_features, hb-ot-shape.cc) and the features of the Indic shaper (indic_features, hb-ot-shaper-indic.cc),
+        // F_MANUAL_ZWJ for the features of the Arabic shaper (collect_features_arabic, hb-ot-shaper-arabic.cc)
+        const autoJoiners = { autoZeroWidthNonJoiner: true, autoZeroWidthJoiner: true };
+        const manualJoiners = { autoZeroWidthNonJoiner: false, autoZeroWidthJoiner: false };
+        const manualZeroWidthJoiner = { autoZeroWidthNonJoiner: true, autoZeroWidthJoiner: false };
+
+        it('skips both joiners in the lookups of most features and of the required feature only', function() {
+            for (const tag of ['ccmp', 'liga', 'calt', 'kern', 'ss01']) {
+                assert.deepStrictEqual(getLookupJoinerFlags('latn', [tag]), autoJoiners, tag);
+            }
+            assert.deepStrictEqual(getLookupJoinerFlags('latn', []), autoJoiners);
+            assert.deepStrictEqual(getLookupJoinerFlags(undefined, ['liga']), autoJoiners);
+        });
+
+        it('skips no joiner in the lookups of mark and mkmk, nor of the features of the Indic shaper in its runs', function() {
+            for (const shaper of ['latn', 'arab', 'thai', 'indic']) {
+                assert.deepStrictEqual(getLookupJoinerFlags(shaper, ['mark']), manualJoiners, shaper);
+                assert.deepStrictEqual(getLookupJoinerFlags(shaper, ['mkmk']), manualJoiners, shaper);
+            }
+            for (const tag of ['nukt', 'akhn', 'half', 'pres', 'blws', 'haln']) {
+                assert.deepStrictEqual(getLookupJoinerFlags('indic', [tag]), manualJoiners, tag);
+                assert.deepStrictEqual(getLookupJoinerFlags('latn', [tag]), autoJoiners, tag);
+            }
+        });
+
+        it('skips no zero width joiner in the input of the lookups of the features of the Arabic shaper in its runs', function() {
+            for (const tag of ['ccmp', 'locl', 'isol', 'fina', 'medi', 'init', 'rlig', 'calt', 'liga', 'clig', 'mset']) {
+                assert.deepStrictEqual(getLookupJoinerFlags('arab', [tag]), manualZeroWidthJoiner, tag);
+            }
+            assert.deepStrictEqual(getLookupJoinerFlags('arab', ['kern']), autoJoiners);
+        });
+
+        it('skips the zero width joiner in the input of the other features of an Arabic run, like HarfBuzz', function() {
+            // a font of one feature arab F { sub lam alef by lam_alef; } (fontTools feaLib), hb-shape --shapers=ot
+            // --no-glyph-names --cluster-level=1 --features=+F F.ttf -u 0644,200D,0627: [1=0+0|4=0+500] for rclt, dlig and ss01,
+            // the ligature across the joiner; [3=2+500|1=1+0|2=0+500] for liga, clig, calt, rlig, ccmp, locl and mset
+            for (const tag of ['rclt', 'dlig', 'ss01']) {
+                assert.deepStrictEqual(getLookupJoinerFlags('arab', [tag]), autoJoiners, tag);
+            }
+            for (const tag of ['liga', 'clig', 'calt', 'rlig', 'ccmp', 'locl', 'mset']) {
+                assert.deepStrictEqual(getLookupJoinerFlags('arab', [tag]), manualZeroWidthJoiner, tag);
+            }
+            // the lookup in liga and in rclt: [3=2+500|1=1+0|2=0+500], and with --features=-liga [1=0+0|4=0+500]
+            assert.deepStrictEqual(getLookupJoinerFlags('arab', ['liga', 'rclt']), manualZeroWidthJoiner);
+        });
+
+        it('skips a joiner in a lookup of several features only when each of them does, like the map of HarfBuzz', function() {
+            // hb_ot_map_builder_t::compile: lookups[j].auto_zwnj &= lookups[i].auto_zwnj, the same for auto_zwj
+            assert.deepStrictEqual(getLookupJoinerFlags('latn', ['kern', 'mark']), manualJoiners);
+            assert.deepStrictEqual(getLookupJoinerFlags('arab', ['kern', 'liga']), manualZeroWidthJoiner);
         });
     });
 });
