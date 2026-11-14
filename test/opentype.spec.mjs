@@ -1,5 +1,7 @@
 import assert from 'assert';
-import { Font, Path, Glyph, parse } from '../src/opentype.mjs';
+import { Font, Path, Glyph, parse, removeTables } from '../src/opentype.mjs';
+import { parseWOFF2TableEntries } from '../src/woff2.mjs';
+import { readSfntFile, getSpecificationCheckSum } from './testutil.mjs';
 import { readFileSync } from 'fs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
@@ -72,6 +74,21 @@ describe('opentype.mjs', function() {
             glyphs: [notdefGlyph]
         });
         assert.throws(function() { font.toArrayBuffer(); }, /advanceWidth is not a number/);
+    });
+
+    it('throws an error for a file truncated in its header or its table directory', function() {
+        const truncations = [
+            ['sub5.ttf', 2, /Truncated font file: the signature ends past the end of the file/],
+            ['sub5.ttf', 8, /Truncated font file: the sfnt header ends past the end of the file/],
+            ['sub5.ttf', 12 + 16 * 3, /Truncated font file: the table directory ends past the end of the file/],
+            ['TestGDEF-Blocklisted.woff', 40, /Truncated font file: the WOFF header ends past the end of the file/],
+            ['TestGDEF-Blocklisted.woff', 44 + 20 * 3, /Truncated font file: the table directory ends past the end of the file/],
+            ['woff2/sub5.glyf.woff2', 6, /Truncated font file: the WOFF2 header ends past the end of the file/],
+        ];
+        for (const [path, length, error] of truncations) {
+            const input = new Uint8Array(readFileSync('./test/fonts/' + path));
+            assert.throws(() => parse(input.slice(0, length).buffer), error, path + ' ' + length);
+        }
     });
 
     describe('the GDEF tables HarfBuzz ignores', function() {
@@ -487,5 +504,378 @@ describe('opentype.mjs table tags', function() {
         assert.ok(font.tableTags.includes('sbix'));
         assert.ok(!font.tableTags.includes('FFTM'));
         assert.ok(font.tableTags.includes('GPOS'));
+    });
+});
+
+describe('opentype.mjs removeTables', function() {
+    const FONTS_DIR = './test/fonts';
+    const COLOR_TABLE_TAGS = ['SVG ', 'COLR', 'CPAL', 'sbix', 'CBDT', 'CBLC'];
+    const SFNT_VERSION_TRUETYPE = String.fromCharCode(0, 1, 0, 0);
+    const SHAPED_TEXT = 'AVAWaTo fi ffi Hello, world! 123 กิ่น้ำ \u{1f590}\u{1f3fb}\u{1f590} \u{1f600}';
+
+    const readFontFile = path => new Uint8Array(readFileSync(FONTS_DIR + '/' + path));
+
+    // the bytes of a head table with checkSumAdjustment set to 0
+    function withoutCheckSumAdjustment(head) {
+        const bytes = head.slice();
+        bytes.fill(0, 8, 12);
+        return bytes;
+    }
+
+    // a valid sfnt file as the OpenType specification describes it, read with readSfntFile
+    function assertValidSfnt(output) {
+        assert.ok(output instanceof ArrayBuffer);
+        const bytes = new Uint8Array(output);
+        const file = readSfntFile(bytes);
+        const tags = file.records.map(record => record.tag);
+        assert.deepStrictEqual(tags, tags.slice().sort(), 'table records sorted by tag');
+        const entrySelector = file.numTables > 0 ? Math.floor(Math.log2(file.numTables)) : 0;
+        const searchRange = 16 * 2 ** entrySelector;
+        assert.deepStrictEqual(
+            [file.searchRange, file.entrySelector, file.rangeShift],
+            [searchRange, entrySelector, Math.max(0, file.numTables * 16 - searchRange)]
+        );
+        let end = 12 + 16 * file.numTables;
+        for (const record of [...file.records].sort((record1, record2) => record1.offset - record2.offset)) {
+            assert.equal(record.offset % 4, 0, record.tag + ' aligned');
+            assert.ok(record.offset >= end, record.tag + ' after the previous table');
+            const paddedEnd = record.offset + ((record.length + 3) & ~3);
+            assert.ok(bytes.subarray(record.offset + record.length, paddedEnd).every(byte => byte === 0), record.tag + ' padding');
+            const table = record.tag === 'head' ? withoutCheckSumAdjustment(file.tables.head) : file.tables[record.tag];
+            assert.equal(record.checkSum, getSpecificationCheckSum(table), record.tag + ' checksum');
+            end = paddedEnd;
+        }
+        assert.equal(bytes.length, end, 'no bytes after the last table');
+        if (file.tables.head) {
+            assert.equal(getSpecificationCheckSum(bytes), 0xB1B0AFBA, 'head.checkSumAdjustment');
+        }
+        return file;
+    }
+
+    function assertSameTables(outputTables, expectedTables) {
+        for (const [tag, bytes] of Object.entries(outputTables)) {
+            if (tag === 'head') {
+                assert.deepStrictEqual(withoutCheckSumAdjustment(bytes), withoutCheckSumAdjustment(expectedTables.head), tag);
+            } else {
+                assert.deepStrictEqual(bytes, expectedTables[tag], tag);
+            }
+        }
+    }
+
+    function getShapingFingerprint(font, text) {
+        return font.shape(text).map(({ glyph, start, end, xAdvance, yAdvance, xOffset, yOffset }) => (
+            [glyph.index, start, end, xAdvance, yAdvance, xOffset, yOffset]
+        ));
+    }
+
+    // the output parses to the same glyphs (outlines and advances) and the same shaping as the source
+    function assertSameFont(output, sourceBytes) {
+        const font = parse(output);
+        const sourceFont = parse(sourceBytes);
+        assert.equal(font.outlinesFormat, sourceFont.outlinesFormat);
+        assert.equal(font.numGlyphs, sourceFont.numGlyphs);
+        for (let glyphIndex = 0; glyphIndex < sourceFont.numGlyphs; glyphIndex += 1) {
+            const glyph = font.glyphs.get(glyphIndex);
+            const sourceGlyph = sourceFont.glyphs.get(glyphIndex);
+            assert.equal(glyph.advanceWidth, sourceGlyph.advanceWidth, 'advance of glyph ' + glyphIndex);
+            assert.equal(glyph.path.toPathData(), sourceGlyph.path.toPathData(), 'outline of glyph ' + glyphIndex);
+        }
+        assert.deepStrictEqual(getShapingFingerprint(font, SHAPED_TEXT), getShapingFingerprint(sourceFont, SHAPED_TEXT));
+    }
+
+    describe('keeps every other table of an sfnt file byte for byte, without DSIG', function() {
+        const cases = [
+            // [file, sfnt version, tables the color tags and DSIG remove]
+            ['sub5.ttf', SFNT_VERSION_TRUETYPE, ['DSIG']],
+            ['Jomhuria-Regular.ttf', SFNT_VERSION_TRUETYPE, ['DSIG']],
+            ['TestSVGmultiGlyphs.otf', 'OTTO', ['DSIG', 'SVG ']],
+            ['OpenMojiCOLRv0-subset.otf', 'OTTO', ['COLR', 'CPAL']],
+        ];
+        for (const [path, sfntVersion, removedTags] of cases) {
+            it(path, function() {
+                const input = readFontFile(path);
+                const source = readSfntFile(input);
+                const output = removeTables(input, COLOR_TABLE_TAGS);
+                const file = assertValidSfnt(output);
+                assert.equal(file.sfntVersion, sfntVersion);
+                assert.ok(removedTags.every(tag => source.tables[tag]));
+                assert.deepStrictEqual(Object.keys(file.tables).sort(), Object.keys(source.tables).filter(tag => !removedTags.includes(tag)).sort());
+                assertSameTables(file.tables, source.tables);
+                assertSameFont(output, input);
+            });
+        }
+    });
+
+    it('keeps the decompressed tables of a TrueType WOFF file, as fontTools decompresses them', function() {
+        // fontTools 4.63.0 decompresses the tables of TestGDEF-Blocklisted.woff to the bytes of the tables of TestGDEF-Blocklisted.ttf
+        const input = readFontFile('TestGDEF-Blocklisted.woff');
+        const sourceBytes = readFontFile('TestGDEF-Blocklisted.ttf');
+        const source = readSfntFile(sourceBytes);
+        const output = removeTables(input, COLOR_TABLE_TAGS);
+        const file = assertValidSfnt(output);
+        assert.equal(file.sfntVersion, SFNT_VERSION_TRUETYPE);
+        assert.deepStrictEqual(Object.keys(file.tables).sort(), Object.keys(source.tables).sort());
+        assertSameTables(file.tables, source.tables);
+        assertSameFont(output, sourceBytes);
+    });
+
+    it('keeps the decompressed tables of a CFF WOFF file, as fontTools decompresses them', function() {
+        // [length, checksum] of the tables of FiraSansMedium.woff decompressed by fontTools 4.63.0
+        // (TTFont(path).reader[tag] and fontTools.ttLib.sfnt.calcChecksum, head with checkSumAdjustment set to 0)
+        const expected = {
+            'CFF ': [76236, 0x35C3C795],
+            'FFTM': [28, 0x6CC8436B],
+            'GDEF': [62, 0x1542108E],
+            'GPOS': [5960, 0x6E92DE22],
+            'GSUB': [9816, 0xCF69185D],
+            'OS/2': [96, 0xBD75FEC8],
+            'cmap': [2298, 0x4DA9CF94],
+            'head': [54, 0x00BD2C87],
+            'hhea': [36, 0x06C70394],
+            'hmtx': [4588, 0x3C96990A],
+            'maxp': [6, 0x047B5000],
+            'name': [1770, 0xF5BDA805],
+            'post': [32, 0xFFB80032],
+        };
+        const input = readFontFile('FiraSansMedium.woff');
+        const file = assertValidSfnt(removeTables(input, COLOR_TABLE_TAGS));
+        assert.equal(file.sfntVersion, 'OTTO');
+        const actual = Object.fromEntries(file.records.map(record => [record.tag, [record.length, record.checkSum]]));
+        assert.deepStrictEqual(actual, expected);
+        assertSameFont(removeTables(input, []), input);
+    });
+
+    describe('keeps the decompressed and reconstructed tables of a WOFF2 file', function() {
+        // fontTools 4.63.0 decompresses each table of these fixtures to the bytes of the table of their source font,
+        // but head (checkSumAdjustment, and bit 11 of flags set by the encoders), DSIG (left out by the encoders) and
+        // a transformed glyf or loca table, which it reconstructs with another padding than the reference decoder of
+        // the browsers: these are compared with the reconstruction of the fork (see woff2.spec.mjs)
+        const cases = [
+            // [file, source font, transformed glyf and loca, tables the color tags and DSIG remove]
+            ['sub5.glyf.woff2', 'sub5.ttf', true, ['DSIG']],
+            ['sub5.hmtx.woff2', 'sub5.ttf', true, ['DSIG']],
+            ['sub5.null.woff2', 'sub5.ttf', false, ['DSIG']],
+            ['sub5.google.woff2', 'sub5.ttf', true, ['DSIG']],
+            ['VARTest.glyf.woff2', 'VARTest.ttf', true, []],
+            ['NotoSansThai-Medium-Testing-v1.hmtx.woff2', 'NotoSansThai-Medium-Testing-v1.ttf', true, []],
+            ['TestSVGmultiGlyphs.fonttools.woff2', 'TestSVGmultiGlyphs.otf', false, ['DSIG', 'SVG ']],
+            ['TestSVGmultiGlyphs.google.woff2', 'TestSVGmultiGlyphs.otf', false, ['DSIG', 'SVG ']],
+        ];
+        const clearHeadFlagsBit11 = head => {
+            const bytes = withoutCheckSumAdjustment(head);
+            bytes[16] &= ~0x08;
+            return bytes;
+        };
+        for (const [path, sourcePath, isGlyfTransformed, removedTags] of cases) {
+            it(path, function() {
+                const input = readFontFile('woff2/' + path);
+                const sourceBytes = readFontFile(sourcePath);
+                const source = readSfntFile(sourceBytes);
+                const output = removeTables(input, COLOR_TABLE_TAGS);
+                const file = assertValidSfnt(output);
+                assert.equal(file.sfntVersion, source.sfntVersion);
+                assert.deepStrictEqual(Object.keys(file.tables).sort(), Object.keys(source.tables).filter(tag => !removedTags.includes(tag)).sort());
+                const reconstructedTables = Object.fromEntries(parseWOFF2TableEntries(new DataView(input.buffer)).map(tableEntry => (
+                    [tableEntry.tag, new Uint8Array(tableEntry.data.buffer, tableEntry.data.byteOffset, tableEntry.data.byteLength)]
+                )));
+                for (const [tag, bytes] of Object.entries(file.tables)) {
+                    if (tag === 'head') {
+                        assert.deepStrictEqual(clearHeadFlagsBit11(bytes), clearHeadFlagsBit11(source.tables.head), tag);
+                        assert.deepStrictEqual(withoutCheckSumAdjustment(bytes), withoutCheckSumAdjustment(reconstructedTables.head), tag);
+                    } else if ((tag === 'glyf' || tag === 'loca') && isGlyfTransformed) {
+                        // a copy check only: the reconstruction is checked by assertSameFont and woff2.spec.mjs
+                        assert.deepStrictEqual(bytes, reconstructedTables[tag], tag);
+                    } else {
+                        assert.deepStrictEqual(bytes, source.tables[tag], tag);
+                    }
+                }
+                assertSameFont(output, sourceBytes);
+            });
+        }
+    });
+
+    it('removes the color bitmap tables sbix, CBDT and CBLC, and keeps them when they are not listed', function() {
+        // the GDEF, GPOS and GSUB tables of the table directory renamed to CBDT, CBLC and sbix
+        const input = readFontFile('TestGDEF-Blocklisted.ttf');
+        const source = readSfntFile(input);
+        const renamedTags = { GDEF: 'CBDT', GPOS: 'CBLC', GSUB: 'sbix' };
+        for (let i = 0; i < source.numTables; i += 1) {
+            const renamedTag = renamedTags[source.records[i].tag];
+            if (renamedTag) {
+                input.set(Array.from(renamedTag, character => character.charCodeAt(0)), 12 + 16 * i);
+            }
+        }
+        const file = assertValidSfnt(removeTables(input, COLOR_TABLE_TAGS));
+        assert.deepStrictEqual(Object.keys(file.tables).sort(), Object.keys(source.tables).filter(tag => !renamedTags[tag]).sort());
+        const keptFile = assertValidSfnt(removeTables(input, []));
+        assert.deepStrictEqual(keptFile.tables.sbix, source.tables.GSUB);
+        assert.deepStrictEqual(keptFile.tables.CBDT, source.tables.GDEF);
+        assert.deepStrictEqual(keptFile.tables.CBLC, source.tables.GPOS);
+    });
+
+    it('ignores the tags of tables the font does not have', function() {
+        const input = readFontFile('sub5.ttf');
+        assert.deepStrictEqual(new Uint8Array(removeTables(input, ['sbix', 'CBDT', 'zzzz'])), new Uint8Array(removeTables(input, [])));
+    });
+
+    it('removes the DSIG table even when it is not listed', function() {
+        const file = readSfntFile(new Uint8Array(removeTables(readFontFile('sub5.ttf'), [])));
+        assert.equal(file.tables.DSIG, undefined);
+    });
+
+    it('keeps the sfnt version true', function() {
+        const input = readFontFile('sub5.ttf');
+        input.set([0x74, 0x72, 0x75, 0x65], 0);
+        assert.equal(assertValidSfnt(removeTables(input, [])).sfntVersion, 'true');
+    });
+
+    it('keeps the sfnt version typ1', function() {
+        const input = readFontFile('sub5.ttf');
+        input.set([0x74, 0x79, 0x70, 0x31], 0);
+        assert.equal(assertValidSfnt(removeTables(input, [])).sfntVersion, 'typ1');
+    });
+
+    it('removes the required tables when they are listed', function() {
+        const input = readFontFile('sub5.ttf');
+        const requiredTags = ['head', 'maxp', 'hhea', 'hmtx', 'cmap', 'name', 'post', 'OS/2', 'glyf', 'loca'];
+        const file = assertValidSfnt(removeTables(input, requiredTags));
+        assert.deepStrictEqual(Object.keys(file.tables).sort(), ['GSUB']);
+    });
+
+    it('takes the bytes of the file as an ArrayBuffer, a Uint8Array (at any byte offset of its buffer) or a node Buffer, and does not change them', function() {
+        for (const path of ['sub5.ttf', 'TestGDEF-Blocklisted.woff', 'woff2/sub5.hmtx.woff2']) {
+            const buffer = readFileSync(FONTS_DIR + '/' + path);
+            const bytes = new Uint8Array(buffer);
+            const expected = new Uint8Array(removeTables(bytes.slice().buffer, COLOR_TABLE_TAGS));
+            assert.deepStrictEqual(new Uint8Array(removeTables(buffer, COLOR_TABLE_TAGS)), expected, path);
+            assert.deepStrictEqual(new Uint8Array(removeTables(bytes, COLOR_TABLE_TAGS)), expected, path);
+            const paddedBytes = new Uint8Array(bytes.length + 8);
+            paddedBytes.set(bytes, 3);
+            assert.deepStrictEqual(new Uint8Array(removeTables(paddedBytes.subarray(3, 3 + bytes.length), COLOR_TABLE_TAGS)), expected, path + ' at byte offset 3');
+            const arrayBuffer = bytes.slice().buffer;
+            removeTables(arrayBuffer, COLOR_TABLE_TAGS);
+            assert.deepStrictEqual(new Uint8Array(arrayBuffer), bytes, path + ' unchanged');
+        }
+    });
+
+    describe('throws an error', function() {
+        const header = tag => new Uint8Array([...Array.from(tag, character => character.charCodeAt(0)), 0, 1, 0, 0, 0, 0, 0, 0]);
+        // the offsets of the offset, compLength and origLength fields in a WOFF table directory entry
+        const WOFF_ENTRY_OFFSET_FIELD = 4;
+        const WOFF_ENTRY_COMP_LENGTH_FIELD = 8;
+        const WOFF_ENTRY_ORIG_LENGTH_FIELD = 12;
+
+        // the offset of the table directory entry of a tag in a WOFF file
+        function getWOFFTableEntryOffset(input, tag) {
+            const numTables = new DataView(input.buffer).getUint16(12);
+            for (let i = 0; i < numTables; i += 1) {
+                const entryOffset = 44 + i * 20;
+                if (String.fromCharCode(...input.subarray(entryOffset, entryOffset + 4)) === tag) {
+                    return entryOffset;
+                }
+            }
+            throw new Error('No ' + tag + ' table');
+        }
+
+        it('for a font collection', function() {
+            assert.throws(() => removeTables(header('ttcf'), []), /Unsupported OpenType signature ttcf/);
+            const woff = readFontFile('TestGDEF-Blocklisted.woff');
+            woff.set([0x74, 0x74, 0x63, 0x66], 4);
+            assert.throws(() => removeTables(woff, []), /Unsupported OpenType flavor ttcf/);
+            const woff2 = readFontFile('woff2/sub5.glyf.woff2');
+            woff2.set([0x74, 0x74, 0x63, 0x66], 4);
+            assert.throws(() => removeTables(woff2, []), /Unsupported OpenType flavor ttcf/);
+        });
+
+        it('for an unknown signature', function() {
+            assert.throws(() => removeTables(header('abcd'), []), /Unsupported OpenType signature abcd/);
+        });
+
+        it('for a truncated file', function() {
+            const truncations = [
+                ['sub5.ttf', 2, /Truncated font file: the signature ends past the end of the file/],
+                ['sub5.ttf', 8, /Truncated font file: the sfnt header ends past the end of the file/],
+                ['sub5.ttf', 12 + 16 * 3, /Truncated font file: the table directory ends past the end of the file/],
+                ['sub5.ttf', 7000, /Truncated font file: the \S+ table ends past the end of the file/],
+                ['TestGDEF-Blocklisted.woff', 40, /Truncated font file: the WOFF header ends past the end of the file/],
+                ['TestGDEF-Blocklisted.woff', 44 + 20 * 3, /Truncated font file: the table directory ends past the end of the file/],
+                ['TestGDEF-Blocklisted.woff', 1200, /Truncated font file: the \S+ table ends past the end of the file/],
+                ['woff2/sub5.glyf.woff2', 6, /Truncated font file: the WOFF2 header ends past the end of the file/],
+                ['woff2/sub5.glyf.woff2', 30, /WOFF2: unexpected end of the WOFF2 header/],
+                // the compressed block is read through the reader of the header, hence the same message
+                ['woff2/sub5.glyf.woff2', 2000, /WOFF2: unexpected end of the WOFF2 header/],
+            ];
+            for (const [path, length, error] of truncations) {
+                const input = readFontFile(path);
+                assert.ok(length < input.length);
+                assert.throws(() => removeTables(input.slice(0, length), []), error, path + ' ' + length);
+            }
+        });
+
+        it('for a WOFF table stored uncompressed that ends past the end of the file', function() {
+            // the offset of the uncompressed head table (54 bytes) moved to 20 bytes before the end of the file
+            const input = readFontFile('TestGDEF-Blocklisted.woff');
+            const headEntry = getWOFFTableEntryOffset(input, 'head');
+            new DataView(input.buffer).setUint32(headEntry + WOFF_ENTRY_OFFSET_FIELD, input.length - 20);
+            assert.throws(() => removeTables(input, []), /Truncated font file: the head table ends past the end of the file/);
+        });
+
+        // the WOFF 1.0 specification requires the decompressed length of a table to be its origLength, and its
+        // compLength to be at most origLength: fontTools 4.63.0 rejects these files too (AssertionError)
+        it('for a WOFF table that decompresses to fewer bytes than its original length', function() {
+            // the origLength of the compressed name table (compLength 469, origLength 966) 40 bytes longer
+            const input = readFontFile('TestGDEF-Blocklisted.woff');
+            const view = new DataView(input.buffer);
+            const origLengthOffset = getWOFFTableEntryOffset(input, 'name') + WOFF_ENTRY_ORIG_LENGTH_FIELD;
+            view.setUint32(origLengthOffset, view.getUint32(origLengthOffset) + 40);
+            assert.throws(() => removeTables(input, []), /Decompression error: name decompressed length doesn't match recorded length/);
+            assert.throws(() => parse(input.buffer), /Decompression error: name decompressed length doesn't match recorded length/);
+        });
+
+        it('for a WOFF table that decompresses to more bytes than its original length', function() {
+            // the origLength of the compressed name table 40 bytes shorter, still larger than its compLength
+            const input = readFontFile('TestGDEF-Blocklisted.woff');
+            const view = new DataView(input.buffer);
+            const origLengthOffset = getWOFFTableEntryOffset(input, 'name') + WOFF_ENTRY_ORIG_LENGTH_FIELD;
+            view.setUint32(origLengthOffset, view.getUint32(origLengthOffset) - 40);
+            assert.throws(() => removeTables(input, []), /Decompression error: name decompressed length doesn't match recorded length/);
+            assert.throws(() => parse(input.buffer), /Decompression error: name decompressed length doesn't match recorded length/);
+        });
+
+        it('for a WOFF table whose compressed length is larger than its original length', function() {
+            // the origLength of the compressed name table one byte shorter than its compLength
+            const input = readFontFile('TestGDEF-Blocklisted.woff');
+            new DataView(input.buffer).setUint32(getWOFFTableEntryOffset(input, 'name') + WOFF_ENTRY_ORIG_LENGTH_FIELD, 468);
+            const error = /Invalid WOFF table name: its compressed length is larger than its original length/;
+            assert.throws(() => removeTables(input, []), error);
+            assert.throws(() => parse(input.buffer), error);
+        });
+
+        it('for a compressed WOFF table whose compressed length is shorter than a zlib header', function() {
+            // the compLength of the compressed name table (469, origLength 966) set to 0 and to 1
+            const error = /Invalid WOFF table name: its compressed length is shorter than a zlib header/;
+            for (const compLength of [0, 1]) {
+                const input = readFontFile('TestGDEF-Blocklisted.woff');
+                new DataView(input.buffer).setUint32(getWOFFTableEntryOffset(input, 'name') + WOFF_ENTRY_COMP_LENGTH_FIELD, compLength);
+                assert.throws(() => removeTables(input, []), error, 'compLength ' + compLength);
+                assert.throws(() => parse(input.buffer), error, 'compLength ' + compLength);
+            }
+        });
+
+        it('for two tables with the same tag', function() {
+            // the tag of the second table record (GSUB, after DSIG) given to the third one too
+            const input = readFontFile('sub5.ttf');
+            input.copyWithin(12 + 16 * 2, 12 + 16, 12 + 16 + 4);
+            assert.throws(() => removeTables(input, []), /Duplicate table GSUB/);
+        });
+
+        it('for table tags that are not an array of tags of 4 printable ASCII characters', function() {
+            const input = readFontFile('sub5.ttf');
+            assert.throws(() => removeTables(input, 'COLR'), /TypeError: The table tags must be an array, not string/);
+            assert.throws(() => removeTables(input, ['SVG']), /TypeError: Invalid table tag "SVG"/);
+            assert.throws(() => removeTables(input, ['COLRV']), /TypeError: Invalid table tag "COLRV"/);
+            assert.throws(() => removeTables(input, ['SVG\u00A0']), /TypeError: Invalid table tag "SVG\u00A0"/);
+            assert.throws(() => removeTables(input, [42]), /TypeError: Invalid table tag 42/);
+        });
     });
 });

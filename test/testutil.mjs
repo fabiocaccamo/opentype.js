@@ -171,4 +171,56 @@ function getFeatureLookupTables(query, feature) {
     return feature.lookupListIndexes.map(lookupIndex => query.getLookupByIndex(lookupIndex));
 }
 
-export { hex, unhex, unhexArray, createMockObject, enableMockCanvas, replaceTextGlyphs, getFeatureLookupTables };
+/**
+ * The header, the table records and the tables of an sfnt font file, read as the OpenType specification describes
+ * them (not with opentype.js); each table is a copy of its bytes
+ * @param {Uint8Array} bytes
+ * @returns {{sfntVersion: string, numTables: number, searchRange: number, entrySelector: number, rangeShift: number,
+ *            records: Array<{tag: string, checkSum: number, offset: number, length: number}>, tables: Object<string, Uint8Array>}}
+ */
+function readSfntFile(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const readTag = offset => String.fromCharCode(...bytes.subarray(offset, offset + 4));
+    const numTables = view.getUint16(4);
+    const records = [];
+    const tables = {};
+    for (let i = 0; i < numTables; i += 1) {
+        const recordOffset = 12 + i * 16;
+        const record = {
+            tag: readTag(recordOffset),
+            checkSum: view.getUint32(recordOffset + 4),
+            offset: view.getUint32(recordOffset + 8),
+            length: view.getUint32(recordOffset + 12),
+        };
+        records.push(record);
+        tables[record.tag] = bytes.slice(record.offset, record.offset + record.length);
+    }
+    return {
+        sfntVersion: readTag(0),
+        numTables,
+        searchRange: view.getUint16(6),
+        entrySelector: view.getUint16(8),
+        rangeShift: view.getUint16(10),
+        records,
+        tables,
+    };
+}
+
+/**
+ * The checksum of the OpenType specification: the sum of the big-endian uint32 values of the bytes, zero padded to a
+ * multiple of 4, modulo 2^32
+ * @param {Uint8Array} bytes
+ * @returns {number}
+ */
+function getSpecificationCheckSum(bytes) {
+    const padded = new Uint8Array((bytes.length + 3) & ~3);
+    padded.set(bytes);
+    const view = new DataView(padded.buffer);
+    let sum = 0;
+    for (let offset = 0; offset < padded.length; offset += 4) {
+        sum = (sum + view.getUint32(offset)) % 0x100000000;
+    }
+    return sum;
+}
+
+export { hex, unhex, unhexArray, createMockObject, enableMockCanvas, replaceTextGlyphs, getFeatureLookupTables, readSfntFile, getSpecificationCheckSum };
