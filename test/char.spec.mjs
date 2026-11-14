@@ -1,12 +1,18 @@
 import assert from 'assert';
+import { readFileSync } from 'fs';
 import {
     getArabicJoiningType,
+    getCanonicalComposition,
+    getCanonicalDecomposition,
     getCharScript,
     getCharScriptExtensions,
     getCharTextScript,
+    getModifiedCombiningClass,
     getScriptRuns,
     getSpaceFallbackType,
     isArabicChar,
+    isTashkeelArabicChar,
+    isUnicodeMark,
     isVariationSelector,
     isVariationSequenceSelector,
     SPACE_TYPES
@@ -100,6 +106,22 @@ describe('char.mjs', function() {
         });
     });
 
+    // the general categories of UnicodeData.txt (Unicode 16.0.0): U+0898..089F and U+08CA..08FF are combining marks (Mn) of
+    // Arabic Extended-B and Arabic Extended-A, but U+08E2 ARABIC DISPUTED END OF AYAH, a format character (Cf)
+    describe('isTashkeelArabicChar', function() {
+        it('gives true for the combining marks of the Arabic, Arabic Extended-B and Arabic Extended-A blocks', function() {
+            for (const char of ['\u{64E}', '\u{654}', '\u{6DC}', '\u{898}', '\u{89F}', '\u{8CA}', '\u{8D3}', '\u{8E1}', '\u{8E3}', '\u{8F3}', '\u{8FF}']) {
+                assert.equal(isTashkeelArabicChar(char), true, char.codePointAt(0).toString(16));
+            }
+        });
+
+        it('gives false for the letters and the format characters around these marks', function() {
+            for (const char of ['\u{628}', '\u{897}', '\u{8A0}', '\u{8C9}', '\u{8E2}', '\u{900}']) {
+                assert.equal(isTashkeelArabicChar(char), false, char.codePointAt(0).toString(16));
+            }
+        });
+    });
+
     describe('isVariationSequenceSelector', function() {
         it('gives true for the Mongolian free variation selectors and the variation selectors', function() {
             for (const char of ['\u{180B}', '\u{180D}', '\u{FE00}', '\u{FE0F}', '\u{E0100}', '\u{E01EF}']) {
@@ -163,6 +185,220 @@ describe('char.mjs', function() {
                 NOT_SPACE: 0, EM: 1, EM_2: 2, EM_3: 3, EM_4: 4, EM_5: 5, EM_6: 6, EM_16: 16, FOUR_EM_18: 17, SPACE: 18,
                 FIGURE: 19, PUNCTUATION: 20, NARROW: 21
             });
+        });
+    });
+
+    describe('isUnicodeMark', function() {
+        it('takes the chars of the Mn, Mc and Me general categories as marks, like HarfBuzz', function() {
+            // UnicodeData.txt 16.0.0: U+0301 Mn, U+0903 DEVANAGARI SIGN VISARGA Mc, U+20DD COMBINING ENCLOSING CIRCLE Me,
+            // U+FE00 VARIATION SELECTOR-1 Mn, U+034F COMBINING GRAPHEME JOINER Mn, U+1D165 MUSICAL SYMBOL COMBINING STEM Mc
+            for (const char of ['\u{301}', '\u{903}', '\u{20DD}', '\u{FE00}', '\u{34F}', '\u{1D165}']) {
+                assert.strictEqual(isUnicodeMark(char), true, char.codePointAt(0).toString(16));
+            }
+            // U+00B4 ACUTE ACCENT Sk, U+02CA MODIFIER LETTER ACUTE ACCENT Lm, U+0E33 THAI CHARACTER SARA AM Lo, U+200D Cf
+            for (const char of ['a', '\u{B4}', '\u{2CA}', '\u{E33}', '\u{200D}', ' ']) {
+                assert.strictEqual(isUnicodeMark(char), false, char.codePointAt(0).toString(16));
+            }
+        });
+    });
+
+    describe('getModifiedCombiningClass', function() {
+        it('gives a mark its Canonical_Combining_Class', function() {
+            // UnicodeData.txt 16.0.0: U+0301 230, U+0323 220, U+0328 COMBINING OGONEK 202, U+1D165 MUSICAL SYMBOL COMBINING
+            // STEM 216
+            assert.strictEqual(getModifiedCombiningClass('\u{301}'), 230);
+            assert.strictEqual(getModifiedCombiningClass('\u{323}'), 220);
+            assert.strictEqual(getModifiedCombiningClass('\u{328}'), 202);
+            assert.strictEqual(getModifiedCombiningClass('\u{1D165}'), 216);
+        });
+
+        it('gives the classes HarfBuzz modifies, the shadda before the Arabic vowel marks, the dagesh before the Hebrew vowels', function() {
+            // _hb_modified_combining_class (hb-unicode.cc of HarfBuzz 11.3.2): U+064E FATHA 30 -> 31, U+0650 KASRA 32 -> 33,
+            // U+0651 SHADDA 33 -> 27, U+05B7 HEBREW POINT PATAH 17 -> 20, U+05BC HEBREW POINT DAGESH 21 -> 12, U+0C55 TELUGU
+            // LENGTH MARK 84 -> 4, U+0E38 THAI CHARACTER SARA U 103 -> 3, U+0F72 TIBETAN VOWEL SIGN I 130 -> 132
+            const expectedClasses = [
+                ['\u{64E}', 31], ['\u{650}', 33], ['\u{651}', 27], ['\u{5B7}', 20], ['\u{5BC}', 12], ['\u{C55}', 4], ['\u{E38}', 3],
+                ['\u{F72}', 132]
+            ];
+            for (const [char, combiningClass] of expectedClasses) {
+                assert.strictEqual(getModifiedCombiningClass(char), combiningClass, char.codePointAt(0).toString(16));
+            }
+        });
+
+        it('gives the classes HarfBuzz sets for three marks on their own', function() {
+            // hb_unicode_funcs_t::modified_combining_class (hb-unicode.hh): U+1A60 TAI THAM SIGN SAKOT (9) and U+0FC6
+            // TIBETAN SYMBOL PADMA GDAN (220) 254, U+0F39 TIBETAN MARK TSA -PHRU (216) 127
+            assert.strictEqual(getModifiedCombiningClass('\u{1A60}'), 254);
+            assert.strictEqual(getModifiedCombiningClass('\u{FC6}'), 254);
+            assert.strictEqual(getModifiedCombiningClass('\u{F39}'), 127);
+        });
+
+        it('gives 0 to the starters', function() {
+            // U+0E33 THAI CHARACTER SARA AM, U+093E DEVANAGARI VOWEL SIGN AA (Mc, class 0), U+034F COMBINING GRAPHEME JOINER
+            for (const char of ['a', ' ', '\u{E33}', '\u{93E}', '\u{34F}', '\u{1F600}']) {
+                assert.strictEqual(getModifiedCombiningClass(char), 0, char.codePointAt(0).toString(16));
+            }
+        });
+
+        it('gives every mark its Canonical_Combining_Class modified like HarfBuzz, on the whole range of code points', function() {
+            // the classes of Unicode 16.0.0 from the unicodedata module of Python (test/generate-combining-classes.py), then
+            // the classes HarfBuzz 11.3.2 modifies (HB_MODIFIED_COMBINING_CLASS_CCC* in hb-unicode.hh, those that are not
+            // the class itself) and the three marks it sets on its own (hb_unicode_funcs_t::modified_combining_class), for
+            // the marks of \p{M} only, like _hb_glyph_info_set_unicode_props
+            const harfBuzzClasses = new Map([
+                [10, 22], [11, 15], [12, 16], [13, 17], [14, 23], [15, 18], [16, 19], [17, 20], [18, 21], [19, 14], [20, 24],
+                [21, 12], [22, 25], [23, 13], [24, 10], [25, 11], [27, 28], [28, 29], [29, 30], [30, 31], [31, 32], [32, 33],
+                [33, 27], [84, 4], [91, 5], [103, 3], [130, 132], [132, 131]
+            ]);
+            const harfBuzzCodePointClasses = new Map([[0x1A60, 254], [0x0FC6, 254], [0x0F39, 127]]);
+            const unicodeClasses = new Map();
+            for (const [first, last, combiningClass] of JSON.parse(readFileSync('./test/combining-classes-16.0.0.json', 'utf8'))) {
+                for (let codePoint = first; codePoint <= last; codePoint++) {
+                    unicodeClasses.set(codePoint, combiningClass);
+                }
+            }
+            const getExpectedClass = (codePoint, char) => {
+                if (!/\p{M}/u.test(char)) {
+                    return 0;
+                }
+                if (harfBuzzCodePointClasses.has(codePoint)) {
+                    return harfBuzzCodePointClasses.get(codePoint);
+                }
+                const unicodeClass = unicodeClasses.get(codePoint) || 0;
+                return harfBuzzClasses.has(unicodeClass) ? harfBuzzClasses.get(unicodeClass) : unicodeClass;
+            };
+            const differences = [];
+            for (let codePoint = 0; codePoint <= 0x10FFFF; codePoint++) {
+                const char = String.fromCodePoint(codePoint);
+                const expectedClass = getExpectedClass(codePoint, char);
+                const modifiedClass = getModifiedCombiningClass(char);
+                if (modifiedClass !== expectedClass) {
+                    differences.push([codePoint.toString(16), modifiedClass, expectedClass]);
+                }
+            }
+            assert.deepStrictEqual(differences, []);
+        });
+    });
+
+    describe('getCanonicalDecomposition', function() {
+        const toCodePoints = chars => chars && chars.map(char => char.codePointAt(0));
+
+        it('gives the canonical decomposition mapping of UnicodeData.txt, one step', function() {
+            // UnicodeData.txt 16.0.0, field 5: U+00C0 0041 0300, U+01D5 00DC 0304 (U+00DC decomposes again), U+0F73
+            // 0F71 0F72, U+0344 COMBINING GREEK DIALYTIKA TONOS 0308 0301, U+0958 DEVANAGARI LETTER QA 0915 093C
+            // (excluded from composition)
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{C0}')), [0x41, 0x300]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{1D5}')), [0xDC, 0x304]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{F73}')), [0xF71, 0xF72]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{344}')), [0x308, 0x301]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{958}')), [0x915, 0x93C]);
+        });
+
+        it('gives the singletons, whose char can decompose again', function() {
+            // UnicodeData.txt 16.0.0: U+212B ANGSTROM SIGN 00C5, U+2001 EM QUAD 2003, U+1FEE GREEK DIALYTIKA AND OXIA 0385
+            // (00A8 0301), U+0340 COMBINING GRAVE TONE MARK 0300, U+F900 CJK COMPATIBILITY IDEOGRAPH 8C48
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{212B}')), [0xC5]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{2001}')), [0x2003]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{1FEE}')), [0x385]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{340}')), [0x300]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{F900}')), [0x8C48]);
+        });
+
+        it('gives the first char of a decomposition that is decomposed and excluded from composition', function() {
+            // UnicodeData.txt 16.0.0: U+FB2C FB49 05C1, U+1D160 MUSICAL SYMBOL EIGHTH NOTE 1D15F 1D16E, U+1D1BF 1D1BB 1D16F
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{FB2C}')), [0xFB49, 0x5C1]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{1D160}')), [0x1D15F, 0x1D16E]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{1D1BF}')), [0x1D1BB, 0x1D16F]);
+        });
+
+        it('decomposes a Hangul syllable LVT into its syllable LV and its T jamo, a syllable LV into its jamo', function() {
+            // _hb_ucd_decompose_hangul (hb-ucd.cc of HarfBuzz 11.3.2), the Unicode Standard section 3.12: U+AC01 AC00 11A8,
+            // U+AC00 1100 1161
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{AC01}')), [0xAC00, 0x11A8]);
+            assert.deepStrictEqual(toCodePoints(getCanonicalDecomposition('\u{AC00}')), [0x1100, 0x1161]);
+        });
+
+        it('gives null for a char without a canonical decomposition', function() {
+            // U+FB01 LATIN SMALL LIGATURE FI and U+00BD VULGAR FRACTION ONE HALF have compatibility decompositions only
+            for (const char of ['a', '\u{301}', '\u{FB01}', '\u{BD}', '\u{1F600}', '\u{E000}']) {
+                assert.strictEqual(getCanonicalDecomposition(char), null, char.codePointAt(0).toString(16));
+            }
+        });
+
+        it('gives back the full decomposition of every char when applied again to the first char, like NFD', function() {
+            // the canonical decomposition of String.prototype.normalize (the Unicode version of the JavaScript engine),
+            // checked on every code point of the BMP and of the planes 1 and 2 with a canonical decomposition, Hangul included
+            const decomposeFully = char => {
+                const decomposition = getCanonicalDecomposition(char);
+                return decomposition ? decomposeFully(decomposition[0]) + decomposition.slice(1).join('') : char;
+            };
+            for (let codePoint = 0xA0; codePoint < 0x30000; codePoint++) {
+                const char = String.fromCodePoint(codePoint);
+                if (codePoint >= 0xD800 && codePoint <= 0xDFFF || char.normalize('NFD') === char) {
+                    continue;
+                }
+                assert.strictEqual(decomposeFully(char).normalize('NFD'), char.normalize('NFD'), codePoint.toString(16));
+            }
+        });
+
+        it('gives a decomposition of single chars for every char, like UnicodeData.txt', function() {
+            // UnicodeData.txt 16.0.0, field 5: every canonical decomposition mapping is a sequence of code points, checked on
+            // every code point of the BMP and of the planes 1 and 2 (e.g. U+FB2D FB49 05C2, U+1D161 1D15F 1D16F)
+            for (let codePoint = 0xA0; codePoint < 0x30000; codePoint++) {
+                const decomposition = codePoint >= 0xD800 && codePoint <= 0xDFFF ? null : getCanonicalDecomposition(String.fromCodePoint(codePoint));
+                if (decomposition) {
+                    assert.ok(decomposition.every(char => Array.from(char).length === 1), codePoint.toString(16));
+                }
+            }
+        });
+    });
+
+    describe('getCanonicalComposition', function() {
+        it('gives the primary composite of a char and a mark', function() {
+            // UnicodeData.txt 16.0.0: U+00E9 0065 0301, U+1E08 00C7 0301, U+01D5 00DC 0304, U+0623 0627 0654, U+0BCA 0BC6
+            // 0BBE (two spacing marks of class 0)
+            assert.strictEqual(getCanonicalComposition('e', '\u{301}'), '\u{E9}');
+            assert.strictEqual(getCanonicalComposition('\u{C7}', '\u{301}'), '\u{1E08}');
+            assert.strictEqual(getCanonicalComposition('\u{DC}', '\u{304}'), '\u{1D5}');
+            assert.strictEqual(getCanonicalComposition('\u{627}', '\u{654}'), '\u{623}');
+            assert.strictEqual(getCanonicalComposition('\u{BC6}', '\u{BBE}'), '\u{BCA}');
+        });
+
+        it('composes the Hangul syllables of their jamo', function() {
+            // _hb_ucd_compose_hangul (hb-ucd.cc of HarfBuzz 11.3.2): L V, LV T (not U+11A7, before the first T)
+            assert.strictEqual(getCanonicalComposition('\u{1100}', '\u{1161}'), '\u{AC00}');
+            assert.strictEqual(getCanonicalComposition('\u{AC00}', '\u{11A8}'), '\u{AC01}');
+            assert.strictEqual(getCanonicalComposition('\u{AC00}', '\u{11A7}'), null);
+        });
+
+        it('does not compose into a char excluded from composition', function() {
+            // CompositionExclusions.txt and DerivedNormalizationProps.txt 16.0.0, Full_Composition_Exclusion: U+0958
+            // (0915 093C), U+FB2C (FB49 05C1), U+0344 (0308 0301, not a starter)
+            assert.strictEqual(getCanonicalComposition('\u{915}', '\u{93C}'), null);
+            assert.strictEqual(getCanonicalComposition('\u{FB49}', '\u{5C1}'), null);
+            assert.strictEqual(getCanonicalComposition('\u{308}', '\u{301}'), null);
+        });
+
+        it('composes only the two chars of the canonical decomposition, not a canonical equivalent of the first one', function() {
+            // U+212B ANGSTROM SIGN is a singleton of U+00C5, U+01FA is 00C5 0301: hb_ucd_compose looks the pair 212B 0301 up,
+            // which has no composite; a and b (no composite) and a mark before a base (U+0301 e) are not a pair
+            assert.strictEqual(getCanonicalComposition('\u{212B}', '\u{301}'), null);
+            assert.strictEqual(getCanonicalComposition('\u{C5}', '\u{301}'), '\u{1FA}');
+            assert.strictEqual(getCanonicalComposition('a', 'b'), null);
+            assert.strictEqual(getCanonicalComposition('\u{301}', 'e'), null);
+        });
+
+        it('composes every char of a two-char canonical decomposition back but the ones excluded from composition, like NFC', function() {
+            // the composition of String.prototype.normalize (the Unicode version of the JavaScript engine), checked on every
+            // code point of the BMP and of the planes 1 and 2 with a decomposition of two chars, Hangul included
+            for (let codePoint = 0xA0; codePoint < 0x30000; codePoint++) {
+                const char = String.fromCodePoint(codePoint);
+                const decomposition = codePoint >= 0xD800 && codePoint <= 0xDFFF ? null : getCanonicalDecomposition(char);
+                if (decomposition && decomposition.length === 2) {
+                    const expected = char.normalize('NFC') === char ? char : null;
+                    assert.strictEqual(getCanonicalComposition(decomposition[0], decomposition[1]), expected, codePoint.toString(16));
+                }
+            }
         });
     });
 

@@ -146,18 +146,21 @@ describe('font.mjs', function() {
         it('enables and disables the features of every shaper, rvrn and rand included in their defaults', function() {
             // the substitution features HarfBuzz 11.3.2 enables by default for every script (hb_ot_shape_collect_features:
             // rvrn, rand, ccmp, locl, rlig, calt, clig, liga, rclt), the Arabic shaper adding the forms and mset
-            // (collect_features_arabic), the Thai shaper none; the direction features (ltra, ltrm, rtla, rtlm), which
-            // HarfBuzz enables by the direction of the run, are added to each run (see Bidi); not yet the stch of the
-            // Arabic shaper, which HarfBuzz also enables
+            // (collect_features_arabic), the Thai shaper none, the Indic shaper nukt (collect_features_indic); the
+            // direction features (ltra, ltrm, rtla, rtlm), which HarfBuzz enables by the direction of the run, are added
+            // to each run (see Bidi); not yet the stch of the Arabic shaper, which HarfBuzz also enables, nor the other
+            // features of the Indic shaper, which also turns liga off (override_features_indic)
             assert.deepStrictEqual(font.updateFeatures(), [
                 { script: 'arab', tags: ['rvrn', 'ccmp', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'mset', 'rand'] },
                 { script: 'latn', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] },
-                { script: 'thai', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] }
+                { script: 'thai', tags: ['rvrn', 'ccmp', 'locl', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] },
+                { script: 'indic', tags: ['rvrn', 'ccmp', 'locl', 'nukt', 'rlig', 'rclt', 'calt', 'liga', 'clig', 'rand'] }
             ]);
             assert.deepStrictEqual(font.updateFeatures({ ccmp: false, liga: false, ss01: true }), [
                 { script: 'arab', tags: ['rvrn', 'locl', 'isol', 'init', 'medi', 'fina', 'rlig', 'rclt', 'calt', 'clig', 'mset', 'rand', 'ss01'] },
                 { script: 'latn', tags: ['rvrn', 'locl', 'rlig', 'rclt', 'calt', 'clig', 'rand', 'ss01'] },
-                { script: 'thai', tags: ['rvrn', 'locl', 'rlig', 'rclt', 'calt', 'clig', 'rand', 'ss01'] }
+                { script: 'thai', tags: ['rvrn', 'locl', 'rlig', 'rclt', 'calt', 'clig', 'rand', 'ss01'] },
+                { script: 'indic', tags: ['rvrn', 'locl', 'nukt', 'rlig', 'rclt', 'calt', 'clig', 'rand', 'ss01'] }
             ]);
         });
 
@@ -1361,6 +1364,32 @@ describe('font.mjs', function() {
             assert.strictEqual(formatShape(pairFont.shape('ac', { features: { mset: true } })), '[5=0+470|7=1+500]');
         });
 
+        it('applies the GPOS lookups of nukt to the runs of the Indic shaper only, chosen by their GSUB script', function() {
+            // TestNormalization.ttf with a GPOS of dev2 (feaLib): feature nukt { pos kaDevanagari 100; } nukt;
+            // -u 0915: [64=0+871]; --features=-nukt: [64=0+771]; --script=Latn: [64=0+771]; on a copy without the dev2
+            // script of GSUB, whose GSUB script DFLT gives the run the default shaper: [64=0+771]
+            const loadGposNuktFont = () => {
+                const font = loadSync('./test/fonts/TestNormalization.ttf');
+                const nuktFeature = font.position.getFeatureTable('dev2', 'dflt', 'nukt', true);
+                const gpos = font.tables.gpos;
+                gpos.lookups.push({
+                    lookupType: 1,
+                    lookupFlag: 0,
+                    subtables: [{ posFormat: 1, coverage: { format: 1, glyphs: [64] }, value: { xAdvance: 100 } }]
+                });
+                nuktFeature.lookupListIndexes.push(gpos.lookups.length - 1);
+                return font;
+            };
+            const gposNuktFont = loadGposNuktFont();
+            assert.strictEqual(formatShape(gposNuktFont.shape('\u{915}')), '[64=0+871]');
+            assert.strictEqual(formatShape(gposNuktFont.shape('\u{915}', { features: { nukt: false } })), '[64=0+771]');
+            assert.strictEqual(formatShape(gposNuktFont.shape('\u{915}', { script: 'latn' })), '[64=0+771]');
+            const fontWithoutDevanagari = loadGposNuktFont();
+            const gsubScripts = fontWithoutDevanagari.tables.gsub.scripts;
+            fontWithoutDevanagari.tables.gsub.scripts = gsubScripts.filter(scriptRecord => scriptRecord.tag !== 'dev2');
+            assert.strictEqual(formatShape(fontWithoutDevanagari.shape('\u{915}')), '[64=0+771]');
+        });
+
         it('takes the GPOS features of each script run from its own shaper in a mixed text', function() {
             // HarfBuzz shapes each run on its own (one hb-shape call on the mixed text is one script): -u 0061,0063
             // [5=0+500|7=1+500] and -u 0628,0627 [11=1+300|18=0+470], the clusters shifted by the start of the run
@@ -1719,14 +1748,10 @@ describe('font.mjs', function() {
                     assert.deepStrictEqual([glyphA, glyphB], [[glyphIndexes.a, 470, 0, 0], [glyphIndexes.b, 470, -30, 0]]);
                 });
 
-            itFailsUntilFixed('does not kern with the kern table the bases of a letter and a combining mark that HarfBuzz composes',
-                '_createBidi (src/font.mjs): A and gravecomb are not composed into Agrave (the root cause of the known failure ' +
-                'of the kern lookups with IgnoreMarks of LookupFlags.ttf), so getKernTablePair (src/position.mjs) kerns A V -100 ' +
-                'across the gravecomb, a GDEF mark: 900',
-                function() {
-                    // -u 0041,0300,0056: [23=0+500|22=2+500], Agrave V, which has no pair
-                    assert.strictEqual(kernTableFont.getAdvanceWidth('A\u{300}V', 1000), 1000);
-                });
+            it('does not kern with the kern table the bases of a letter and a combining mark that HarfBuzz composes', function() {
+                // -u 0041,0300,0056: [23=0+500|22=2+500], Agrave V, which has no pair
+                assert.strictEqual(kernTableFont.getAdvanceWidth('A\u{300}V', 1000), 1000);
+            });
 
             itFailsUntilFixed('kerns a pair of the kern table across a default ignorable, which HarfBuzz deletes without a space glyph',
                 'getKernTablePair (src/position.mjs) and Font.shape (src/font.mjs): the zero width joiner U+200D, which the font ' +
@@ -2027,24 +2052,15 @@ describe('font.mjs', function() {
             assert.strictEqual(formatShape(lowMemoryVariableFont.shape('1\u{202F}0', { variation })), '[533=0+535|659=1+100|532=2+675]');
         });
 
-        itFailsUntilFixed('draws a space the font has not with the glyph of its canonical decomposition, like HarfBuzz',
-            'getCharacterGlyph (src/font.mjs): U+2001 EM QUAD, which the font has not, is drawn with the glyph of U+0020 and an ' +
-            'advance of an em; HarfBuzz first decomposes it into U+2003 EM SPACE, which the font has (decompose_current_character, ' +
-            'point 25b of the normalization)',
-            function() {
-                // -u 2001: [8=0+1900]
-                assert.strictEqual(formatShape(spaceFont.shape('\u{2001}')), '[8=0+1900]');
-            });
+        it('draws a space the font has not with the glyph of its canonical decomposition, like HarfBuzz', function() {
+            // -u 2001: [8=0+1900]
+            assert.strictEqual(formatShape(spaceFont.shape('\u{2001}')), '[8=0+1900]');
+        });
 
-        itFailsUntilFixed('draws a space followed by marks and a variation selector with .notdef, like HarfBuzz',
-            'getCharacterGlyph (src/font.mjs) skips the fallback only when the next character is a variation selector: ' +
-            'U+00A0 U+0301 U+FE00 is drawn with the glyph of U+0020, which ccmp ligates with the acute; HarfBuzz maps every ' +
-            'character of a cluster of marks with a variation selector to its nominal glyph, .notdef for U+00A0, without the ' +
-            'fallback (handle_variation_selector_cluster), which needs the clusters of marks of Unicode (point 25b of the normalization)',
-            function() {
-                // -u 00A0,0301,FE00: [0=0+1000|7=1+0|1=2+0], the glyph of U+00A0 first
-                assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{301}\u{FE00}').slice(0, 1)), '[0=0+1000]');
-            });
+        it('draws a space followed by marks and a variation selector with .notdef, like HarfBuzz', function() {
+            // -u 00A0,0301,FE00: [0=0+1000|7=1+0|1=2+0], the glyph of U+00A0 first
+            assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{301}\u{FE00}').slice(0, 1)), '[0=0+1000]');
+        });
 
         describe('of real fonts', function() {
             // hb-shape --no-glyph-names --cluster-level=1 [--variations=<variation>] <font> -u <code points>, in test/fonts
@@ -2105,6 +2121,239 @@ describe('font.mjs', function() {
                     formatShape(changaFont.shape('1\u{202F}0', { variation: { wght: 200 } })), '[533=0+400|659=1+134|532=2+605]'
                 );
             });
+        });
+    });
+
+    describe('the Unicode normalization of HarfBuzz', function() {
+        // TestNormalization.ttf, built by test/generate-normalization-font.py (see normalization.spec.mjs): ccmp splits
+        // agrave (9) into a (4) and gravecomb (13); the marks have no advance, no GPOS (HarfBuzz places the marks with its
+        // fallback mark positioning, the offsets are left out)
+        // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 [--features=<features>] TestNormalization.ttf -u <code points>
+        let normalizationFont;
+
+        // a shaped text in the format of hb-shape without the offsets: glyph=cluster+advance
+        const formatShape = glyphPositions => '[' + glyphPositions.map(({ glyph, start, xAdvance }) => `${glyph.index}=${start}+${xAdvance}`).join('|') + ']';
+
+        before(function() {
+            normalizationFont = loadSync('./test/fonts/TestNormalization.ttf');
+        });
+
+        it('shapes the glyphs of the normalized text, in the clusters of the normalization', function() {
+            // e and the acute composed into eacute, a and the grave into agrave, which ccmp splits again in its cluster:
+            // -u 0065,0301,0020,0061,0300: [10=0+511|1=2+250|4=3+500|13=3+0]; --features=-ccmp -u 0061,0300: [9=0+501]
+            assert.strictEqual(formatShape(normalizationFont.shape('e\u{301} a\u{300}')), '[10=0+511|1=2+250|4=3+500|13=3+0]');
+            assert.strictEqual(formatShape(normalizationFont.shape('a\u{300}', { features: { ccmp: false } })), '[9=0+501]');
+            // the dot below put before the acute and composed with a: -u 0061,0301,0323,0065: [11=0+502|14=0@-101,12+0|5=3+510]
+            assert.strictEqual(formatShape(normalizationFont.shape('a\u{301}\u{323}e')), '[11=0+502|14=0+0|5=3+510]');
+        });
+
+        it('gives the glyphs of the normalized text the ranges of their clusters', function() {
+            // -u 0065,0301,0020,0061,0300: the clusters 0, 2, 3 and 3 of a text of 5 characters
+            const clusters = normalizationFont.stringToGlyphClusters('e\u{301} a\u{300}');
+            assert.deepStrictEqual(clusters.map(({ glyph, start, end }) => [glyph.index, start, end]), [[10, 0, 2], [1, 2, 3], [4, 3, 5], [13, 3, 5]]);
+            assert.deepStrictEqual(normalizationFont.stringToGlyphIndexes('a\u{301}\u{323}e'), [11, 14, 5]);
+        });
+
+        it('normalizes an Arabic run with the marks of the Arabic shaper, in visual order', function() {
+            // beh, fatha, shadda: the shadda first, -u 0628,064E,0651: [24=1@430,174+0|26=1@430,12+0|23=0+560]
+            assert.strictEqual(formatShape(normalizationFont.shape('\u{628}\u{64E}\u{651}')), '[24=1+0|26=1+0|23=0+560]');
+        });
+
+        it('puts the shadda before the fatha of a text in NFC, like HarfBuzz: Jomhuria', function() {
+            // beh, fatha, shadda (the canonical order of NFC, 30 before 33), lam: the shadda first, then the fatha, which
+            // the font places under the shadda (1111) in the cluster of the two marks
+            // hb-shape --no-glyph-names --cluster-level=1 Jomhuria-Regular.ttf -u 0628,064E,0651,0644
+            // [1431=3+1383|1111=1@-51,-400+0|475=1@-50,-800+0|1204=0+517]
+            const jomhuriaFont = loadSync('./test/fonts/Jomhuria-Regular.ttf');
+            const glyphPositions = jomhuriaFont.shape('\u{628}\u{64E}\u{651}\u{644}');
+            assert.deepStrictEqual(glyphPositions.map(({ glyph, start, xAdvance, xOffset, yOffset }) => [glyph.index, start, xAdvance, xOffset, yOffset]),
+                [[1431, 3, 1383, 0, 0], [1111, 1, 0, -51, -400], [475, 1, 0, -50, -800], [1204, 0, 517, 0, 0]]);
+        });
+
+        it('lays out and draws the normalized text', function() {
+            // -u 0065,0301,0020,0061,0300: 511 + 250 + 500
+            assert.strictEqual(normalizationFont.getAdvanceWidth('e\u{301} a\u{300}', 1000), 1261);
+            const glyphIndexes = [];
+            normalizationFont.forEachGlyph('\u{1D6}', 0, 0, 1000, {}, glyph => glyphIndexes.push(glyph.index));
+            // u, dieresis, macron: -u 01D6: [6=0+520|16=0@-110,12+0|15=0@-110,174+0]
+            assert.deepStrictEqual(glyphIndexes, [6, 16, 15]);
+        });
+
+        // the glyphs and the clusters of a text, by cluster then glyph, whatever the order of the glyphs of a cluster and
+        // of a right-to-left run (the fork lays a Hebrew run out from left to right, a bug of its bidi)
+        const getSortedGlyphClusters = (font, text, options) => font.stringToGlyphClusters(text, options)
+            .map(({ glyph, start }) => [glyph.index, start])
+            .sort(([glyphIndexA, startA], [glyphIndexB, startB]) => startA - startB || glyphIndexA - glyphIndexB);
+
+        it('normalizes a run with the shaper HarfBuzz picks from its script and from its GSUB script', function() {
+            // ka and the vowel sign o, decomposed into the vowel signs e and aa by the Indic shaper of the bng2 script of
+            // GSUB: --trace -u 0995,09CB, start table GSUB: [30=0|35=1|34=1] (then reordered by the Indic shaper, which
+            // the fork has not: [35=0+705|30=0+701|34=1+704]); with the default shaper of the latn script:
+            // --script=Latn -u 0995,09CB: [30=0|36=1]
+            assert.deepStrictEqual(normalizationFont.stringToGlyphIndexes('\u{995}\u{9CB}'), [30, 35, 34]);
+            assert.deepStrictEqual(normalizationFont.stringToGlyphIndexes('\u{995}\u{9CB}', { script: 'latn' }), [30, 36]);
+            // the Bengali run of a copy without the bng2 script of GSUB, whose GSUB script DFLT gives it the default
+            // shaper (fontTools): -u 0995,09CB: [30=0|36=1]
+            const fontWithoutBengali = loadSync('./test/fonts/TestNormalization.ttf');
+            const gsubScripts = fontWithoutBengali.tables.gsub.scripts;
+            fontWithoutBengali.tables.gsub.scripts = gsubScripts.filter(scriptRecord => scriptRecord.tag !== 'bng2');
+            assert.deepStrictEqual(fontWithoutBengali.stringToGlyphIndexes('\u{995}\u{9CB}'), [30, 36]);
+            // the script option taken literally: beng, which the GSUB of the font has not, falls back to DFLT, which gives
+            // the run the default shaper like the copy above; bng2 the Indic shaper
+            assert.deepStrictEqual(normalizationFont.stringToGlyphIndexes('\u{995}\u{9CB}', { script: 'beng' }), [30, 36]);
+            assert.deepStrictEqual(normalizationFont.stringToGlyphIndexes('\u{995}\u{9CB}', { script: 'bng2' }), [30, 35, 34]);
+        });
+
+        it('gives the indic features to a literal Indic script tag whose GSUB script is dflt', function() {
+            // a copy whose GSUB has only its DFLT script, renamed dflt (fontTools): --script=Deva -u 0958: [66=0], nukt
+            // composing again the ka and the nukta of the normalization; --script=Deva --features=-nukt -u 0958: [64=0|65=0]
+            const defaultScriptFont = loadSync('./test/fonts/TestNormalization.ttf');
+            const defaultScriptRecord = defaultScriptFont.tables.gsub.scripts.find(scriptRecord => scriptRecord.tag === 'DFLT');
+            defaultScriptFont.tables.gsub.scripts = [{ tag: 'dflt', script: defaultScriptRecord.script }];
+            assert.deepStrictEqual(defaultScriptFont.stringToGlyphIndexes('\u{958}', { script: 'dev2' }), [66]);
+            assert.deepStrictEqual(defaultScriptFont.stringToGlyphIndexes('\u{958}', { script: 'dev2', features: { nukt: false } }), [64, 65]);
+            // a tag of the third version too, since the shaper comes from the GSUB script chosen for it, dflt, and not
+            // from the tag (hb_ot_shaper_categorize): the same [66=0]
+            assert.deepStrictEqual(defaultScriptFont.stringToGlyphIndexes('\u{958}', { script: 'dev3' }), [66]);
+        });
+
+        it('normalizes a Lao run like the default shaper, with the Thai shaper', function() {
+            // ka, the acute and the dot below (no Lao glyph in the font), the dot below put before the acute:
+            // --script=Laoo -u 0E81,0301,0323: [0=0|17=1|14=1]; the tone mark mai ek (122) after the vowel sign u (118):
+            // -u 0E81,0EC8,0EB8: [0=0|0=1|0=1]
+            const laoClusters = text => normalizationFont.stringToGlyphClusters(text).map(({ glyph, start }) => [glyph.index, start]);
+            assert.deepStrictEqual(laoClusters('\u{E81}\u{301}\u{323}'), [[0, 0], [17, 1], [14, 1]]);
+            assert.deepStrictEqual(laoClusters('\u{E81}\u{EC8}\u{EB8}'), [[0, 0], [0, 1], [0, 1]]);
+        });
+
+        it('keeps the parts of a Tamil split vowel sign apart with the Indic shaper: FDArrayTest257', function() {
+            // ka and the vowel sign o, decomposed into the vowel signs e and aa, in a font without GSUB:
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --no-positions --trace FDArrayTest257.otf
+            // -u 0B95,0BCA, start table GSUB: [150=0|199=1|191=1]
+            const tamilFont = loadSync('./test/fonts/FDArrayTest257.otf');
+            const clusters = tamilFont.stringToGlyphClusters('\u{B95}\u{BCA}').map(({ glyph, start }) => [glyph.index, start]);
+            assert.deepStrictEqual(clusters, [[150, 0], [199, 1], [191, 1]]);
+        });
+
+        it('composes the nukta letters the Indic shaper decomposes with the nukt of the font, like HarfBuzz', function() {
+            // U+0958 decomposed into ka and nukta, composed again into qa by nukt: -u 0958: [66=0]; -u 0915,093C: [66=0];
+            // before the vowel sign e: -u 0958,0947: [66=0|69=1]; U+0929 decomposed, with no mark to compose it with:
+            // -u 0929: [68=0]; the Bengali yya, which compose_indic composes only before a mark: -u 09DF: [38=0]
+            assert.deepStrictEqual(getSortedGlyphClusters(normalizationFont, '\u{958}'), [[66, 0]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(normalizationFont, '\u{915}\u{93C}'), [[66, 0]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(normalizationFont, '\u{958}\u{947}'), [[66, 0], [69, 1]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(normalizationFont, '\u{929}'), [[68, 0]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(normalizationFont, '\u{9DF}'), [[38, 0]]);
+            // --features=-nukt -u 0958: [64=0|65=0]
+            assert.deepStrictEqual(getSortedGlyphClusters(normalizationFont, '\u{958}', { features: { nukt: false } }), [[64, 0], [65, 0]]);
+        });
+
+        it('draws no U+17C1 KHMER VOWEL SIGN E for a Khmer split vowel sign, without the decompose_khmer of HarfBuzz', function() {
+            // ka and the vowel sign oe: --script=Latn -u 1780,17BE: [39=0|40=1]; the Khmer shaper of HarfBuzz decomposes
+            // the vowel sign into U+17C1 and itself, which only its reordering and features merge again: -u 1780,17BE:
+            // [41=0|39=0|40=0]
+            assert.deepStrictEqual(getSortedGlyphClusters(normalizationFont, '\u{1780}\u{17BE}'), [[39, 0], [40, 1]]);
+        });
+
+        it('decomposes the Common singletons of a Khmer run though the font has them, like the Khmer shaper: FDArrayTest257', function() {
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --no-positions --script=Khmr FDArrayTest257.otf:
+            // -u 1780,2001,1780 (U+2001 EM QUAD into U+2003 EM SPACE): [129=0|4=1|129=2]; -u 1780,037E (the Greek question
+            // mark into the semicolon): [129=0|60=1]; with the default shaper, --script=Latn: [129=0|2=1|129=2] and
+            // [129=0|127=1]
+            const khmerFont = loadSync('./test/fonts/FDArrayTest257.otf');
+            assert.deepStrictEqual(getSortedGlyphClusters(khmerFont, '\u{1780}\u{2001}\u{1780}'), [[129, 0], [4, 1], [129, 2]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(khmerFont, '\u{1780}\u{37E}'), [[129, 0], [60, 1]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(khmerFont, '\u{1780}\u{2001}\u{1780}', { script: 'latn' }), [[129, 0], [2, 1], [129, 2]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(khmerFont, '\u{1780}\u{37E}', { script: 'latn' }), [[129, 0], [127, 1]]);
+        });
+
+        it('keeps a Hangul syllable before a mark with the Hangul shaper: FDArrayTest257', function() {
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 FDArrayTest257.otf -u bdec,0301
+            // [237=0+1000|2=1+1000]
+            const hangulFont = loadSync('./test/fonts/FDArrayTest257.otf');
+            assert.deepStrictEqual(getSortedGlyphClusters(hangulFont, '\u{BDEC}\u{301}'), [[237, 0], [2, 1]]);
+            // an enclosing circle: -u ac00,20dd: [1=0+1000|222=1+1000]
+            assert.deepStrictEqual(getSortedGlyphClusters(hangulFont, '\u{AC00}\u{20DD}'), [[1, 0], [222, 1]]);
+        });
+
+        it('composes the Hebrew presentation forms of a font without a mark feature: FDArrayTest257', function() {
+            // shin with shin dot and qamats, decomposed and composed again into the presentation form:
+            // hb-shape --shapers=ot --no-glyph-names --cluster-level=1 --no-positions FDArrayTest257.otf -u fb2a,05b8
+            // [185=1|43=0]; -u fb2c,05b8: [185=1|45=0]; -u fb4b,05b8: [185=1|76=0]
+            const hebrewFont = loadSync('./test/fonts/FDArrayTest257.otf');
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{FB2A}\u{5B8}'), [[43, 0], [185, 1]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{FB2C}\u{5B8}'), [[45, 0], [185, 1]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{FB4B}\u{5B8}'), [[76, 0], [185, 1]]);
+            // the dagesh, hiriq, patah and rafe forms: -u 05d1,05bc: [50=0]; -u 05d0,05bc: [49=0]; -u 05ea,05bc: [75=0];
+            // -u 05d9,05b4: [30=0]; -u 05d0,05b7: [47=0]; -u 05d1,05bf: [77=0]
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{5D1}\u{5BC}'), [[50, 0]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{5D0}\u{5BC}'), [[49, 0]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{5EA}\u{5BC}'), [[75, 0]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{5D9}\u{5B4}'), [[30, 0]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{5D0}\u{5B7}'), [[47, 0]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewFont, '\u{5D1}\u{5BF}'), [[77, 0]]);
+        });
+
+        it('composes the Hebrew presentation forms only when the features option turns mark off (0 or false) or the font has none', function() {
+            // a copy of the font with an empty GPOS mark feature for DFLT (fontTools):
+            // --no-positions -u FB2A,05B8: [53=1|54=0|55=0]; --features=-mark: [53=1|56=0]
+            const markFeatureFont = loadSync('./test/fonts/TestNormalization.ttf');
+            markFeatureFont.position.getFeatureTable('DFLT', 'dflt', 'mark', true);
+            assert.deepStrictEqual(getSortedGlyphClusters(markFeatureFont, '\u{FB2A}\u{5B8}'), [[54, 0], [55, 0], [53, 1]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(markFeatureFont, '\u{FB2A}\u{5B8}', { features: { mark: false } }), [[56, 0], [53, 1]]);
+            // TestNormalization.ttf has no mark feature: -u FB2A,05B8: [53=1|56=0]
+            assert.deepStrictEqual(getSortedGlyphClusters(normalizationFont, '\u{FB2A}\u{5B8}'), [[56, 0], [53, 1]]);
+        });
+
+        it('keeps the mark feature in the feature map with a value whose 8 lowest bits are 0, like HarfBuzz', function() {
+            // the copy with an empty GPOS mark feature for DFLT: --features=mark=256 -u FB2A,05B8: [53=1|54=0|55=0], and
+            // --features=mark=512 too: the feature is in the map, its lookups do not apply
+            const markFeatureFont = loadSync('./test/fonts/TestNormalization.ttf');
+            markFeatureFont.position.getFeatureTable('DFLT', 'dflt', 'mark', true);
+            for (const mark of [256, 512]) {
+                assert.deepStrictEqual(getSortedGlyphClusters(markFeatureFont, '\u{FB2A}\u{5B8}', { features: { mark } }), [[54, 0], [55, 0], [53, 1]]);
+            }
+        });
+
+        it('looks the mark feature up in GSUB too, like HarfBuzz', function() {
+            // a copy with an empty GSUB mark feature for DFLT only (fontTools): -u FB2A,05B8: [53=1|54=0|55=0]
+            // (getFeatureTable creates the features in alphabetical order only, after nukt here)
+            const markFeatureFont = loadSync('./test/fonts/TestNormalization.ttf');
+            const gsub = markFeatureFont.tables.gsub;
+            gsub.features.push({ tag: 'mark', feature: { featureParams: 0, lookupListIndexes: [] } });
+            const defaultScript = gsub.scripts.find(scriptRecord => scriptRecord.tag === 'DFLT').script;
+            defaultScript.defaultLangSys.featureIndexes.push(gsub.features.length - 1);
+            assert.deepStrictEqual(getSortedGlyphClusters(markFeatureFont, '\u{FB2A}\u{5B8}'), [[54, 0], [55, 0], [53, 1]]);
+        });
+
+        it('does not take a mark feature that is the required feature of the language system, like HarfBuzz', function() {
+            // a copy with a GPOS mark feature that is only the ReqFeatureIndex of DFLT dflt (fontTools): -u FB2A,05B8:
+            // [53=1|56=0] (hb_ot_layout_language_find_feature does not look at the required feature)
+            const requiredMarkFont = loadSync('./test/fonts/TestNormalization.ttf');
+            requiredMarkFont.position.getFeatureTable('DFLT', 'dflt', 'mark', true);
+            const defaultLangSys = requiredMarkFont.tables.gpos.scripts[0].script.defaultLangSys;
+            defaultLangSys.reqFeatureIndex = defaultLangSys.featureIndexes.pop();
+            assert.deepStrictEqual(getSortedGlyphClusters(requiredMarkFont, '\u{FB2A}\u{5B8}'), [[56, 0], [53, 1]]);
+        });
+
+        it('looks the mark feature up in the language system of the language option, like HarfBuzz', function() {
+            // a copy with an empty GPOS mark feature in the language system TRK of DFLT only (fontTools): --language=tr
+            // -u FB2A,05B8: [53=1|54=0|55=0]; without the language: [53=1|56=0]
+            const markFeatureFont = loadSync('./test/fonts/TestNormalization.ttf');
+            markFeatureFont.position.getFeatureTable('DFLT', 'TRK ', 'mark', true);
+            assert.deepStrictEqual(getSortedGlyphClusters(markFeatureFont, '\u{FB2A}\u{5B8}', { language: 'TRK' }), [[54, 0], [55, 0], [53, 1]]);
+            assert.deepStrictEqual(getSortedGlyphClusters(markFeatureFont, '\u{FB2A}\u{5B8}'), [[56, 0], [53, 1]]);
+        });
+
+        it('looks the mark feature up in the script of the run, like HarfBuzz', function() {
+            // a copy with an empty GPOS mark feature for hebr only (fontTools): -u FB2A,05B8: [53=1|54=0|55=0]; for arab
+            // only, a script HarfBuzz does not choose for a Hebrew run: [53=1|56=0]
+            const hebrewMarkFont = loadSync('./test/fonts/TestNormalization.ttf');
+            hebrewMarkFont.position.getFeatureTable('hebr', 'dflt', 'mark', true);
+            assert.deepStrictEqual(getSortedGlyphClusters(hebrewMarkFont, '\u{FB2A}\u{5B8}'), [[54, 0], [55, 0], [53, 1]]);
+            const arabicMarkFont = loadSync('./test/fonts/TestNormalization.ttf');
+            arabicMarkFont.position.getFeatureTable('arab', 'dflt', 'mark', true);
+            assert.deepStrictEqual(getSortedGlyphClusters(arabicMarkFont, '\u{FB2A}\u{5B8}'), [[56, 0], [53, 1]]);
         });
     });
 
@@ -2246,15 +2495,11 @@ describe('font.mjs', function() {
             assert.equal(lookupFlagsFont.getAdvanceWidth('\u{648}\u{644}\u{64E}\u{627}', 1000), 910);
         });
 
-        itFailsUntilFixed('does not kern the bases of a letter and a combining mark that HarfBuzz composes into the precomposed glyph',
-            '_createBidi (src/font.mjs): A and gravecomb are not composed into Agrave (the root cause of the known failure ' +
-            '"composes a letter and a combining mark into the precomposed glyph of the font" of playwriteCursive.spec.mjs), so the ' +
-            'kern lookup with IgnoreMarks kerns A V -100 across the gravecomb: 900',
-            function() {
-                // KERN_BASES_IGNORE_MARKS: lookupflag IgnoreMarks; pos A V -100; (no Agrave V pair)
-                // -u 0041,0300,0056: [23=0+500|22=2+500], Agrave V
-                assert.equal(lookupFlagsFont.getAdvanceWidth('A\u{300}V', 1000), 1000);
-            });
+        it('does not kern the bases of a letter and a combining mark that HarfBuzz composes into the precomposed glyph', function() {
+            // KERN_BASES_IGNORE_MARKS: lookupflag IgnoreMarks; pos A V -100; (no Agrave V pair)
+            // -u 0041,0300,0056: [23=0+500|22=2+500], Agrave V
+            assert.equal(lookupFlagsFont.getAdvanceWidth('A\u{300}V', 1000), 1000);
+        });
     });
 
     describe('glyph names', function() {

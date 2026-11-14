@@ -119,10 +119,24 @@ function getRunFeatureValue(featuresOption, tag, directionTags) {
 }
 
 /**
+ * Whether a default feature is in the feature map of HarfBuzz with a features option, like a feature whose max_value
+ * is not 0: unless the option turns it off with 0 or false, whatever the 8 lowest bits of the option (see
+ * getFeatureOptionNumber), so 256 keeps it in the map, with the value 0
+ * @param {Object|Array|undefined} featuresOption
+ * @param {string} tag
+ * @returns {boolean}
+ */
+function isDefaultFeatureInMap(featuresOption, tag) {
+    const optionValue = getFeatureOverrides(featuresOption)[tag];
+    return optionValue === undefined || getFeatureOptionNumber(tag, optionValue) > 0;
+}
+
+/**
  * Whether a default feature of a run is on with a features option, like a feature of HarfBuzz whose max_value is not
- * 0 and that has a value at some glyphs: a feature with a glyph mask (see GLYPH_MASK_FEATURE_TAGS) unless the option
- * turns it off with 0 or false, its mask giving it a value at its glyphs whatever the 8 lowest bits of the option
- * (see getMaskedFeatureValue), any other feature when its value is not 0 (see getFeatureValue), so 256 turns it off
+ * 0 and that has a value at some glyphs: a feature with a glyph mask (see GLYPH_MASK_FEATURE_TAGS) when it is in the
+ * feature map (see isDefaultFeatureInMap), its mask giving it a value at its glyphs whatever the 8 lowest bits of the
+ * option (see getMaskedFeatureValue), any other feature when its value is not 0 (see getFeatureValue), so 256 turns
+ * it off
  * @param {Object|Array|undefined} featuresOption
  * @param {string} tag
  * @returns {boolean}
@@ -131,8 +145,7 @@ function isDefaultFeatureEnabled(featuresOption, tag) {
     if (!GLYPH_MASK_FEATURE_TAGS.includes(tag)) {
         return getFeatureValue(featuresOption, tag) > 0;
     }
-    const optionValue = getFeatureOverrides(featuresOption)[tag];
-    return optionValue === undefined || getFeatureOptionNumber(tag, optionValue) > 0;
+    return isDefaultFeatureInMap(featuresOption, tag);
 }
 
 /**
@@ -173,6 +186,7 @@ export {
     getUnmaskedFeatureValue,
     getMaskedFeatureValue,
     getRunFeatureValue,
+    isDefaultFeatureInMap,
     isDefaultFeatureEnabled,
     getEnabledFeatureTags,
     getDirectionFeatureTags

@@ -1,5 +1,5 @@
 import assert from 'assert';
-import Tokenizer, { Token } from '../src/tokenizer.mjs';
+import Tokenizer, { Token, getTextCharacters } from '../src/tokenizer.mjs';
 import { isWhiteSpace, isArabicChar } from '../src/char.mjs';
 
 describe('tokenizer.mjs', function() {
@@ -16,6 +16,18 @@ describe('tokenizer.mjs', function() {
         it('gives each token the UTF-16 offset of its character as the start of its cluster', function() {
             const tokens = tokenizer.tokenize('A\u{1F600}B');
             assert.deepStrictEqual(tokens.map(token => token.cluster), [0, 1, 3]);
+        });
+        it('gives the characters of a text, a code point each, with their UTF-16 offsets', function() {
+            assert.deepStrictEqual(getTextCharacters('A\u{1F600}\u{301}'), [
+                { char: 'A', cluster: 0 }, { char: '\u{1F600}', cluster: 1 }, { char: '\u{301}', cluster: 3 }
+            ]);
+            assert.deepStrictEqual(getTextCharacters(''), []);
+        });
+        it('maps a list of characters to tokens with their chars and clusters', function() {
+            // e.g. the characters of a normalized text: U+00C0 decomposed into A and U+0300, in its cluster
+            const tokens = tokenizer.tokenizeCharacters([{ char: 'A', cluster: 0 }, { char: '\u{300}', cluster: 0 }, { char: 'b', cluster: 1 }]);
+            assert.deepStrictEqual(tokens.map(token => [token.char, token.cluster]), [['A', 0], ['\u{300}', 0], ['b', 1]]);
+            assert.strictEqual(tokenizer.getText(), 'A\u{300}b');
         });
         describe('tokenizer events', function () {
             it('should dispatch events start, next, newToken and end', function() {

@@ -1645,10 +1645,10 @@ describe('position.mjs', function() {
                 glyphs: [18, 44], clusters: [0, 1], advances: [458, 0], offsets: [[0, 0], [149, 0]]
             });
             // PlaywriteUSTrad-VF-calt-subset.ttf -u 0065,0301,006C,0075: [20=0+444|25=0+0|8=0@-267,0+0|32=2+394|18=2+0|16=3+671],
-            // the acute after the connector of e (calt); its cluster is 1 in the fork, which does not compose e and the
-            // acute (see playwriteCursive.spec.mjs)
+            // the acute after the connector of e (calt), in the cluster of e: the normalization composes e and the acute
+            // into eacute, which calt decomposes again (see playwriteCursive.spec.mjs)
             assertShape(shapeText(loadFont('PlaywriteUSTrad-VF-calt-subset.ttf'), 'e\u{301}lu'), {
-                glyphs: [20, 25, 8, 32, 18, 16], clusters: [0, 0, 1, 2, 2, 3], advances: [444, 0, 0, 394, 0, 671],
+                glyphs: [20, 25, 8, 32, 18, 16], clusters: [0, 0, 0, 2, 2, 3], advances: [444, 0, 0, 394, 0, 671],
                 offsets: [[0, 0], [0, 0], [-267, 0], [0, 0], [0, 0], [0, 0]]
             });
         });

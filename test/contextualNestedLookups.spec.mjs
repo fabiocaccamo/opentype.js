@@ -416,10 +416,16 @@ describe('nested lookups of contextual substitutions', function() {
 
         describe('a real font', function() {
             let sourceSansFont;
+            let sourceSansFontWithoutPrecomposed;
             let interFont;
 
             before(function() {
                 sourceSansFont = loadFont('../SourceSansPro-Regular.otf');
+                // the copy of the font of the reference below, without U+1E16, U+1E17, U+1E52 and U+1E53 in its cmap
+                sourceSansFontWithoutPrecomposed = loadFont('../SourceSansPro-Regular.otf');
+                for (const codePoint of [0x1E16, 0x1E17, 0x1E52, 0x1E53]) {
+                    delete sourceSansFontWithoutPrecomposed.tables.cmap.glyphIndexMap[codePoint];
+                }
                 interFont = loadFont('../InterVariable.ttf');
             });
 
@@ -438,6 +444,14 @@ describe('nested lookups of contextual substitutions', function() {
                 assertShape(shapeText(interFont, 'a<-a'), reference, 'a, less, hyphen, a');
             });
 
+            it('composes a letter with a capital accent and a combining accent into the precomposed letter: Source Sans Pro', function() {
+                // the normalization composes U+0112 U+0301 into U+1E16, which the font maps, before ccmp
+                // hb-shape --no-glyph-names --cluster-level=1 SourceSansPro-Regular.otf -u 0112,0301
+                // [836=0+527]
+                const reference = { glyphs: [836], clusters: [0], advances: [527] };
+                assertShape(shapeText(sourceSansFont, '\u{112}\u{301}'), reference, 'Emacron, combining acute');
+            });
+
             it('decomposes a letter with a capital accent before a combining accent: Source Sans Pro, ccmp', function() {
                 // ccmp lookup 4, a chaining context of format 3, applies the multiple substitution of lookup 3 to Emacron before
                 // the combining acute: E uni0304.cap, then uni0301. HarfBuzz composes U+0112 U+0301 into U+1E16 when the font
@@ -445,7 +459,7 @@ describe('nested lookups of contextual substitutions', function() {
                 // hb-shape --no-glyph-names --cluster-level=1 SourceSansPro-Regular-no-1E16.otf -u 0112,0301
                 // [6=0+527|765=0@-242,0+0|758=1@-242,170+0]
                 const reference = { glyphs: [6, 765, 758], clusters: [0, 0, 1], advances: [527, 0, 0] };
-                assertShape(shapeText(sourceSansFont, '\u{112}\u{301}'), reference, 'Emacron, combining acute');
+                assertShape(shapeText(sourceSansFontWithoutPrecomposed, '\u{112}\u{301}'), reference, 'Emacron, combining acute');
             });
         });
     });

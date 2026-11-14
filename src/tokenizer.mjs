@@ -504,25 +504,45 @@ Tokenizer.prototype.runContextCheck = function(contextParams) {
 };
 
 /**
+ * The characters of a text, a code point each, with the UTF-16 offset of each one in the text (its cluster)
+ * @param {string} text
+ * @returns {Array<{char: string, cluster: number}>}
+ */
+function getTextCharacters(text) {
+    const characters = [];
+    let cluster = 0;
+    for (const char of text) {
+        characters.push({ char, cluster });
+        cluster += char.length;
+    }
+    return characters;
+}
+
+/**
  * Converts a text into a list of tokens
  * @param {string} text a text to tokenize
  */
 Tokenizer.prototype.tokenize = function (text) {
+    return this.tokenizeCharacters(getTextCharacters(text));
+};
+
+/**
+ * Converts a list of characters into a list of tokens, each one with the char and the cluster of its character
+ * @param {Array<{char: string, cluster: number}>} characters the characters of a text (see getTextCharacters), or
+ * the characters of a text after its normalization (see normalizeCharacters in normalization.mjs)
+ */
+Tokenizer.prototype.tokenizeCharacters = function (characters) {
     this.tokens = [];
     this.resetContextsRanges();
-    let chars = Array.from(text);
-    // UTF-16 offset of the character of each token in the text
-    let charOffset = 0;
+    const chars = characters.map(character => character.char);
     this.dispatch('start');
     for (let i = 0; i < chars.length; i++) {
-        const char = chars[i];
         const contextParams = new ContextParams(chars, i);
         this.dispatch('next', [contextParams]);
         this.runContextCheck(contextParams);
-        let token = new Token(char);
+        let token = new Token(chars[i]);
         // the start of the cluster of the token in the text, until a ligature merges it with the clusters of other tokens
-        token.cluster = charOffset;
-        charOffset += char.length;
+        token.cluster = characters[i].cluster;
         this.tokens.push(token);
         this.dispatch('newToken', [token, contextParams]);
     }
@@ -531,4 +551,4 @@ Tokenizer.prototype.tokenize = function (text) {
 };
 
 export default Tokenizer;
-export { Token, Event, ContextRange, ContextParams };
+export { Token, Event, ContextRange, ContextParams, getTextCharacters };

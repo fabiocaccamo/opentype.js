@@ -3,7 +3,7 @@
  * the corresponding layout rules.
  */
 
-import Tokenizer from './tokenizer.mjs';
+import Tokenizer, { getTextCharacters } from './tokenizer.mjs';
 import FeatureQuery from './features/featureQuery.mjs';
 import {
     getTokenGlyphIndexes,
@@ -20,7 +20,9 @@ import {
     getDirectionFeatureTags
 } from './features/featureValues.mjs';
 import { getScriptRuns } from './char.mjs';
-import { getOpenTypeScriptTags, selectScriptTag } from './layout.mjs';
+import {
+    getOpenTypeScriptTags, getChosenScriptTag, getHarfBuzzShaper, HarfBuzzShaper, memoizeByScriptTags, selectScriptTag
+} from './layout.mjs';
 import arabicSentenceCheck from './features/arab/contextCheck/arabicSentence.mjs';
 import arabicPresentationForms from './features/arab/arabicPresentationForms.mjs';
 import latinFeatures from './features/latn/latinFeatures.mjs';
@@ -41,6 +43,10 @@ function Bidi(baseDir) {
     // the script runs of the text (see getTokenScriptRuns), and the run of each token
     this.scriptRuns = [];
     this.tokenScriptRuns = new Map();
+    // the normalizer of the characters of the script runs (see registerNormalizer), and the characters of the text
+    // it gives, the ones of the tokens
+    this.normalizer = null;
+    this.characters = [];
 }
 
 /**
@@ -73,12 +79,12 @@ function registerContextChecker(checkId) {
 
 /**
  * Perform pre tokenization procedure then
- * tokenize text input
+ * tokenize the characters of the text
  */
 function tokenizeText() {
     registerContextChecker.call(this, 'arabicSentence');
     registerContextChecker.call(this, 'unicodeVariationSequence');
-    return this.tokenizer.tokenize(this.text);
+    return this.tokenizer.tokenizeCharacters(this.characters);
 }
 
 /**
@@ -105,7 +111,7 @@ function reverseArabicSentences() {
 /**
  * Register the tags of the features of a shaper
  * @param {string} shaper the shaper of the features: arab for the arabic script runs, thai for the thai script runs,
- * latn for the other ones (see getScriptRunShaper)
+ * indic for the runs of the Indic shaper of HarfBuzz, latn for the other ones (see getScriptRunShaper)
  * @param {Array} tags features tags list
  */
 Bidi.prototype.registerFeatures = function (shaper, tags) {
@@ -122,7 +128,7 @@ Bidi.prototype.registerFeatures = function (shaper, tags) {
  * @param {Array<{script: string, tags: string[]}>} features the feature tags of each shaper (see registerFeatures)
  * @param {Object} [layoutOptions]
  * @param {string} [layoutOptions.script] the OpenType script tag of the whole text, shaped as one script run, the
- * script runs of the Unicode script of the text if omitted (see getTokenScriptRuns)
+ * script runs of the Unicode script of the text if omitted (see getCharacterScriptRuns)
  * @param {string} [layoutOptions.language] the OpenType language tag of the features, the default language system
  * of the script if omitted
  * @param {Object} [layoutOptions.variation] the variation coordinates of the GSUB feature variations, the current
@@ -157,6 +163,23 @@ Bidi.prototype.registerModifier = function (modifierId, condition, modifier) {
 };
 
 /**
+ * Register the normalizer of the text, which maps its characters to their glyphs: the characters of each script run
+ * become the characters it gives, each one with its glyph, its spaceFallbackType and its cluster, the ones of its
+ * token (the glyphIndex state modifier)
+ * @param {function} normalizer a function of the characters of a script run, each one with its cluster (see
+ * getTextCharacters in tokenizer.mjs), and of the OpenType script tags of the run (see getCharacterScriptRuns), that
+ * returns its characters with their glyphs (see normalizeCharacters in normalization.mjs)
+ */
+Bidi.prototype.registerNormalizer = function (normalizer) {
+    this.normalizer = normalizer;
+    this.registerModifier('glyphIndex', null, (token, contextParams) => {
+        const character = this.characters[contextParams.index];
+        token.spaceFallbackType = character.spaceFallbackType;
+        return character.glyphIndex;
+    });
+};
+
+/**
  * Check if 'glyphIndex' is registered
  */
 function checkGlyphIndexStatus() {
@@ -169,36 +192,88 @@ function checkGlyphIndexStatus() {
 }
 
 /**
- * Split the tokens of the text into its script runs, each one with its OpenType script tags: like HarfBuzz with the
+ * Split the characters of the text into its script runs, each one with its OpenType script tags: like HarfBuzz with the
  * script of a buffer, the whole text is one run with the script option if given, otherwise the runs of its Unicode
  * scripts (see getScriptRuns) take the tags of their script (see getOpenTypeScriptTags)
- * @returns {Array<{tokens: Token[], scriptTags: string[]}>}
+ * @param {Array<{char: string, cluster: number}>} characters the characters of the text (see getTextCharacters)
+ * @returns {Array<{characters: Array<{char: string, cluster: number}>, scriptTags: string[]}>}
  */
-function getTokenScriptRuns() {
-    const tokens = this.tokenizer.tokens;
+function getCharacterScriptRuns(characters) {
     if (this.script) {
-        return [{ tokens, scriptTags: [this.script] }];
+        return [{ characters, scriptTags: [this.script] }];
     }
-    return getScriptRuns(tokens.map(token => token.char)).map(({ start, end, script }) => ({
-        tokens: tokens.slice(start, end),
+    return getScriptRuns(characters.map(character => character.char)).map(({ start, end, script }) => ({
+        characters: characters.slice(start, end),
         scriptTags: getOpenTypeScriptTags(script)
     }));
 }
 
 /**
- * The stages of the arabic features before the forms, like the Arabic shaper of HarfBuzz (hb_ot_shape_collect_features
- * and collect_features_arabic): rvrn, then the direction features of the run (see getDirectionFeatureTags) and rand
- * (the stage of the stch of HarfBuzz), then ccmp and locl. Then each form in a stage of its own, in the order of
- * HarfBuzz, then rlig, then calt (see getArabicStagesAfterForms), then the other features (liga, clig, mset, rclt...)
+ * Normalize the characters of each script run of the text with the normalizer (see registerNormalizer), like HarfBuzz
+ * normalizes the characters of a buffer with its shaper, each run as it is without a normalizer
+ * @param {Array<{characters: Array<{char: string, cluster: number}>, scriptTags: string[]}>} runs see
+ * getCharacterScriptRuns
+ * @returns {Array<{characters: Array<{char: string, cluster: number}>, scriptTags: string[]}>}
+ */
+function normalizeScriptRuns(runs) {
+    if (!this.normalizer) {
+        return runs;
+    }
+    return runs.map(({ characters, scriptTags }) => ({
+        characters: this.normalizer(characters, scriptTags),
+        scriptTags
+    }));
+}
+
+/**
+ * The tokens of each script run of the text, the tokens of its characters
+ * @param {Token[]} tokens the tokens of the characters of the runs, in the order of the runs
+ * @param {Array<{characters: Array<{char: string, cluster: number}>, scriptTags: string[]}>} runs see
+ * normalizeScriptRuns
+ * @returns {Array<{tokens: Token[], scriptTags: string[]}>}
+ */
+function getTokenScriptRuns(tokens, runs) {
+    let start = 0;
+    return runs.map(({ characters, scriptTags }) => {
+        const end = start + characters.length;
+        const run = { tokens: tokens.slice(start, end), scriptTags };
+        start = end;
+        return run;
+    });
+}
+
+// the feature of the Indic shaper of HarfBuzz that composes a consonant and a nukta into their glyph, in a stage of its
+// own after ccmp and locl (collect_features_indic)
+const INDIC_NUKTA_FORMS_TAG = 'nukt';
+
+/**
+ * The stages of the features before the features of the Arabic and Indic shapers of HarfBuzz
+ * (hb_ot_shape_collect_features, collect_features_arabic and collect_features_indic): rvrn, then the direction
+ * features of the run (see getDirectionFeatureTags) and rand (the stage of the stch of the Arabic shaper), then ccmp
+ * and locl
  * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags)
  * @returns {string[][]}
  */
-function getArabicStagesBeforeForms(directionTags) {
+function getStagesBeforeShaperFeatures(directionTags) {
     return [
         [REQUIRED_VARIATION_ALTERNATES_TAG],
         directionTags.concat([RANDOM_FEATURE_TAG]),
         ['ccmp', 'locl']
     ];
+}
+
+/**
+ * The enabled features of a run in the stages of its shaper: the enabled features of each stage, then the other
+ * enabled features in a last stage
+ * @param {string[]} tags the enabled feature tags of the run (see getScriptRunFeatureTags)
+ * @param {string[][]} shaperStages the feature tags of each stage of the shaper
+ * @returns {string[][]}
+ */
+function getFeatureStages(tags, shaperStages) {
+    const stagedTags = shaperStages.flat();
+    return shaperStages
+        .map(stageTags => tags.filter(tag => stageTags.includes(tag)))
+        .concat([tags.filter(tag => !stagedTags.includes(tag))]);
 }
 
 /**
@@ -220,7 +295,7 @@ function getArabicStagesAfterForms(query, script, language) {
 /**
  * Apply the enabled arabic features to an arabic script run, in the stages of the Arabic shaper of HarfBuzz: rvrn,
  * then the direction features and rand, then ccmp and locl, then each presentation form of the letters of the run,
- * then rlig, then calt, then the other features (see getArabicStagesBeforeForms and getArabicStagesAfterForms), the
+ * then rlig, then calt, then the other features (see getStagesBeforeShaperFeatures and getArabicStagesAfterForms), the
  * lookups of the required feature of the language system in its stage (see getRequiredFeatureStage), at every glyph
  * of the run, merged with the lookups of the stage in lookup list order
  * @param {Token[]} tokens the tokens of the run
@@ -229,13 +304,10 @@ function getArabicStagesAfterForms(query, script, language) {
  * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags)
  */
 function applyArabicFeatures(tokens, script, tags, directionTags) {
-    const stagesBeforeForms = getArabicStagesBeforeForms(directionTags);
+    const stagesBeforeForms = getStagesBeforeShaperFeatures(directionTags);
     const formStages = ARABIC_FORM_TAGS.map(tag => [tag]);
     const shaperStages = stagesBeforeForms.concat(formStages, getArabicStagesAfterForms(this.query, script, this.language));
-    const stagedTags = shaperStages.flat();
-    const stages = shaperStages
-        .map(stageTags => tags.filter(tag => stageTags.includes(tag)))
-        .concat([tags.filter(tag => !stagedTags.includes(tag))]);
+    const stages = getFeatureStages(tags, shaperStages);
     const firstFormStage = stagesBeforeForms.length;
     const requiredFeatureStage = getRequiredFeatureStage(stages, this.query.getRequiredFeature(script, this.language));
     for (let i = 0; i < stages.length; i++) {
@@ -252,18 +324,42 @@ function applyArabicFeatures(tokens, script, tags, directionTags) {
 }
 
 /**
+ * Apply the enabled indic features to a script run of the Indic shaper of HarfBuzz, in its stages: rvrn, then the
+ * direction features and rand, then ccmp and locl (see getStagesBeforeShaperFeatures), then nukt, then the other
+ * features, the lookups of the required feature of the language system in its stage (see getRequiredFeatureStage).
+ * Not yet the reordering and the other features of the Indic shaper.
+ * @param {Token[]} tokens the tokens of the run
+ * @param {string} script the script tag of the run in the GSUB table
+ * @param {string[]} tags the enabled feature tags of the run (see getScriptRunFeatureTags)
+ * @param {string[]} directionTags the direction features of the run (see getDirectionFeatureTags)
+ */
+function applyIndicFeatures(tokens, script, tags, directionTags) {
+    const shaperStages = getStagesBeforeShaperFeatures(directionTags).concat([[INDIC_NUKTA_FORMS_TAG]]);
+    const stages = getFeatureStages(tags, shaperStages);
+    const requiredFeatureStage = getRequiredFeatureStage(stages, this.query.getRequiredFeature(script, this.language));
+    for (let i = 0; i < stages.length; i++) {
+        applyFeaturesToTokens(this.query, stages[i], script, this.language, tokens, i === requiredFeatureStage);
+    }
+}
+
+/**
  * The shaper of the features of a script run, the key of its features in featuresTags, like HarfBuzz chooses its
- * shaper from the script of a buffer: arab for the arab script tag, thai for the thai script tag, latn for the other
- * script tags and for a text of no script
+ * shaper from the script of a buffer and the script it chose in GSUB: arab for the arab script tag, thai for the thai
+ * script tag, indic for a run of the Indic shaper of HarfBuzz (see getHarfBuzzShaper in layout.mjs), latn for the
+ * other script tags and for a text of no script
  * @param {string[]} scriptTags the OpenType script tags of the run (see getTokenScriptRuns)
+ * @param {string|undefined} gsubScriptTag the script HarfBuzz chose in GSUB (see getChosenScriptTag in layout.mjs)
  * @returns {string}
  */
-function getScriptRunShaper(scriptTags) {
+function getScriptRunShaper(scriptTags, gsubScriptTag) {
     if (scriptTags.includes('arab')) {
         return 'arab';
     }
     if (scriptTags.includes('thai')) {
         return 'thai';
+    }
+    if (getHarfBuzzShaper(scriptTags, gsubScriptTag) === HarfBuzzShaper.INDIC) {
+        return 'indic';
     }
     return 'latn';
 }
@@ -290,12 +386,18 @@ function getScriptRunFeatureTags(shaper, directionTags) {
  * getDirectionFeatureTags), and like a buffer of HarfBuzz, it starts with the initial random state and has a maximum
  * number of glyphs of its own (see FeatureQuery.startScriptRun).
  * @param {{tokens: Token[], scriptTags: string[]}} run
+ * @param {function(string[]): string} getRunShaper the shaper of the features of the script tags of a run (see
+ * getScriptRunShaper)
  */
-function applyScriptRunFeatures(run) {
-    const shaper = getScriptRunShaper(run.scriptTags);
-    // a shaper with no registered features is skipped, an empty list of features still applies the required feature;
-    // a font without a GSUB table has no lookup to apply (the Layout methods create the table when a lookup is added)
-    if (!this.featuresTags[shaper] || !this.query.font.tables.gsub) {
+function applyScriptRunFeatures(run, getRunShaper) {
+    // a text without registered features is not shaped, and a font without a GSUB table has no lookup to apply (the
+    // Layout methods create the table when a lookup is added)
+    if (!Object.keys(this.featuresTags).length || !this.query.font.tables.gsub) {
+        return;
+    }
+    const shaper = getRunShaper(run.scriptTags);
+    // a shaper with no registered features is skipped, an empty list of features still applies the required feature
+    if (!this.featuresTags[shaper]) {
         return;
     }
     checkGlyphIndexStatus.call(this);
@@ -309,6 +411,9 @@ function applyScriptRunFeatures(run) {
             break;
         case 'thai':
             thaiFeatures.call(this, run.tokens, script, tags);
+            break;
+        case 'indic':
+            applyIndicFeatures.call(this, run.tokens, script, tags, directionTags);
             break;
         default:
             latinFeatures.call(this, run.tokens, script, tags);
@@ -333,11 +438,14 @@ Bidi.prototype.checkContextReady = function (contextId) {
 
 /**
  * Apply the features to the script runs of the text, each run on its own like HarfBuzz, then lay the arabic sentences
- * out from right to left
+ * out from right to left. The shaper of the runs of the same script tags is computed once.
  */
 Bidi.prototype.applyFeaturesToContexts = function () {
+    const getRunShaper = memoizeByScriptTags(scriptTags =>
+        getScriptRunShaper(scriptTags, getChosenScriptTag(this.query.font.substitution, scriptTags))
+    );
     for (const run of this.scriptRuns) {
-        applyScriptRunFeatures.call(this, run);
+        applyScriptRunFeatures.call(this, run, getRunShaper);
     }
     if (this.checkContextReady('arabicSentence')) {
         reverseArabicSentences.call(this);
@@ -348,14 +456,17 @@ Bidi.prototype.applyFeaturesToContexts = function () {
 };
 
 /**
- * process text input
+ * process text input: split it into its script runs, normalize their characters (see registerNormalizer), then
+ * tokenize them and apply the features
  * @param {string} text an input text
  */
 Bidi.prototype.processText = function(text) {
     if (!this.text || this.text !== text) {
         this.setText(text);
+        const runs = normalizeScriptRuns.call(this, getCharacterScriptRuns.call(this, getTextCharacters(text)));
+        this.characters = runs.flatMap(run => run.characters);
         tokenizeText.call(this);
-        this.scriptRuns = getTokenScriptRuns.call(this);
+        this.scriptRuns = getTokenScriptRuns(this.tokenizer.tokens, runs);
         this.tokenScriptRuns = new Map();
         for (const run of this.scriptRuns) {
             for (const token of run.tokens) {
@@ -422,7 +533,7 @@ Bidi.prototype.getTextGlyphs = function (text) {
  * whether their run is laid out from right to left (the arabic sentences, in reverse order of the text), the script
  * run of their token, with its OpenType script tags (scriptRun.scriptTags, see getTokenScriptRuns), the ligature
  * properties of the glyph (see getTokenLigatureProperties), whether it is ligated (see getTokenLigatedGlyphs) and the
- * spaceFallbackType of its token, which the glyphIndex modifier sets (see Font._createBidi)
+ * spaceFallbackType of its token, which the glyphIndex modifier sets (see registerNormalizer)
  */
 Bidi.prototype.getTextGlyphClusters = function (text) {
     this.processText(text);

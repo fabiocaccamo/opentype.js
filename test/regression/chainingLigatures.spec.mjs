@@ -325,7 +325,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
 
         itFailsUntilFixed(
             'keeps f f t apart around zero width non-joiners, which are not drawn',
-            'Font.prototype._createBidi (src/font.mjs): a default ignorable character without a glyph in the cmap is mapped to .notdef and drawn, 385 units wide',
+            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character without a glyph in the cmap is drawn with .notdef, 385 units wide',
             function() {
                 // f, U+200C (zero width non-joiner), f, U+200C, t
                 const shape = shapeText(font, 'f\u{200C}f\u{200C}t');
@@ -343,7 +343,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
 
         itFailsUntilFixed(
             'forms the f_f_t ligature across zero width joiners, which are not drawn',
-            'Font.prototype._createBidi (src/font.mjs): a default ignorable character without a glyph in the cmap is mapped to .notdef and drawn, ' +
+            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character without a glyph in the cmap is drawn with .notdef, ' +
             'and applyLookupToTokens (src/features/applySubstitution.mjs) does not skip it between the components of a ligature',
             function() {
                 // f, U+200D (zero width joiner), f, U+200D, t
@@ -362,7 +362,7 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
 
         itFailsUntilFixed(
             'skips a zero width non-joiner in the lookahead of a chaining rule: an a followed by it and a letter keeps its plain form',
-            'Font.prototype._createBidi (src/font.mjs): a default ignorable character without a glyph in the cmap is mapped to .notdef and drawn, ' +
+            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character without a glyph in the cmap is drawn with .notdef, ' +
             'and applyLookupToTokens (src/features/applySubstitution.mjs) keeps it in the context of the chaining rules: the lookahead of the first rule ' +
             'of lookup 5 sees .notdef instead of d, the second rule gives a its end form',
             function() {
@@ -382,8 +382,8 @@ describe('regression: GSUB chaining context format 3 with a nested single substi
 
         itFailsUntilFixed(
             'kerns the glyphs around a zero width non-joiner, which is not drawn',
-            'Font.prototype._createBidi (src/font.mjs): a default ignorable character without a glyph in the cmap is mapped to .notdef and drawn, ' +
-            '385 units wide, and Font.shape (src/font.mjs) looks up the pairs T .notdef and .notdef o.end instead of T o.end',
+            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character without a glyph in the cmap is drawn with .notdef, ' +
+            '385 units wide, and the pairs T .notdef and .notdef o.end are looked up instead of T o.end',
             function() {
                 // T, U+200C (zero width non-joiner), o
                 const shape = shapeText(font, 'T\u{200C}o');

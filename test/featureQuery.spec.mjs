@@ -15,7 +15,6 @@ import {
     subAcuteBLookup
 } from './lookup-flags-font.mjs';
 import { readFileSync } from 'fs';
-import { itFailsUntilFixed } from './regression/helpers.mjs';
 import { getFeatureLookupTables } from './testutil.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
@@ -1671,14 +1670,11 @@ describe('featureQuery.mjs', function() {
             assert.deepStrictEqual(font.stringToGlyphIndexes('j\u{301}', { language: 'ROM' }), [289, 302]);
         });
 
-        itFailsUntilFixed('composes a letter and its combining mark into the precomposed letter of the cmap, like HarfBuzz',
-            'Font.prototype.stringToGlyphIndexes (src/font.mjs): the fork has no compose step of the normalizer of HarfBuzz ' +
-            '(hb_ot_shape_normalize), and the latn script has no ccmp, so A U+0328 keeps the glyphs A and uni0328',
-            function() {
-                // the decomposed A ogonek (U+0104 is mapped by the cmap): hb-shape --shapers=ot --no-glyph-names --cluster-level=1
-                // NotoSansThai-Medium-Testing-v1.ttf -u 0041,0328 [188=0+654], --features=-ccmp the same
-                assert.deepStrictEqual(font.stringToGlyphIndexes('A\u{328}'), [188]);
-            });
+        it('composes a letter and its combining mark into the precomposed letter of the cmap, like HarfBuzz', function() {
+            // the decomposed A ogonek (U+0104 is mapped by the cmap): hb-shape --shapers=ot --no-glyph-names --cluster-level=1
+            // NotoSansThai-Medium-Testing-v1.ttf -u 0041,0328 [188=0+654], --features=-ccmp the same
+            assert.deepStrictEqual(font.stringToGlyphIndexes('A\u{328}'), [188]);
+        });
     });
 
     describe('a feature index past the FeatureList', function() {

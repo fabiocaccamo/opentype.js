@@ -405,28 +405,18 @@ describe('regression: GSUB chaining context lookups of Roboto and Noto Sans Thai
         // lookup without the composition
         // hb-shape --no-glyph-names --cluster-level=1 --language=en Roboto-VF-gsub-chaining-subset.ttf -u 0069,0301
         // [29=0+507]
-        itFailsUntilFixed(
-            'composes i and a combining acute to the iacute of the font',
-            '_createBidi (src/font.mjs): maps each character to its glyph without Unicode normalization, i and the ' +
-            'acute are not composed to the iacute of the cmap before GSUB: the ccmp lookup gives dotless i and acutecomb, [26, 17]',
-            function() {
-                assert.deepStrictEqual(shapeText(font, 'i\u{301}').glyphs, [29]);
-            }
-        );
+        it('composes i and a combining acute to the iacute of the font', function() {
+            assert.deepStrictEqual(shapeText(font, 'i\u{301}').glyphs, [29]);
+        });
 
         // j, the combining acute accent (U+0301), the combining dot below (U+0323): HarfBuzz puts the
         // marks in canonical order before GSUB (the dot below, class 220, then the acute, class
         // 230), so the acute does not follow j and j keeps its dot
         // hb-shape --no-glyph-names --cluster-level=1 --language=en Roboto-VF-gsub-chaining-subset.ttf -u 006A,0301,0323
         // [7=0+490|18=1@297,-459+0|17=1@299,310+0]
-        itFailsUntilFixed(
-            'keeps the dot of j when the canonical order puts a dot below between j and the acute',
-            '_createBidi (src/font.mjs): maps each character to its glyph without Unicode normalization, the marks ' +
-            'are not put in canonical order before GSUB: lookup 0 finds the acute right after j and removes its dot, [25, 17, 18]',
-            function() {
-                assert.deepStrictEqual(shapeText(font, 'j\u{301}\u{323}').glyphs, [7, 18, 17]);
-            }
-        );
+        it('keeps the dot of j when the canonical order puts a dot below between j and the acute', function() {
+            assert.deepStrictEqual(shapeText(font, 'j\u{301}\u{323}').glyphs, [7, 18, 17]);
+        });
 
         // j then the combining acute accent (U+0301), ccmp off
         // hb-shape --no-glyph-names --cluster-level=1 --language=en --features=-ccmp Roboto-VF-gsub-chaining-subset.ttf -u 006A,0301

@@ -155,6 +155,11 @@ TestMarkAttachment.ttf
     Public domain (CC0 1.0 Universal)
     https://creativecommons.org/publicdomain/zero/1.0/
 
+TestNormalization.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-normalization-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 TestPairPositioning.ttf
     Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-pair-positioning-font.py).
     Public domain (CC0 1.0 Universal)

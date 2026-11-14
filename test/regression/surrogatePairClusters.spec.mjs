@@ -252,17 +252,13 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
             assertShape(shapeText(font, text), expected);
         });
 
-        itFailsUntilFixed(
-            'composes a base and its combining mark into the precomposed glyph of the font',
-            'Font.prototype._createBidi (src/font.mjs): each character is mapped to its glyph of the cmap alone, a base and its combining mark are not composed (a + U+0301 is not drawn with the glyph of U+00E1)',
-            function() {
-                // U+1F21A, U+0301 (no precomposed character: the mark stays), a, U+0301 (U+00E1, glyph 7), U+1F21A
-                const text = '\u{1F21A}\u{0301}a\u{0301}\u{1F21A}';
-                const shape = shapeText(font, text);
-                // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 1F21A,0301,0061,0301,1F21A
-                assertShape(shape, parseHarfBuzzShape(text, '[19=0+1000|8=1+0|7=2+563|19=4+1000]'));
-            }
-        );
+        it('composes a base and its combining mark into the precomposed glyph of the font', function() {
+            // U+1F21A, U+0301 (no precomposed character: the mark stays), a, U+0301 (U+00E1, glyph 7), U+1F21A
+            const text = '\u{1F21A}\u{0301}a\u{0301}\u{1F21A}';
+            const shape = shapeText(font, text);
+            // hb-shape --no-glyph-names --cluster-level=1 --remove-default-ignorables NotoSansJP-Regular-astral-subset.ttf -u 1F21A,0301,0061,0301,1F21A
+            assertShape(shape, parseHarfBuzzShape(text, '[19=0+1000|8=1+0|7=2+563|19=4+1000]'));
+        });
     });
 
     describe('Noto Sans JP subset and Noto Emoji: variation selectors without a base, default ignorables', function() {
@@ -345,7 +341,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
 
         itFailsUntilFixed(
             'hides a default ignorable character the font has no glyph for: zero width joiner',
-            'Font.prototype._createBidi (src/font.mjs): every character is mapped with the cmap, a default ignorable character the font has not (U+200D) is drawn as .notdef',
+            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character the font has not (U+200D) is drawn as .notdef',
             function() {
                 // a, U+200D (zero width joiner, not in the cmap), b
                 const text = 'a\u{200D}b';
@@ -357,7 +353,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
 
         itFailsUntilFixed(
             'hides a default ignorable character the font has a glyph for: soft hyphen',
-            'Font.prototype._createBidi (src/font.mjs): every character is mapped with the cmap, a default ignorable character the font has (U+00AD) is drawn with its glyph and its advance',
+            'Font.shape (src/font.mjs): no step like hb_ot_hide_default_ignorables, a default ignorable character the font has (U+00AD) is drawn with its glyph and its advance',
             function() {
                 // U+1F21A, U+00AD (soft hyphen, glyph 2 of the cmap with an advance of 347), U+1F21A
                 const text = '\u{1F21A}\u{00AD}\u{1F21A}';
@@ -469,7 +465,7 @@ describe('regression: UTF-16 clusters of surrogate pairs, variation selectors an
 
         itFailsUntilFixed(
             'draws a lone surrogate with the glyph of U+FFFD',
-            'Font.prototype._createBidi (src/font.mjs): a lone surrogate is mapped as it is, to .notdef, not as U+FFFD',
+            'getTextCharacters (src/tokenizer.mjs): a lone surrogate is a character as it is, mapped to .notdef, not U+FFFD',
             function() {
                 // a, lone high surrogate, b: HarfBuzz (hb_buffer_add_utf16) and the browsers turn it into U+FFFD
                 const text = 'a\u{D83C}b';
