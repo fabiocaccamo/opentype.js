@@ -2,6 +2,7 @@ import assert from 'assert';
 import Bidi from '../src/bidi.mjs';
 import FeatureQuery from '../src/features/featureQuery.mjs';
 import { parse } from '../src/opentype.mjs';
+import { SPACE_TYPES } from '../src/char.mjs';
 import { readFileSync } from 'fs';
 import { shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
 import {
@@ -292,6 +293,24 @@ describe('bidi.mjs', function() {
             ]);
         });
 
+        it('gives each glyph whether it is ligated and the spaceFallbackType of its token', function() {
+            // TestSpaceFallback.ttf: sub space V by space_V; in liga, on space V space A: the ligature is ligated and
+            // keeps the spaceFallbackType of its first component, which the modifier gives the tokens
+            const spaceFont = loadSync('./test/fonts/TestSpaceFallback.ttf');
+            const bidi = new Bidi();
+            bidi.registerModifier('glyphIndex', null, token => {
+                token.spaceFallbackType = token.char === ' ' ? SPACE_TYPES.SPACE : SPACE_TYPES.NOT_SPACE;
+                return spaceFont.charToGlyphIndex(token.char);
+            });
+            bidi.applyFeatures(spaceFont, [{ script: 'latn', tags: ['liga'] }]);
+            const clusters = bidi.getTextGlyphClusters(' V A');
+            assert.deepStrictEqual(clusters.map(cluster => [cluster.index, cluster.isLigated, cluster.spaceFallbackType]), [
+                [spaceFont.nameToGlyphIndex('space_V'), true, SPACE_TYPES.SPACE],
+                [spaceFont.charToGlyphIndex(' '), false, SPACE_TYPES.SPACE],
+                [spaceFont.charToGlyphIndex('A'), false, SPACE_TYPES.NOT_SPACE]
+            ]);
+        });
+
         it('keeps the ligature properties of each glyph of a token of a right-to-left run with its glyph, like HarfBuzz', function() {
             // TestMarkAttachment.ttf with the multiple substitution of ss10 changed to sub z by f acutecomb i; and U+062A
             // mapped to z (fontTools), then sub f' lookup LIGA_F_I i'; of ss11: the token of the teh holds the ligature f_i
@@ -301,9 +320,18 @@ describe('bidi.mjs', function() {
             const markFont = loadSync('./test/fonts/TestMarkAttachment.ttf');
             markFont.tables.gsub.lookups[2].subtables[0].sequences[0] = ['f', 'acutecomb', 'i'].map(name => markFont.nameToGlyphIndex(name));
             markFont.tables.cmap.glyphIndexMap[0x62A] = markFont.nameToGlyphIndex('z');
-            assertShape(shapeText(markFont, '\u{62A}', { features: { ss10: true, ss11: true } }), {
+            const features = { ss10: true, ss11: true };
+            assertShape(shapeText(markFont, '\u{62A}', { features }), {
                 glyphs: [10, 9], clusters: [0, 0], advances: [0, 550], offsets: [[150, 200], [0, 0]]
             });
+            // the ligature f_i is ligated, the acute after it in the token is not, in visual order
+            const bidi = new Bidi();
+            bidi.registerModifier('glyphIndex', null, token => markFont.charToGlyphIndex(token.char));
+            bidi.applyFeatures(markFont, markFont.updateFeatures(features), { features });
+            assert.deepStrictEqual(bidi.getTextGlyphClusters('\u{62A}').map(cluster => [cluster.index, cluster.isLigated]), [
+                [markFont.nameToGlyphIndex('acutecomb'), false],
+                [markFont.nameToGlyphIndex('f_i'), true]
+            ]);
         });
 
         itFailsUntilFixed('lays a right-to-left word with a zero width non-joiner out from right to left, like HarfBuzz',

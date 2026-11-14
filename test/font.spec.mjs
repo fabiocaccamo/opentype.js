@@ -1851,6 +1851,263 @@ describe('font.mjs', function() {
         });
     });
 
+    describe('the fallback of the spaces and of U+2011 that the font has not', function() {
+        // TestSpaceFallback.ttf, built by test/generate-space-fallback-font.py: 2048 units per em, glyphs .notdef (0),
+        // space (1, 501), comma (2, 520), one (3, 1100), two (4, 1150), A (5, 1300), V (6), acutecomb (7), uni2003 (8,
+        // 1900), uni2010 (9, 640), acute (10, 700), space_V (11, 1500), space.alt (12, 800), thinvs (13, 300, the glyph
+        // of U+2009 U+FE00 in cmap format 14), and no zero nor period;
+        // hb-shape --no-glyph-names --cluster-level=1 [--features=<features>] TestSpaceFallback.ttf -u <code points>
+        let spaceFont;
+
+        // a shaped text in the format of hb-shape: glyph=cluster+advance
+        const formatShape = glyphPositions => '[' + glyphPositions.map(({ glyph, start, xAdvance }) => `${glyph.index}=${start}+${xAdvance}`).join('|') + ']';
+
+        before(function() {
+            spaceFont = loadSync('./test/fonts/TestSpaceFallback.ttf');
+        });
+
+        it('draws each space of the fallback of HarfBuzz that the font has not with the glyph of U+0020 and the advance of its space type', function() {
+            const expectedShapes = {
+                '\u{A0}': '[1=0+501]',
+                '\u{2000}': '[1=0+1024]',
+                '\u{2002}': '[1=0+1024]',
+                '\u{2004}': '[1=0+683]',
+                '\u{2005}': '[1=0+512]',
+                '\u{2006}': '[1=0+341]',
+                '\u{2007}': '[1=0+1100]',
+                '\u{2008}': '[1=0+520]',
+                '\u{2009}': '[1=0+410]',
+                '\u{200A}': '[1=0+128]',
+                '\u{202F}': '[1=0+250]',
+                '\u{205F}': '[1=0+455]',
+                '\u{3000}': '[1=0+2048]'
+            };
+            for (const [text, expectedShape] of Object.entries(expectedShapes)) {
+                assert.strictEqual(formatShape(spaceFont.shape(text)), expectedShape, text.codePointAt(0).toString(16));
+            }
+        });
+
+        it('draws a space the font has with its own glyph and advance, and U+1680 OGHAM SPACE MARK with .notdef', function() {
+            // -u 2003: [8=0+1900]; -u 1680: [0=0+1000]
+            assert.strictEqual(formatShape(spaceFont.shape('\u{2003}')), '[8=0+1900]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{1680}')), '[0=0+1000]');
+        });
+
+        it('draws U+2011 NON-BREAKING HYPHEN with the glyph of U+2010 HYPHEN', function() {
+            // -u 0041,2011,0041: [5=0+1300|9=1+640|5=2+1300]
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2011}A')), '[5=0+1300|9=1+640|5=2+1300]');
+        });
+
+        it('gives the glyphs of the fallback to stringToGlyphs, stringToGlyphIndexes and stringToGlyphClusters', function() {
+            // -u 0041,00A0,2009,202F,0041: [5=0+1300|1=1+501|1=2+410|1=3+190|5=4+1300]
+            const text = 'A\u{A0}\u{2009}\u{202F}A';
+            assert.deepStrictEqual(spaceFont.stringToGlyphIndexes(text), [5, 1, 1, 1, 5]);
+            assert.deepStrictEqual(spaceFont.stringToGlyphs(text).map(glyph => glyph.index), [5, 1, 1, 1, 5]);
+            assert.deepStrictEqual(spaceFont.stringToGlyphClusters(text).map(({ glyph, start, end }) => [glyph.index, start, end]), [
+                [5, 0, 1], [1, 1, 2], [1, 2, 3], [1, 3, 4], [5, 4, 5]
+            ]);
+            assert.strictEqual(formatShape(spaceFont.shape(text)), '[5=0+1300|1=1+501|1=2+410|1=3+190|5=4+1300]');
+        });
+
+        it('applies the GPOS adjustments of the space glyph after the advance of the space type, like HarfBuzz', function() {
+            // pos space A -60: -u 0041,202F,0041: [5=0+1300|1=1+190|5=2+1300], half the space then -60;
+            // --features=-kern: [5=0+1300|1=1+250|5=2+1300]; -u 0041,2009,0041: [5=0+1300|1=1+350|5=2+1300]
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{202F}A')), '[5=0+1300|1=1+190|5=2+1300]');
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{202F}A', { kerning: false })), '[5=0+1300|1=1+250|5=2+1300]');
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}A')), '[5=0+1300|1=1+350|5=2+1300]');
+        });
+
+        it('applies the GSUB features to the space glyph, the advance of the space type to the glyphs that replace it', function() {
+            // calt: sub two space' by space.alt; -u 0032,202F: [4=0+1150|12=1+400], half of space.alt; -u 0032,2009:
+            // [4=0+1150|12=1+410]; -u 0032,00A0: [4=0+1150|12=1+800]; --features=-calt -u 0032,202F: [4=0+1150|1=1+250]
+            assert.strictEqual(formatShape(spaceFont.shape('2\u{202F}')), '[4=0+1150|12=1+400]');
+            assert.strictEqual(formatShape(spaceFont.shape('2\u{2009}')), '[4=0+1150|12=1+410]');
+            assert.strictEqual(formatShape(spaceFont.shape('2\u{A0}')), '[4=0+1150|12=1+800]');
+            assert.strictEqual(formatShape(spaceFont.shape('2\u{202F}', { features: { calt: false } })), '[4=0+1150|1=1+250]');
+            // calt: sub one space' by space space; -u 0031,2009,0041: [3=0+1100|1=1+410|1=1+350|5=2+1300], each glyph of
+            // the multiple substitution with the advance of the space type, the second one kerned with A
+            assert.strictEqual(formatShape(spaceFont.shape('1\u{2009}A')), '[3=0+1100|1=1+410|1=1+350|5=2+1300]');
+        });
+
+        it('gives a ligature of the space glyph its own advance, like HarfBuzz for a ligated glyph', function() {
+            // liga: sub space V by space_V; -u 2009,0056: [11=0+1500]; ccmp: sub space acutecomb by acute; (a base and a
+            // mark for GDEF) -u 0041,2009,0301,0041: [5=0+1300|10=1+700|5=3+1300]
+            assert.strictEqual(formatShape(spaceFont.shape('\u{2009}V')), '[11=0+1500]');
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{301}A')), '[5=0+1300|10=1+700|5=3+1300]');
+        });
+
+        it('keeps the own advances of the glyphs that a multiple substitution splits a ligature of the space glyph into', function() {
+            // ss01: sub space_V by space V; after liga: --features=ss01 -u 2009,0056: [1=0+501|6=0+1300], the space glyph
+            // ligated, with its own advance and not the one of U+2009
+            assert.strictEqual(formatShape(spaceFont.shape('\u{2009}V', { features: { ss01: true } })), '[1=0+501|6=0+1300]');
+        });
+
+        it('gives the advance of the space type to getAdvanceWidth, forEachGlyph and getPath', function() {
+            // -u 0041,202F,0041: [5=0+1300|1=1+190|5=2+1300], at one em
+            const fontSize = spaceFont.unitsPerEm;
+            assert.strictEqual(spaceFont.getAdvanceWidth('A\u{202F}A', fontSize), 1300 + 190 + 1300);
+            const origins = [];
+            spaceFont.forEachGlyph('A\u{202F}A', 0, 0, fontSize, {}, (glyph, glyphX) => {
+                origins.push([glyph.index, glyphX]);
+            });
+            assert.deepStrictEqual(origins, [[5, 0], [1, 1300], [5, 1490]]);
+            const expectedPath = new Path();
+            expectedPath.extend(spaceFont.charToGlyph('A').getPath(0, 0, fontSize, {}, spaceFont));
+            expectedPath.extend(spaceFont.charToGlyph('A').getPath(1490, 0, fontSize, {}, spaceFont));
+            assert.deepStrictEqual(spaceFont.getPath('A\u{202F}A', 0, 0, fontSize).commands, expectedPath.commands);
+        });
+
+        it('keeps the cmap glyph of hasChar, charToGlyphIndex and charToGlyph, like the nominal glyph of HarfBuzz', function() {
+            assert.strictEqual(spaceFont.hasChar('\u{202F}'), false);
+            assert.strictEqual(spaceFont.charToGlyphIndex('\u{202F}'), 0);
+            assert.strictEqual(spaceFont.charToGlyph('\u{2011}').index, 0);
+        });
+
+        it('draws the spaces with .notdef and its advance in a font without U+0020', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 LookupFlags.ttf -u 0061,00A0,0062: [1=0+500|0=1+500|2=2+500];
+            // -u 0061,2009,0062: [1=0+500|0=1+500|2=2+500], the advance of .notdef and not 1/5 em
+            const lookupFlagsFont = loadSync('./test/fonts/LookupFlags.ttf');
+            assert.deepStrictEqual(lookupFlagsFont.stringToGlyphIndexes('a\u{A0}b'), [1, 0, 2]);
+            assert.strictEqual(formatShape(lookupFlagsFont.shape('a\u{2009}b')), '[1=0+500|0=1+500|2=2+500]');
+        });
+
+        it('draws the spaces of a font with a kern table with the advances of their space types, then kerned', function() {
+            // TestTracking3.ttf, 2048 units per em, a space of 569, the kern table pairs A space and space A -113, the
+            // required feature trak of GPOS: -u 0041,2009,0041: [36=0+1309|3=1@-56,0+297|36=2@-56,0+1310], 410 - 113;
+            // -u 0041,202F,0041: [36=0+1309|3=1@-56,0+171|36=2@-56,0+1310], 284 - 113
+            const trackingFont = loadSync('./test/fonts/TestTracking3.ttf');
+            const formatPositions = glyphPositions => glyphPositions.map(({ glyph, xAdvance, xOffset }) => [glyph.index, xAdvance, xOffset]);
+            assert.deepStrictEqual(formatPositions(trackingFont.shape('A\u{2009}A')), [[36, 1309, 0], [3, 297, -56], [36, 1310, -56]]);
+            assert.deepStrictEqual(formatPositions(trackingFont.shape('A\u{202F}A')), [[36, 1309, 0], [3, 171, -56], [36, 1310, -56]]);
+        });
+
+        it('draws a space or U+2011 followed by a variation selector with the glyph of the cmap, like HarfBuzz', function() {
+            // handle_variation_selector_cluster maps the character to its nominal glyph, without the fallbacks:
+            // -u 00A0,FE00: [0=0+1000|1=1+0]; -u 2011,FE00: [0=0+1000|1=1+0];
+            // -u 0041,2009,FE0F,0041: [5=0+1300|0=1+1000|1=2+0|5=3+1300]; the glyph of the selector, hidden with the space
+            // glyph, is for point 23
+            assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{FE00}').slice(0, 1)), '[0=0+1000]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{2011}\u{FE00}').slice(0, 1)), '[0=0+1000]');
+            const glyphPositions = spaceFont.shape('A\u{2009}\u{FE0F}A');
+            const glyphPositionsWithoutSelector = [0, 1, glyphPositions.length - 1].map(index => glyphPositions[index]);
+            assert.strictEqual(formatShape(glyphPositionsWithoutSelector), '[5=0+1300|0=1+1000|5=3+1300]');
+            // -u 0041,2009,E0100,0041: [5=0+1300|0=1+1000|1=2+0|5=3+1300]
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{E0100}A').slice(0, 2)), '[5=0+1300|0=1+1000]');
+        });
+
+        it('keeps the fallback of a space or U+2011 followed by a Mongolian free variation selector, like HarfBuzz', function() {
+            // is_variation_selector of HarfBuzz leaves out U+180B to U+180D: -u 0041,2009,180B,0041:
+            // [5=0+1300|1=1+350|1=2+0|5=3+1300] (1/5 em, 410, minus the kerning of space A); -u 2011,180C: [9=0+640|1=1+0];
+            // -u 00A0,180D: [1=0+501|1=1+0]; -u 202F,180B,0041: [1=0+190|1=1+0|5=2+1300]; the glyph of the selector is for
+            // point 23
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{180B}A').slice(0, 2)), '[5=0+1300|1=1+350]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{2011}\u{180C}').slice(0, 1)), '[9=0+640]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{180D}').slice(0, 1)), '[1=0+501]');
+            assert.strictEqual(formatShape(spaceFont.shape('\u{202F}\u{180B}A').slice(0, 1)), '[1=0+190]');
+        });
+
+        it('draws a space with the glyph of its variation sequence and the advance of that glyph, like HarfBuzz', function() {
+            // cmap format 14: U+2009 U+FE00 to thinvs: -u 0041,2009,FE00,0041: [5=0+1300|13=1+300|5=3+1300], not the 1/5 em
+            // of U+2009 (410) nor the kerning of space A
+            assert.strictEqual(formatShape(spaceFont.shape('A\u{2009}\u{FE00}A')), '[5=0+1300|13=1+300|5=3+1300]');
+        });
+
+        it('shapes the spaces of a font parsed with lowMemory, whose glyphs load on request', function() {
+            // -u 0041,00A0,2009,202F,0041: [5=0+1300|1=1+501|1=2+410|1=3+190|5=4+1300]; -u 2007: [1=0+1100]; -u 2008:
+            // [1=0+520]; Changa-VariableFont_wght.ttf --variations=wght=800 -u 0031,2007,0030: [533=0+535|659=1+675|532=2+675];
+            // -u 0031,2008,0030: [533=0+535|659=1+277|532=2+675]; -u 0031,202F,0030: [533=0+535|659=1+100|532=2+675]
+            const lowMemoryFont = loadSync('./test/fonts/TestSpaceFallback.ttf', { lowMemory: true });
+            assert.strictEqual(formatShape(lowMemoryFont.shape('A\u{A0}\u{2009}\u{202F}A')), '[5=0+1300|1=1+501|1=2+410|1=3+190|5=4+1300]');
+            assert.strictEqual(formatShape(lowMemoryFont.shape('\u{2007}')), '[1=0+1100]');
+            assert.strictEqual(formatShape(lowMemoryFont.shape('\u{2008}')), '[1=0+520]');
+            const lowMemoryVariableFont = loadSync('./test/fonts/Changa-VariableFont_wght.ttf', { lowMemory: true });
+            const variation = { wght: 800 };
+            assert.strictEqual(formatShape(lowMemoryVariableFont.shape('1\u{2007}0', { variation })), '[533=0+535|659=1+675|532=2+675]');
+            assert.strictEqual(formatShape(lowMemoryVariableFont.shape('1\u{2008}0', { variation })), '[533=0+535|659=1+277|532=2+675]');
+            assert.strictEqual(formatShape(lowMemoryVariableFont.shape('1\u{202F}0', { variation })), '[533=0+535|659=1+100|532=2+675]');
+        });
+
+        itFailsUntilFixed('draws a space the font has not with the glyph of its canonical decomposition, like HarfBuzz',
+            'getCharacterGlyph (src/font.mjs): U+2001 EM QUAD, which the font has not, is drawn with the glyph of U+0020 and an ' +
+            'advance of an em; HarfBuzz first decomposes it into U+2003 EM SPACE, which the font has (decompose_current_character, ' +
+            'point 25b of the normalization)',
+            function() {
+                // -u 2001: [8=0+1900]
+                assert.strictEqual(formatShape(spaceFont.shape('\u{2001}')), '[8=0+1900]');
+            });
+
+        itFailsUntilFixed('draws a space followed by marks and a variation selector with .notdef, like HarfBuzz',
+            'getCharacterGlyph (src/font.mjs) skips the fallback only when the next character is a variation selector: ' +
+            'U+00A0 U+0301 U+FE00 is drawn with the glyph of U+0020, which ccmp ligates with the acute; HarfBuzz maps every ' +
+            'character of a cluster of marks with a variation selector to its nominal glyph, .notdef for U+00A0, without the ' +
+            'fallback (handle_variation_selector_cluster), which needs the clusters of marks of Unicode (point 25b of the normalization)',
+            function() {
+                // -u 00A0,0301,FE00: [0=0+1000|7=1+0|1=2+0], the glyph of U+00A0 first
+                assert.strictEqual(formatShape(spaceFont.shape('\u{A0}\u{301}\u{FE00}').slice(0, 1)), '[0=0+1000]');
+            });
+
+        describe('of real fonts', function() {
+            // hb-shape --no-glyph-names --cluster-level=1 [--variations=<variation>] <font> -u <code points>, in test/fonts
+            let sourceSansFont;
+            let jomhuriaFont;
+            let changaFont;
+            let thaiFont;
+
+            before(function() {
+                sourceSansFont = loadSync('./test/fonts/SourceSansPro-Regular.otf');
+                jomhuriaFont = loadSync('./test/fonts/Jomhuria-Regular.ttf');
+                changaFont = loadSync('./test/fonts/Changa-VariableFont_wght.ttf');
+                thaiFont = loadSync('./test/fonts/NotoSansThai-Medium-Testing-v1.ttf');
+            });
+
+            it('draws the spaces of a CFF font with the space glyph and the advances of their space types', function() {
+                // SourceSansPro-Regular.otf, 1000 units per em, a space of 202, a period of 249: -u 0031,202F,0030:
+                // [468=0+497|1=1+101|467=2+497]; -u 2002: [1=0+500]; -u 2008: [1=0+249]; -u 205F: [1=0+222]; -u 3000: [1=0+1000]
+                assert.strictEqual(formatShape(sourceSansFont.shape('1\u{202F}0')), '[468=0+497|1=1+101|467=2+497]');
+                assert.strictEqual(formatShape(sourceSansFont.shape('\u{2002}')), '[1=0+500]');
+                assert.strictEqual(formatShape(sourceSansFont.shape('\u{2008}')), '[1=0+249]');
+                assert.strictEqual(formatShape(sourceSansFont.shape('\u{205F}')), '[1=0+222]');
+                assert.strictEqual(formatShape(sourceSansFont.shape('\u{3000}')), '[1=0+1000]');
+            });
+
+            it('truncates 4/18 em and takes the period before the comma, in fonts where it matters', function() {
+                // Jomhuria-Regular.ttf, 3000 units per em: -u 205F: [4=0+666], 666.7 truncated; AbrilFatface-Regular.otf,
+                // a period of 265 and a comma of 262: -u 2008: [3=0+265]
+                assert.strictEqual(formatShape(jomhuriaFont.shape('\u{205F}')), '[4=0+666]');
+                assert.strictEqual(formatShape(loadSync('./test/fonts/AbrilFatface-Regular.otf').shape('\u{2008}')), '[3=0+265]');
+            });
+
+            it('draws U+2011 with .notdef in a font without U+2010, and with the glyph of U+2010 in a thai run', function() {
+                // SourceSansPro-Regular.otf -u 0031,2011,0030: [468=0+497|0=1+653|467=2+497];
+                // NotoSansThai-Medium-Testing-v1.ttf -u 0E01,2011,0E01: [317=0+607|416=1+322|317=2+607]
+                assert.strictEqual(formatShape(sourceSansFont.shape('1\u{2011}0')), '[468=0+497|0=1+653|467=2+497]');
+                assert.strictEqual(formatShape(thaiFont.shape('\u{E01}\u{2011}\u{E01}')), '[317=0+607|416=1+322|317=2+607]');
+            });
+
+            it('draws the spaces of a right-to-left run with the space glyph, in visual order', function() {
+                // Jomhuria-Regular.ttf, 3000 units per em: -u 0628,2009,0628: [434=2+1608|4=1+600|434=0+1608];
+                // -u 0628,3000,0628,0020,0628: [434=4+1608|4=3+400|434=2+1608|4=1+3000|434=0+1608]
+                assert.strictEqual(formatShape(jomhuriaFont.shape('\u{628}\u{2009}\u{628}')), '[434=2+1608|4=1+600|434=0+1608]');
+                assert.strictEqual(
+                    formatShape(jomhuriaFont.shape('\u{628}\u{3000}\u{628} \u{628}')),
+                    '[434=4+1608|4=3+400|434=2+1608|4=1+3000|434=0+1608]'
+                );
+            });
+
+            it('gives the spaces of a variable font the advances of the space and of the digits at the variation', function() {
+                // Changa-VariableFont_wght.ttf, --variations=wght=800: -u 0031,2007,0030: [533=0+535|659=1+675|532=2+675];
+                // -u 0031,202F,0030: [533=0+535|659=1+100|532=2+675]; --variations=wght=200 -u 0031,202F,0030:
+                // [533=0+400|659=1+134|532=2+605]
+                const variation = { wght: 800 };
+                assert.strictEqual(formatShape(changaFont.shape('1\u{2007}0', { variation })), '[533=0+535|659=1+675|532=2+675]');
+                assert.strictEqual(formatShape(changaFont.shape('1\u{202F}0', { variation })), '[533=0+535|659=1+100|532=2+675]');
+                assert.strictEqual(
+                    formatShape(changaFont.shape('1\u{202F}0', { variation: { wght: 200 } })), '[533=0+400|659=1+134|532=2+605]'
+                );
+            });
+        });
+    });
+
     describe('LookupFlags.ttf, the reference font of the lookupFlag tests', function() {
         // built by test/generate-lookup-flags-font.py, the font of the hb-shape outputs the lookupFlag tests quote:
         // hb-shape --no-glyph-names --cluster-level=1 LookupFlags.ttf -u <code points>

@@ -5,8 +5,11 @@ import {
     getCharScriptExtensions,
     getCharTextScript,
     getScriptRuns,
+    getSpaceFallbackType,
     isArabicChar,
-    isVariationSequenceSelector
+    isVariationSelector,
+    isVariationSequenceSelector,
+    SPACE_TYPES
 } from '../src/char.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
 
@@ -109,6 +112,57 @@ describe('char.mjs', function() {
                 assert.equal(isVariationSequenceSelector(char), false, char.codePointAt(0).toString(16));
             }
             assert.equal(isVariationSequenceSelector(null), false);
+        });
+    });
+
+    describe('isVariationSelector', function() {
+        // hb_unicode_funcs_t::is_variation_selector, hb-unicode.hh of HarfBuzz 11.3.2
+        it('gives true for the variation selectors 1 to 16 and of the supplement', function() {
+            for (const char of ['\u{FE00}', '\u{FE0F}', '\u{E0100}', '\u{E01EF}']) {
+                assert.equal(isVariationSelector(char), true, char.codePointAt(0).toString(16));
+            }
+        });
+
+        it('gives false for the Mongolian free variation selectors, the other chars and null', function() {
+            for (const char of ['a', '\u{180B}', '\u{180C}', '\u{180D}', '\u{180F}', '\u{FDFF}', '\u{FE10}', '\u{E00FF}', '\u{E01F0}']) {
+                assert.equal(isVariationSelector(char), false, char.codePointAt(0).toString(16));
+            }
+            assert.equal(isVariationSelector(null), false);
+        });
+    });
+
+    describe('getSpaceFallbackType', function() {
+        it('gives the space type of HarfBuzz to each space of the Zs general category but U+1680', function() {
+            // the Zs chars of fontTools (Unicode 17.0.0): python -c "from fontTools import unicodedata; print([hex(c) for c
+            // in range(0x110000) if unicodedata.category(chr(c)) == 'Zs'])"; their types are the ones of
+            // hb_unicode_funcs_t::space_fallback_type (hb-unicode.hh of HarfBuzz 11.3.2)
+            const expectedTypes = [
+                [0x0020, SPACE_TYPES.SPACE], [0x00A0, SPACE_TYPES.SPACE], [0x1680, SPACE_TYPES.NOT_SPACE],
+                [0x2000, SPACE_TYPES.EM_2], [0x2001, SPACE_TYPES.EM], [0x2002, SPACE_TYPES.EM_2], [0x2003, SPACE_TYPES.EM],
+                [0x2004, SPACE_TYPES.EM_3], [0x2005, SPACE_TYPES.EM_4], [0x2006, SPACE_TYPES.EM_6],
+                [0x2007, SPACE_TYPES.FIGURE], [0x2008, SPACE_TYPES.PUNCTUATION], [0x2009, SPACE_TYPES.EM_5],
+                [0x200A, SPACE_TYPES.EM_16], [0x202F, SPACE_TYPES.NARROW], [0x205F, SPACE_TYPES.FOUR_EM_18],
+                [0x3000, SPACE_TYPES.EM]
+            ];
+            for (const [codePoint, spaceType] of expectedTypes) {
+                assert.strictEqual(getSpaceFallbackType(String.fromCodePoint(codePoint)), spaceType, codePoint.toString(16));
+            }
+        });
+
+        it('gives NOT_SPACE to the other chars', function() {
+            // U+200B ZERO WIDTH SPACE and U+FEFF ZERO WIDTH NO-BREAK SPACE (Cf), U+2011 NON-BREAKING HYPHEN, U+2028 LINE
+            // SEPARATOR (Zl)
+            for (const char of ['a', '\t', '\u{200B}', '\u{2011}', '\u{2028}', '\u{FEFF}', '\u{1F600}']) {
+                assert.strictEqual(getSpaceFallbackType(char), SPACE_TYPES.NOT_SPACE, char.codePointAt(0).toString(16));
+            }
+        });
+
+        it('gives the space types the values of HarfBuzz, an em divided by the value of EM_n', function() {
+            // enum space_t of hb_unicode_funcs_t
+            assert.deepStrictEqual(SPACE_TYPES, {
+                NOT_SPACE: 0, EM: 1, EM_2: 2, EM_3: 3, EM_4: 4, EM_5: 5, EM_6: 6, EM_16: 16, FOUR_EM_18: 17, SPACE: 18,
+                FIGURE: 19, PUNCTUATION: 20, NARROW: 21
+            });
         });
     });
 

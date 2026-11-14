@@ -6,6 +6,7 @@ import FeatureQuery, { SubstitutionAction } from '../src/features/featureQuery.m
 import applySubstitution, {
     getTokenGlyphIndexes,
     getTokenLigatureProperties,
+    getTokenLigatedGlyphs,
     getGlyphSequence,
     applyLookupToTokens,
     getFeaturesLookups,
@@ -365,6 +366,85 @@ describe('applySubstitution.mjs', function() {
             assert.deepStrictEqual(describeLigatureProperties(tokens), [
                 { ligatureId: 1, ligatureComponentCount: 3 }, { ligatureId: 2, ligatureComponentCount: 2 }
             ]);
+        });
+    });
+
+    describe('the ligated glyphs of the ligature substitutions', function() {
+        const gdef = createLookupFlagsFont().tables.gdef;
+
+        // whether each glyph of the tokens that are not deleted is ligated
+        const describeLigatedGlyphs = tokens => tokens.filter(token => !token.state.deleted).flatMap(
+            token => getTokenGlyphIndexes(token).map((glyphIndex, index) => getTokenLigatedGlyphs(token)[index] === true)
+        );
+
+        it('sets the glyph of a ligature substitution as ligated, not the marks it skipped', function() {
+            // lookupflag IgnoreMarks; sub a b c by a_b_c; on a acute b acute c: ligate_input replaces the first component
+            // with replace_glyph_with_ligature, which sets the LIGATED glyph property
+            const tokens = tokenize('a\u{301}b\u{301}c');
+            assert.deepStrictEqual(describeLigatedGlyphs(tokens), [false, false, false, false, false]);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b_c, componentOffsets: [2, 4] }), getGlyphSequence(tokens, gdef), 0);
+            assert.deepStrictEqual(describeLigatedGlyphs(tokens), [true, false, false]);
+        });
+
+        it('sets a ligature of a base glyph and a mark as ligated, which has no ligature properties', function() {
+            // sub a acute by a.alt; (GDEF classes): not a ligature for the ligature properties, ligated for HarfBuzz
+            const tokens = tokenize('a\u{301}');
+            applySubstitution(action(41, { ligGlyph: glyphIndexes['a.alt'], componentOffsets: [1] }), getGlyphSequence(tokens, gdef), 0);
+            assert.deepStrictEqual(getTokenLigatureProperties(tokens[0]), []);
+            assert.deepStrictEqual(describeLigatedGlyphs(tokens), [true]);
+        });
+
+        it('does not set a ligature of one component as ligated, like HarfBuzz', function() {
+            // Ligature::apply replaces a ligature of one component with replace_glyph, like a single substitution
+            const tokens = tokenize('a');
+            applySubstitution(action(41, { ligGlyph: glyphIndexes['a.alt'], componentOffsets: [] }), getGlyphSequence(tokens, gdef), 0);
+            assert.deepStrictEqual(describeLigatedGlyphs(tokens), [false]);
+        });
+
+        it('keeps a glyph ligated through the single and multiple substitutions that replace it, like HarfBuzz', function() {
+            // the glyphs of a substitution keep the glyph properties of the glyph they replace: sub a b by a_b; on c a b,
+            // then sub a_b by a_b dotbelow; then sub dotbelow by acute;
+            const tokens = tokenize('cab');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), glyphSequence, 1);
+            applySubstitution(action(21, [glyphIndexes.a_b, glyphIndexes.dotbelow]), glyphSequence, 1);
+            applySubstitution(action(11, acute), glyphSequence, 2);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphC, glyphIndexes.a_b, acute]);
+            assert.deepStrictEqual(describeLigatedGlyphs(tokens), [false, true, true]);
+        });
+
+        it('sets as ligated the glyph of a ligature at its position in a token of several glyphs', function() {
+            // sub c by c a; then sub a b by a_b; on c b: the ligature starts at the second glyph of the token of c
+            const tokens = tokenize('cb');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(21, [glyphC, glyphA]), glyphSequence, 0);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), glyphSequence, 1);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphC, glyphIndexes.a_b]);
+            assert.deepStrictEqual(describeLigatedGlyphs(tokens), [false, true]);
+        });
+
+        it('keeps whether each glyph of a token is ligated when a substitution replaces its second glyph, like HarfBuzz', function() {
+            // sub c by c a; then sub a b by a_b; then sub a_b by acute; on c b: replace_glyph keeps the glyph properties
+            // of each glyph info, so only the glyph that replaces a_b is ligated
+            const tokens = tokenize('cb');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(21, [glyphC, glyphA]), glyphSequence, 0);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), glyphSequence, 1);
+            applySubstitution(action(11, acute), glyphSequence, 1);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphC, acute]);
+            assert.deepStrictEqual(describeLigatedGlyphs(tokens), [false, true]);
+        });
+
+        it('keeps the ligated glyph of a token when a substitution deletes the glyph before it, like HarfBuzz', function() {
+            // sub c by c a; then sub a b by a_b; then sub c by NULL; on c b: delete_glyph removes only the glyph info of
+            // c, the glyph a_b stays ligated
+            const tokens = tokenize('cb');
+            const glyphSequence = getGlyphSequence(tokens, gdef);
+            applySubstitution(action(21, [glyphC, glyphA]), glyphSequence, 0);
+            applySubstitution(action(41, { ligGlyph: glyphIndexes.a_b, componentOffsets: [1] }), glyphSequence, 1);
+            applySubstitution(action(21, []), glyphSequence, 0);
+            assert.deepStrictEqual(glyphSequence.glyphIndexes, [glyphIndexes.a_b]);
+            assert.deepStrictEqual(describeLigatedGlyphs(tokens), [true]);
         });
     });
 
@@ -835,6 +915,7 @@ describe('applySubstitution.mjs', function() {
             assert.deepStrictEqual(describeTokens(tokens), describeTokens(tokensBeforeContext));
             assert.deepStrictEqual(tokens.map(getTokenLigatureProperties), tokensBeforeContext.map(getTokenLigatureProperties));
             assert.deepStrictEqual(tokens.slice(0, 3).map(getTokenLigatureProperties), [[], [], []]);
+            assert.deepStrictEqual(tokens.slice(0, 3).map(getTokenLigatedGlyphs), [[], [], []]);
         });
 
         it('gives a token back the ligature properties it had before a ligature of one component of the lookup', function() {
@@ -865,6 +946,44 @@ describe('applySubstitution.mjs', function() {
             assert.ok(query.isMaxGlyphCountExceeded);
             assert.deepStrictEqual(getTokenGlyphIndexes(tokens[0]), [ff]);
             assert.deepStrictEqual(getTokenLigatureProperties(tokens[0]), []);
+        });
+
+        it('gives a token back the ligated glyphs it had before a multiple substitution of the lookup', function() {
+            // lookup LIGATURE { sub b c by ff; } LIGATURE; then DOUBLE0 to DOUBLE12 as above, then lookup CONTEXT { sub ff'
+            // lookup MULTIPLE; sub a' lookup QUADRUPLE; } CONTEXT;, with lookup MULTIPLE { sub ff by ff dotbelow; }
+            // MULTIPLE;. The ligated glyphs as they were before CONTEXT are the contract of the fork, not HarfBuzz
+            const lookups = createDoublingLookups(13).concat([
+                createLigatureLookup(glyphB, [glyphC], ff),
+                createMultipleLookup([ff], [[ff, glyphIndexes.dotbelow]]),
+                createMultipleLookup([glyphA], [[glyphA, glyphA, glyphA, glyphA]])
+            ]);
+            const contextLookup = {
+                lookupType: 6,
+                lookupFlag: 0,
+                subtables: [
+                    { substFormat: 3, backtrackCoverage: [], inputCoverage: createCoverages([ff]), lookaheadCoverage: [], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 14 }] },
+                    { substFormat: 3, backtrackCoverage: [], inputCoverage: createCoverages([glyphA]), lookaheadCoverage: [], lookupRecords: [{ sequenceIndex: 0, lookupListIndex: 15 }] }
+                ]
+            };
+            lookups.push(contextLookup);
+            const font = createLookupFlagsFont({ gsub: createLayoutTable('latn', 'liga', [13].concat(getLookupIndexes(0, 13), [16]), lookups) });
+            // the tokens of the text, one script run, after the lookups
+            const applyLookups = appliedLookups => {
+                const query = new FeatureQuery(font);
+                const tokens = tokenize('bca');
+                query.startScriptRun(['ltra', 'ltrm'], tokens.length);
+                for (const lookupTable of appliedLookups) {
+                    applyLookupToTokens(query, lookupTable, 'liga', tokens);
+                }
+                return { query, tokens };
+            };
+            const lookupsBeforeContext = [lookups[13]].concat(lookups.slice(0, 13));
+            const { query, tokens } = applyLookups(lookupsBeforeContext.concat([contextLookup]));
+            const { tokens: tokensBeforeContext } = applyLookups(lookupsBeforeContext);
+            assert.ok(query.isMaxGlyphCountExceeded);
+            assert.deepStrictEqual(getTokenGlyphIndexes(tokens[0]), [ff]);
+            assert.deepStrictEqual(tokens.map(getTokenLigatedGlyphs), tokensBeforeContext.map(getTokenLigatedGlyphs));
+            assert.deepStrictEqual(getTokenLigatedGlyphs(tokens[0]), [true]);
         });
     });
 

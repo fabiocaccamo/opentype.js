@@ -4,7 +4,9 @@ import Path from './path.mjs';
 import sfnt from './tables/sfnt.mjs';
 import { DefaultEncoding } from './encoding.mjs';
 import glyphset from './glyphset.mjs';
-import Position, { DEFAULT_POSITIONING_FEATURES, getMarkAdvanceZeroing, positionGlyphRun } from './position.mjs';
+import Position, {
+    DEFAULT_POSITIONING_FEATURES, getDefaultGlyphAdvance, getMarkAdvanceZeroing, positionGlyphRun
+} from './position.mjs';
 import Substitution from './substitution.mjs';
 import { PaletteManager } from './palettes.mjs';
 import { LayerManager } from './layers.mjs';
@@ -13,7 +15,7 @@ import { VariationManager } from './variation.mjs';
 import HintingTrueType from './hintingtt.mjs';
 import Bidi, { getScriptRunShaper } from './bidi.mjs';
 import { ARABIC_FORM_TAGS, getEnabledFeatureTags, getDirectionFeatureTags } from './features/featureValues.mjs';
-import { getCharTextScript } from './char.mjs';
+import { getCharTextScript, getSpaceFallbackType, isVariationSelector, SPACE_TYPES } from './char.mjs';
 import { getOpenTypeScriptTags, getChosenScriptTag, selectScriptTag } from './layout.mjs';
 import { applyPaintType } from './tables/cff.mjs';
 
@@ -247,8 +249,46 @@ Font.prototype.stringToGlyphIndexes = function(s, options) {
 };
 
 /**
- * Create a Bidi instance mapping the characters to glyph indexes, with the features, the script, the language and
- * the variation of the given options.
+ * The glyph of a character of a text, like decompose_current_character of HarfBuzz (hb-ot-shape-normalize.cc of
+ * HarfBuzz 11.3.2), not yet with its canonical decomposition: the glyph of the character in the cmap (see
+ * charToGlyphIndex); for a space the font has not that can use the glyph of U+0020 SPACE (a space fallback type other
+ * than NOT_SPACE, see getSpaceFallbackType in char.mjs), the glyph of U+0020, whose advance is then the one of the
+ * space type (see getDefaultGlyphAdvance in position.mjs); for U+2011 NON-BREAKING HYPHEN the font has not, the glyph
+ * of U+2010 HYPHEN; otherwise the glyph index of the cmap, .notdef. A character followed by a variation selector
+ * (U+FE00 to U+FE0F, U+E0100 to U+E01EF, see isVariationSelector in char.mjs) keeps the glyph of the cmap, like
+ * handle_variation_selector_cluster of HarfBuzz, which maps it to its nominal glyph without these fallbacks (not yet
+ * when other marks come between the character and the selector); a Mongolian free variation selector after it keeps
+ * the fallbacks, like HarfBuzz.
+ * @param  {Font} font
+ * @param  {string} char a single character
+ * @param  {string|null} nextChar the character after it in the text, null at the end
+ * @return {{glyphIndex: number|null, spaceFallbackType: number}} spaceFallbackType the space type of the glyph of
+ * U+0020 that draws a space, NOT_SPACE for the other glyphs
+ */
+function getCharacterGlyph(font, char, nextChar) {
+    const glyphIndex = font.charToGlyphIndex(char);
+    if (glyphIndex > 0 || isVariationSelector(nextChar)) {
+        return { glyphIndex, spaceFallbackType: SPACE_TYPES.NOT_SPACE };
+    }
+    const spaceFallbackType = getSpaceFallbackType(char);
+    if (spaceFallbackType !== SPACE_TYPES.NOT_SPACE) {
+        const spaceGlyphIndex = font.charToGlyphIndex(' ');
+        if (spaceGlyphIndex > 0) {
+            return { glyphIndex: spaceGlyphIndex, spaceFallbackType };
+        }
+    }
+    if (char === '\u{2011}') {
+        const hyphenGlyphIndex = font.charToGlyphIndex('\u{2010}');
+        if (hyphenGlyphIndex > 0) {
+            return { glyphIndex: hyphenGlyphIndex, spaceFallbackType: SPACE_TYPES.NOT_SPACE };
+        }
+    }
+    return { glyphIndex, spaceFallbackType: SPACE_TYPES.NOT_SPACE };
+}
+
+/**
+ * Create a Bidi instance mapping the characters to glyph indexes (see getCharacterGlyph), with the features, the
+ * script, the language and the variation of the given options.
  * @param  {GlyphRenderOptions} [options]
  * @return {Bidi}
  * @private
@@ -257,9 +297,12 @@ Font.prototype._createBidi = function(options) {
     options = options || {};
     const bidi = new Bidi();
 
-    // Create and register 'glyphIndex' state modifier
-    const charToGlyphIndexMod = token => this.charToGlyphIndex(token.char);
-    bidi.registerModifier('glyphIndex', null, charToGlyphIndexMod);
+    // the 'glyphIndex' state modifier: the glyph of the character of each token, and its spaceFallbackType
+    bidi.registerModifier('glyphIndex', null, (token, contextParams) => {
+        const characterGlyph = getCharacterGlyph(this, token.char, contextParams.get(1));
+        token.spaceFallbackType = characterGlyph.spaceFallbackType;
+        return characterGlyph.glyphIndex;
+    });
 
     bidi.applyFeatures(this, this.updateFeatures(options.features), {
         script: options.script,
@@ -293,9 +336,11 @@ Font.prototype.stringToGlyphClusters = function(s, options) {
  * @param  {string} text
  * @param  {GlyphRenderOptions} [options]
  * @return {Array<{glyph: opentype.Glyph, start: number, end: number, rightToLeft: boolean, scriptRun: Object,
- * ligatureProperties: Object|undefined}>} the glyphs in visual order, rightToLeft for the glyphs of a right-to-left run,
- * scriptRun the script run of the glyph, ligatureProperties what the ligature substitutions recorded about the glyph
- * (see Bidi.getTextGlyphClusters)
+ * ligatureProperties: Object|undefined, spaceType: number}>} the glyphs in visual order, rightToLeft for the glyphs of
+ * a right-to-left run, scriptRun the script run of the glyph, ligatureProperties what the ligature substitutions
+ * recorded about the glyph (see Bidi.getTextGlyphClusters), spaceType the space type of the advance of the glyph
+ * (see getDefaultGlyphAdvance in position.mjs): like _hb_ot_shape_fallback_spaces of HarfBuzz, the space fallback type
+ * of its character (see getCharacterGlyph), NOT_SPACE for a ligated glyph
  * @private
  */
 Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
@@ -307,7 +352,8 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
         end: cluster.end,
         rightToLeft: cluster.rightToLeft,
         scriptRun: cluster.scriptRun,
-        ligatureProperties: cluster.ligatureProperties
+        ligatureProperties: cluster.ligatureProperties,
+        spaceType: cluster.isLigated ? SPACE_TYPES.NOT_SPACE : cluster.spaceFallbackType
     }));
 };
 
@@ -318,6 +364,9 @@ Font.prototype._stringToDirectionalGlyphClusters = function(text, options) {
  * length of the given string.
  * The glyphs are in visual order, like HarfBuzz: the glyphs of an Arabic text in reverse order, the glyphs of a
  * multiple substitution included (e.g. a letter and the mark that ccmp decomposed it into, the mark first).
+ * Like HarfBuzz, a space the font has not (U+00A0, U+2000 to U+200A, U+202F, U+205F, U+3000) takes the glyph of
+ * U+0020 SPACE, with the advance of its kind of space in Font.shape, and U+2011 NON-BREAKING HYPHEN the glyph of
+ * U+2010 HYPHEN, before the GSUB features (see getCharacterGlyph).
  * @param  {string}
  * @param  {GlyphRenderOptions} [options]
  * @return {opentype.Glyph[]}
@@ -691,6 +740,9 @@ Font.prototype.defaultRenderOptions = {
 /**
  * Shape a text like hb-shape: its glyphs after the GSUB features (see stringToGlyphClusters), in visual order, each
  * one with its cluster and its position in font units at the variation of the options (or of the font) after GPOS.
+ * Like HarfBuzz, the glyph of U+0020 that draws a space the font has not (see stringToGlyphs), and the glyphs the
+ * GSUB features replace it with but a ligature, take the advance of its kind of space before GPOS (see
+ * getDefaultGlyphAdvance in position.mjs).
  * Like HarfBuzz, each run of one script and one direction (see GlyphRenderOptions.script) is positioned on its own:
  * the lookups of the GPOS features of its script and language apply to its glyphs in the order of the text (the
  * reverse of the visual order in a right-to-left run), together in LookupList order (extension lookups included),
@@ -756,12 +808,11 @@ Font.prototype.defaultRenderOptions = {
 Font.prototype.shape = function(text, options) {
     options = Object.assign({}, this.defaultRenderOptions, options);
     const glyphClusters = this._stringToDirectionalGlyphClusters(text, options);
-    const glyphPositions = glyphClusters.map(({ glyph, start, end }) => ({
+    const glyphPositions = glyphClusters.map(({ glyph, start, end, spaceType }) => ({
         glyph,
         start,
         end,
-        // a glyph without advance width (e.g. a glyph of a crafted font) does not move the pen
-        xAdvance: glyph.getAdvanceWidth(this, options.variation) || 0,
+        xAdvance: getDefaultGlyphAdvance(this, glyph, spaceType, options.variation),
         yAdvance: 0,
         xOffset: 0,
         yOffset: 0

@@ -26,6 +26,18 @@ function getTokenLigatureProperties(token) {
 }
 
 /**
+ * Whether each glyph of a token is ligated, in the order of its glyphs (see getTokenGlyphIndexes), like the LIGATED
+ * glyph property of HarfBuzz (_hb_glyph_info_ligated): the glyph of a ligature substitution of two components or more,
+ * whatever their glyph classes, and the glyphs that later substitutions replace it with, which ligatureSubstitutionFormat1
+ * sets and replaceGlyph keeps with the glyphs
+ * @param {Token} token
+ * @returns {boolean[]} empty when no glyph of the token is ligated
+ */
+function getTokenLigatedGlyphs(token) {
+    return token.ligatedGlyphs || [];
+}
+
+/**
  * The glyphs of a list of tokens, like the glyph buffer of HarfBuzz: each glyph of a multiple substitution
  * is a glyph of its own, a deleted token has none. applySubstitution updates the sequence with its tokens.
  * @typedef GlyphSequence
@@ -59,7 +71,7 @@ function getGlyphSequence(tokens, gdef) {
 
 /**
  * Save the state of a token of a glyph sequence before a substitution changes it, once: its glyphs (see
- * getTokenGlyphIndexes), its ligature properties and its cluster
+ * getTokenGlyphIndexes), its ligature properties, its ligated glyphs and its cluster
  * @param {GlyphSequence} glyphSequence
  * @param {Token} token
  */
@@ -71,6 +83,7 @@ function saveTokenState(glyphSequence, token) {
         state: Object.assign({}, token.state),
         activeState: token.activeState,
         ligatureProperties: token.ligatureProperties && token.ligatureProperties.slice(),
+        ligatedGlyphs: token.ligatedGlyphs && token.ligatedGlyphs.slice(),
         cluster: token.cluster
     });
 }
@@ -148,7 +161,7 @@ function getReplacementLigatureProperties(ligatureProperties, glyphCount) {
 /**
  * Replace the glyph at a position of a glyph sequence with a sequence of glyphs, in the glyph sequence and in its token:
  * the token holds one glyph, several glyphs, or none and is deleted. The glyphs that replace it take their ligature
- * properties from it (see getReplacementLigatureProperties).
+ * properties from it (see getReplacementLigatureProperties) and whether it is ligated (see getTokenLigatedGlyphs).
  * @param {GlyphSequence} glyphSequence
  * @param {number} position
  * @param {number[]} glyphIndexes the glyphs that replace the glyph, none deletes it
@@ -166,6 +179,10 @@ function replaceGlyph(glyphSequence, position, glyphIndexes, tag) {
     if (token.ligatureProperties || replacementProperties.some(Boolean)) {
         token.ligatureProperties = token.ligatureProperties || getTokenGlyphIndexes(token).map(() => undefined);
         token.ligatureProperties.splice(positionInToken, 1, ...replacementProperties);
+    }
+    if (token.ligatedGlyphs) {
+        const isLigated = token.ligatedGlyphs[positionInToken];
+        token.ligatedGlyphs.splice(positionInToken, 1, ...glyphIndexes.map(() => isLigated));
     }
     if (!tokenGlyphIndexes.length) {
         token.setState('deleted', true);
@@ -339,9 +356,25 @@ function setLigatureSubstitutionProperties(glyphSequence, componentPositions) {
 }
 
 /**
+ * Set a glyph of a glyph sequence as ligated in its token (see getTokenLigatedGlyphs)
+ * @param {GlyphSequence} glyphSequence
+ * @param {number} position
+ */
+function setGlyphLigated(glyphSequence, position) {
+    const token = glyphSequence.glyphTokens[position];
+    saveTokenState(glyphSequence, token);
+    if (!token.ligatedGlyphs) {
+        token.ligatedGlyphs = getTokenGlyphIndexes(token).map(() => false);
+    }
+    token.ligatedGlyphs[getPositionInToken(glyphSequence, position)] = true;
+}
+
+/**
  * Apply ligature substitution format 1: the first component becomes the ligature glyph and the
  * other components are deleted, the glyphs the lookup skipped between them stay after the ligature,
- * in one cluster with it, with the component of the ligature they follow (see setLigatureSubstitutionProperties)
+ * in one cluster with it, with the component of the ligature they follow (see setLigatureSubstitutionProperties);
+ * the ligature of two components or more is ligated (see getTokenLigatedGlyphs), like HarfBuzz, which replaces a
+ * ligature of one component like a single substitution
  * @param {SubstitutionAction} action
  * @param {GlyphSequence} glyphSequence
  * @param {number} position
@@ -354,6 +387,9 @@ function ligatureSubstitutionFormat1(action, glyphSequence, position) {
     }
     setLigatureSubstitutionProperties(glyphSequence, [position].concat(componentOffsets.map(offset => position + offset)));
     replaceSubstitutedGlyphs(action, glyphSequence, position);
+    if (componentOffsets.length) {
+        setGlyphLigated(glyphSequence, position);
+    }
     return 1;
 }
 
@@ -602,6 +638,7 @@ export default applySubstitution;
 export {
     getTokenGlyphIndexes,
     getTokenLigatureProperties,
+    getTokenLigatedGlyphs,
     getGlyphSequence,
     applyLookupToTokens,
     getFeaturesLookups,

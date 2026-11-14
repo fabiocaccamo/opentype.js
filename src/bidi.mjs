@@ -8,6 +8,7 @@ import FeatureQuery from './features/featureQuery.mjs';
 import {
     getTokenGlyphIndexes,
     getTokenLigatureProperties,
+    getTokenLigatedGlyphs,
     applyFeaturesToTokens,
     getRequiredFeatureStage,
     REQUIRED_VARIATION_ALTERNATES_TAG
@@ -377,14 +378,20 @@ Bidi.prototype.getBidiText = function (text) {
 
 /**
  * The glyphs of a token that is not deleted in visual order, each one with its ligature properties (see
- * getTokenLigatureProperties): the order of its multiple substitution, reversed for a token of a right-to-left run,
- * whose tokens reverseArabicSentences reverses, like HarfBuzz reverses the glyphs of a right-to-left run
+ * getTokenLigatureProperties) and whether it is ligated (see getTokenLigatedGlyphs): the order of its multiple
+ * substitution, reversed for a token of a right-to-left run, whose tokens reverseArabicSentences reverses, like
+ * HarfBuzz reverses the glyphs of a right-to-left run
  * @param {Token} token
- * @returns {Array<{index: number, ligatureProperties: LigatureProperties|undefined}>}
+ * @returns {Array<{index: number, ligatureProperties: LigatureProperties|undefined, isLigated: boolean}>}
  */
 function getTokenVisualGlyphs(token) {
     const ligatureProperties = getTokenLigatureProperties(token);
-    const glyphs = getTokenGlyphIndexes(token).map((index, positionInToken) => ({ index, ligatureProperties: ligatureProperties[positionInToken] }));
+    const ligatedGlyphs = getTokenLigatedGlyphs(token);
+    const glyphs = getTokenGlyphIndexes(token).map((index, positionInToken) => ({
+        index,
+        ligatureProperties: ligatureProperties[positionInToken],
+        isLigated: ligatedGlyphs[positionInToken] === true
+    }));
     return this.rightToLeftTokens.has(token) ? glyphs.reverse() : glyphs;
 }
 
@@ -410,11 +417,12 @@ Bidi.prototype.getTextGlyphs = function (text) {
  * glyphs between them.
  * @param {string} text an input text
  * @returns {Array<{index: number, start: number, end: number, rightToLeft: boolean, scriptRun: Object,
- * ligatureProperties: LigatureProperties|undefined}>} glyph indexes in visual order (see getTextGlyphs), with the
- * UTF-16 range [start, end) of their characters in the text, whether their run is laid out from right to left (the
- * arabic sentences, in reverse order of the text), the script run of their token, with its OpenType script tags
- * (scriptRun.scriptTags, see getTokenScriptRuns), and the ligature properties of the glyph (see
- * getTokenLigatureProperties)
+ * ligatureProperties: LigatureProperties|undefined, isLigated: boolean, spaceFallbackType: number|undefined}>} glyph
+ * indexes in visual order (see getTextGlyphs), with the UTF-16 range [start, end) of their characters in the text,
+ * whether their run is laid out from right to left (the arabic sentences, in reverse order of the text), the script
+ * run of their token, with its OpenType script tags (scriptRun.scriptTags, see getTokenScriptRuns), the ligature
+ * properties of the glyph (see getTokenLigatureProperties), whether it is ligated (see getTokenLigatedGlyphs) and the
+ * spaceFallbackType of its token, which the glyphIndex modifier sets (see Font._createBidi)
  */
 Bidi.prototype.getTextGlyphClusters = function (text) {
     this.processText(text);
@@ -429,8 +437,10 @@ Bidi.prototype.getTextGlyphClusters = function (text) {
         const { start, end } = clusterRanges.get(token.cluster);
         const rightToLeft = this.rightToLeftTokens.has(token);
         const scriptRun = this.tokenScriptRuns.get(token);
-        for (const { index, ligatureProperties } of getTokenVisualGlyphs.call(this, token)) {
-            clusters.push({ index, start, end, rightToLeft, scriptRun, ligatureProperties });
+        for (const { index, ligatureProperties, isLigated } of getTokenVisualGlyphs.call(this, token)) {
+            clusters.push({
+                index, start, end, rightToLeft, scriptRun, ligatureProperties, isLigated, spaceFallbackType: token.spaceFallbackType
+            });
         }
     }
     return clusters;

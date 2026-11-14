@@ -6,6 +6,7 @@ import Layout, {
     getLigatureComponent, isMarkIgnoredWithoutGlyphClasses, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES, IGNORE_MARKS, RIGHT_TO_LEFT, getRequiredFeatureIndex,
     getOpenTypeScriptTags, matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue
 } from './layout.mjs';
+import { SPACE_TYPES } from './char.mjs';
 
 // the features of common_features and horizontal_features (hb-ot-shape.cc) that are not default GSUB features of a
 // shaper of the fork (see Font.defaultRenderOptions.features): HarfBuzz looks each feature up in GSUB and in GPOS, so
@@ -1249,9 +1250,88 @@ Position.prototype.getKerningTables = function(script, language) {
     return kerningTables;
 };
 
+// the chars of the advance of a figure space and of a punctuation space, in the order HarfBuzz looks them up
+const FIGURE_SPACE_CHARS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+const PUNCTUATION_SPACE_CHARS = ['.', ','];
+
+/**
+ * The x advance of a glyph at a variation, in font units: 0 for a glyph without advance width (e.g. a glyph of a
+ * crafted font), which does not move the pen
+ * @param {Font} font
+ * @param {Glyph} glyph
+ * @param {Object} [variation] - the current variation of the font if omitted
+ * @returns {number}
+ */
+function getGlyphAdvance(font, glyph, variation) {
+    return glyph.getAdvanceWidth(font, variation) || 0;
+}
+
+/**
+ * The x advance of the glyph of the first char of a list that the font has a glyph for
+ * @param {Font} font
+ * @param {string[]} chars
+ * @param {Object} [variation]
+ * @returns {number|undefined} undefined when the font has a glyph for none of them
+ */
+function getFirstCharAdvance(font, chars, variation) {
+    for (const char of chars) {
+        const glyphIndex = font.charToGlyphIndex(char);
+        if (glyphIndex > 0) {
+            return getGlyphAdvance(font, font.glyphs.get(glyphIndex), variation);
+        }
+    }
+    return undefined;
+}
+
+/**
+ * The x advance of a glyph before GPOS, like hb_ot_position_default of HarfBuzz: the advance of the glyph at the
+ * variation (see getGlyphAdvance), or for a space that the font has not, drawn with the glyph of U+0020 SPACE (see
+ * getCharacterGlyph in font.mjs), the advance of its space type, like _hb_ot_shape_fallback_spaces
+ * (hb-ot-shape-fallback.cc of HarfBuzz 11.3.2): 1/n em for EM_n, rounded like HarfBuzz ((em + n / 2) / n in integers),
+ * 4/18 em truncated, the advance of the first digit the font has for FIGURE, of the period or else of the comma for
+ * PUNCTUATION (the advance of the glyph when the font has none), half the advance of the glyph truncated for NARROW,
+ * the advance of the glyph for SPACE. The GPOS adjustments and the kern table apply after it.
+ * @param {Font} font
+ * @param {Glyph} glyph
+ * @param {number} spaceType the space type of the space (see SPACE_TYPES in char.mjs), NOT_SPACE for the other glyphs
+ * @param {Object} [variation] - the current variation of the font if omitted
+ * @returns {number}
+ */
+function getDefaultGlyphAdvance(font, glyph, spaceType, variation) {
+    const advance = getGlyphAdvance(font, glyph, variation);
+    switch (spaceType) {
+        case SPACE_TYPES.NOT_SPACE:
+        case SPACE_TYPES.SPACE:
+            return advance;
+        case SPACE_TYPES.EM:
+        case SPACE_TYPES.EM_2:
+        case SPACE_TYPES.EM_3:
+        case SPACE_TYPES.EM_4:
+        case SPACE_TYPES.EM_5:
+        case SPACE_TYPES.EM_6:
+        case SPACE_TYPES.EM_16:
+            return Math.trunc((font.unitsPerEm + Math.trunc(spaceType / 2)) / spaceType);
+        case SPACE_TYPES.FOUR_EM_18:
+            return Math.trunc(font.unitsPerEm * 4 / 18);
+        case SPACE_TYPES.FIGURE: {
+            const figureAdvance = getFirstCharAdvance(font, FIGURE_SPACE_CHARS, variation);
+            return figureAdvance === undefined ? advance : figureAdvance;
+        }
+        case SPACE_TYPES.PUNCTUATION: {
+            const punctuationAdvance = getFirstCharAdvance(font, PUNCTUATION_SPACE_CHARS, variation);
+            return punctuationAdvance === undefined ? advance : punctuationAdvance;
+        }
+        case SPACE_TYPES.NARROW:
+            return Math.trunc(advance / 2);
+        default:
+            throw new Error(`Unknown space type: ${spaceType}`);
+    }
+}
+
 export default Position;
 export {
     DEFAULT_POSITIONING_FEATURES,
+    getDefaultGlyphAdvance,
     MarkAdvanceZeroing,
     getMarkAdvanceZeroing,
     getMarkLigatureComponentIndex,
