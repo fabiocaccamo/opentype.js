@@ -96,6 +96,18 @@ function getAxisScalar(coordinate, start, peak, end) {
 }
 
 /**
+ * The normalized coordinate of an axis of a tuple or of a region, like HarfBuzz (TupleVariationHeader::calculate_scalar,
+ * VarRegionList::evaluate): 0 for an axis past the coordinates, of a gvar table or a region list with more axes than
+ * the fvar table.
+ * @param {Array<number>} normalizedCoords
+ * @param {number} axisIndex
+ * @returns {number}
+ */
+function getNormalizedCoordinate(normalizedCoords, axisIndex) {
+    return axisIndex < normalizedCoords.length ? normalizedCoords[axisIndex] : 0;
+}
+
+/**
  * Copy of a glyph of the font with its varied outline. The code points are assigned after
  * the constructor, whose check is for new glyphs: the glyph of U+0000 of a font can have
  * any name, not only .null.
@@ -316,12 +328,15 @@ export class VariationProcessor {
         const isAllPoints = tuplePoints.length === 0;
         const pointCount = deltaSums.x.length;
         const deltaCount = isAllPoints ? pointCount : tuplePoints.length;
+        // read once: the deltas of the tuple are accessors (see parseTupleVariationStore in parse.mjs)
+        const deltasX = header.deltas;
+        const deltasY = header.deltasY;
         for (let i = 0; i < deltaCount; i++) {
             const pointIndex = isAllPoints ? i : tuplePoints[i];
             if (pointIndex < pointCount) {
-                deltaSums.x[pointIndex] += header.deltas[i] * factor;
-                if (header.deltasY) {
-                    deltaSums.y[pointIndex] += header.deltasY[i] * factor;
+                deltaSums.x[pointIndex] += deltasX[i] * factor;
+                if (deltasY) {
+                    deltaSums.y[pointIndex] += deltasY[i] * factor;
                 }
             }
         }
@@ -340,12 +355,14 @@ export class VariationProcessor {
     accumulateInterpolatedDeltas(deltaSums, points, tuplePoints, header, factor) {
         const interpolatedPoints = points.map(copyPoint);
         const deltaMap = Array(points.length).fill(false);
+        const deltasX = header.deltas;
+        const deltasY = header.deltasY;
         for (let i = 0; i < tuplePoints.length; i++) {
             const pointIndex = tuplePoints[i];
             if (pointIndex < points.length) {
                 deltaMap[pointIndex] = true;
-                interpolatedPoints[pointIndex].x += header.deltas[i];
-                interpolatedPoints[pointIndex].y += header.deltasY[i];
+                interpolatedPoints[pointIndex].x += deltasX[i];
+                interpolatedPoints[pointIndex].y += deltasY[i];
             }
         }
         this.interpolatePoints(interpolatedPoints, points, deltaMap);
@@ -380,24 +397,56 @@ export class VariationProcessor {
 
     /**
      * Calculates the scalar of a tuple variation header at the given normalized coordinates.
+     * Like HarfBuzz (TupleVariationHeader::calculate_scalar), it reads the axes of the tuple, which has the axisCount of
+     * the gvar table (a cvar tuple has the axes of the fvar table), and an axis past the coordinates at 0.
      * @param {Object} header - Tuple variation header.
      * @param {Array<number>} normalizedCoords - Normalized variation coordinates.
-     * @param {number} axisCount - Number of variation axes.
      * @param {string} flavor - 'gvar' or 'cvar'.
      * @returns {number} The scalar, 0 when the tuple is not active.
      */
-    getTupleScalar(header, normalizedCoords, axisCount, flavor) {
+    getTupleScalar(header, normalizedCoords, flavor) {
         const peakTuple = flavor === 'gvar' && !header.peakTuple ?
             this.gvar().sharedTuples[header.sharedTupleRecordsIndex] : header.peakTuple;
+        // like HarfBuzz (TupleVariationHeader::calculate_scalar), a tuple without a peak is inactive: a gvar tuple whose
+        // shared tuple index is past the shared tuples, a cvar tuple without an embedded peak
+        if (!peakTuple) {
+            return 0;
+        }
         let scalar = 1;
-        for (let axisIndex = 0; axisIndex < axisCount && scalar !== 0; axisIndex++) {
+        for (let axisIndex = 0; axisIndex < peakTuple.length && scalar !== 0; axisIndex++) {
             const peak = peakTuple[axisIndex];
+            const coordinate = getNormalizedCoordinate(normalizedCoords, axisIndex);
             // without an intermediate region the tuple goes from 0 to its peak
             const start = header.intermediateStartTuple ? header.intermediateStartTuple[axisIndex] : Math.min(0, peak);
             const end = header.intermediateEndTuple ? header.intermediateEndTuple[axisIndex] : Math.max(0, peak);
-            scalar *= getAxisScalar(normalizedCoords[axisIndex], start, peak, end);
+            scalar *= getAxisScalar(coordinate, start, peak, end);
         }
         return scalar;
+    }
+
+    /**
+     * The tuples of a tuple variation store (gvar, cvar) that are active at normalized coordinates, with their scalar and
+     * their point numbers. Like HarfBuzz (gvar::apply_deltas_to_points), the data of a tuple are read only when it is
+     * active, and none is when the data of an active tuple fail to parse (see parseTupleVariationStore in parse.mjs): the
+     * glyph, or the cvt table, is then not varied at these coordinates.
+     * @param {Object} variationData - headers and sharedPoints of the store.
+     * @param {Array<number>} normalizedCoords
+     * @param {string} flavor - 'gvar' or 'cvar'.
+     * @returns {Array<{header: Object, factor: number, tuplePoints: Array<number>}>}
+     */
+    getActiveTuples(variationData, normalizedCoords, flavor) {
+        const activeTuples = [];
+        for (const header of variationData.headers) {
+            const factor = this.getTupleScalar(header, normalizedCoords, flavor);
+            if (factor === 0) {
+                continue;
+            }
+            if (header.deltas === null) {
+                return [];
+            }
+            activeTuples.push({ header, factor, tuplePoints: getTuplePointNumbers(header, variationData.sharedPoints) });
+        }
+        return activeTuples;
     }
 
     /**
@@ -416,18 +465,10 @@ export class VariationProcessor {
             return deltas;
         }
         const normalizedCoords = this.getNormalizedCoords(coords || this.font.variation.get());
-        const axisCount = this.fvar().axes.length;
         const pointCount = getGlyphVariationPointCount(glyph);
         const leftIndex = pointCount;
         const rightIndex = pointCount + 1;
-        const { headers, sharedPoints } = variationData;
-        for (let h = 0; h < headers.length; h++) {
-            const header = headers[h];
-            const factor = this.getTupleScalar(header, normalizedCoords, axisCount, 'gvar');
-            if (factor === 0) {
-                continue;
-            }
-            const tuplePoints = getTuplePointNumbers(header, sharedPoints);
+        for (const { header, factor, tuplePoints } of this.getActiveTuples(variationData, normalizedCoords, 'gvar')) {
             const allPoints = tuplePoints.length === 0;
             const leftDeltaIndex = allPoints ? leftIndex : tuplePoints.indexOf(leftIndex);
             const rightDeltaIndex = allPoints ? rightIndex : tuplePoints.indexOf(rightIndex);
@@ -445,7 +486,8 @@ export class VariationProcessor {
      * Applies the tuple variation store of a glyph (gvar) or of the cvt table (cvar) at the
      * given coordinates. The scaled deltas of all the active tuples add up, with the points
      * a tuple does not list interpolated per tuple (IUP), and are rounded once, like fontTools
-     * varLib.instancer and HarfBuzz.
+     * varLib.instancer and HarfBuzz; none applies when the data of an active tuple fail to
+     * parse (see getActiveTuples).
      * @param {Object} variationData - headers and sharedPoints of the store.
      * @param {Array<Object>|Array<number>} points - The default points of the glyph, or the cvt values.
      * @param {Object} [coords] - Variation coordinates, the current variation if omitted.
@@ -458,21 +500,13 @@ export class VariationProcessor {
             coords = this.font.variation.get();
         }
         const normalizedCoords = this.getNormalizedCoords(coords);
-        const { headers, sharedPoints } = variationData;
-        const axisCount = this.fvar().axes.length;
 
         // a composite glyph varies the offsets of its components, one delta each
         const isComposite = flavor === 'gvar' && args.glyph && args.glyph.isComposite;
         const deltaCount = isComposite ? args.glyph.components.length : points.length;
         const deltaSums = { x: Array(deltaCount).fill(0), y: Array(deltaCount).fill(0) };
 
-        for(let h = 0; h < headers.length; h++) {
-            const header = headers[h];
-            const factor = this.getTupleScalar(header, normalizedCoords, axisCount, flavor);
-            if (factor === 0) {
-                continue;
-            }
-            const tuplePoints = getTuplePointNumbers(header, sharedPoints);
+        for (const { header, factor, tuplePoints } of this.getActiveTuples(variationData, normalizedCoords, flavor)) {
             if (flavor === 'gvar' && !isComposite && tuplePoints.length) {
                 this.accumulateInterpolatedDeltas(deltaSums, points, tuplePoints, header, factor);
             } else {
@@ -658,7 +692,7 @@ export class VariationProcessor {
      * @param {string} tableName - The name of the variation data table.
      * @param {string} parameter - The property to adjust.
      * @param {Object} coords - Variation coordinates.
-     * @returns {number} - The calculated adjustment.
+     * @returns {number} - The calculated adjustment, 0 for a table without an ItemVariationStore.
      */
     getVariableAdjustment(gid, tableName, parameter, coords) {
         coords = coords || this.font.variation.get();
@@ -669,8 +703,10 @@ export class VariationProcessor {
         if(!table) {
             throw Error(`trying to get variation adjustment from non-existent table "${table}"`);
         }
-        if(!table.itemVariationStore) {
-            throw Error(`trying to get variation adjustment from table "${table}" which does not have an itemVariationStore`);
+        // like HarfBuzz, a NULL ItemVariationStore offset (which the specification does not allow), or a store that
+        // failed to parse (see parseHvarTable), gives no delta
+        if (!table.itemVariationStore) {
+            return 0;
         }
         const mapSize = table[parameter] && table[parameter].map.length;
         if (mapSize) {
@@ -753,14 +789,20 @@ export class VariationProcessor {
     
         // outer loop steps through master designs to be blended
         for (let master = 0; master < varData.regionIndexes.length; master++) {
+            const region = itemStore.variationRegions[varData.regionIndexes[master]];
+            // like HarfBuzz (VarRegionList::evaluate), a region index past the region list gives no delta
+            if (!region) {
+                blendVector[master] = 0;
+                continue;
+            }
             let scalar = 1;
-            let regionIndex = varData.regionIndexes[master];
-            let axes = itemStore.variationRegions[regionIndex].regionAxes;
-    
-            // the scalar of the region is the product of the scalars of its axes
+            const axes = region.regionAxes;
+
+            // the scalar of the region is the product of the scalars of its axes, an axis past the fvar axes at 0
             for (let axisIndex = 0; axisIndex < axes.length; axisIndex++) {
                 const axis = axes[axisIndex];
-                scalar *= getAxisScalar(normalizedCoords[axisIndex], axis.startCoord, axis.peakCoord, axis.endCoord);
+                scalar *= getAxisScalar(getNormalizedCoordinate(normalizedCoords, axisIndex), axis.startCoord,
+                    axis.peakCoord, axis.endCoord);
             }
     
             blendVector[master] = scalar;

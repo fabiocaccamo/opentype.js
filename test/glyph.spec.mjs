@@ -1,7 +1,8 @@
 import assert  from 'assert';
 import { parse, Glyph, Path } from '../src/opentype.mjs';
 import { readFileSync } from 'fs';
-import { createMockObject } from './testutil.mjs';
+import { createMockObject, getTableRecordOffset } from './testutil.mjs';
+import { itFailsUntilFixed } from './regression/helpers.mjs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
 const emojiFont = loadSync('./test/fonts/OpenMojiCOLRv0-subset.otf');
@@ -237,6 +238,154 @@ describe('glyph.mjs', function() {
             emojiFont.palettes.setColor(25, '#ff000099', 1);
             path = emojiFont.glyphs.get(929).getPath(0, 0, 12, {usePalette: 1, colorFormat: 'hexa'}, emojiFont);
             assert.deepEqual(path._layers[2].fill, '#ff000099');
+        });
+    });
+
+    describe('getPath of a COLR glyph with broken layers, drawn like HarfBuzz', function() {
+        // OpenMojiCOLRv0-subset.otf, the glyph 3540 (U+2194) with two layers: the glyph 21090 of the color 8 (#3f3f3f)
+        // and the glyph 21091 of the color 3 (#000000) of the palette 0, of 35 colors. Like HarfBuzz, a layer of a glyph
+        // id the font has not, or of a color the palette has not, draws nothing, as hb-view 11.3.2 renders them:
+        // hb-view --output-format=png --foreground=#0000FF --background=#FFFFFF <font> -u 2194, the colors of its
+        // pixels: OpenMojiCOLRv0-subset.otf #3f3f3f and #000000; the first layer of the glyph id 0xFFFF, #000000 only;
+        // the second layer of the color index 35, #3f3f3f only; the color index 0xFFFF, #3f3f3f and the foreground
+        // #0000ff; the CPAL table without palettes, no pixel but the background
+        const getEmojiFontBytes = patchFont => {
+            const bytes = new Uint8Array(readFileSync('./test/fonts/OpenMojiCOLRv0-subset.otf'));
+            const view = new DataView(bytes.buffer);
+            const getTableRange = tag => {
+                const recordOffset = getTableRecordOffset(bytes, tag);
+                return { offset: view.getUint32(recordOffset + 8), length: view.getUint32(recordOffset + 12) };
+            };
+            patchFont(bytes, view, getTableRange);
+            return bytes;
+        };
+        // the offset of the first layer record of the glyph 3540 in a COLR table of version 0: the header (version,
+        // numBaseGlyphRecords, baseGlyphRecordsOffset, layerRecordsOffset, numLayerRecords), the base glyph records
+        // (glyphID, firstLayerIndex, numLayers), the layer records (glyphID, paletteIndex)
+        const getBaseGlyphRecordOffset = (view, colrOffset) => {
+            const baseGlyphRecordCount = view.getUint16(colrOffset + 2);
+            const baseGlyphRecordsOffset = colrOffset + view.getUint32(colrOffset + 4);
+            for (let i = 0; i < baseGlyphRecordCount; i += 1) {
+                const baseGlyphRecordOffset = baseGlyphRecordsOffset + 6 * i;
+                if (view.getUint16(baseGlyphRecordOffset) === 3540) {
+                    return baseGlyphRecordOffset;
+                }
+            }
+            throw new Error('No base glyph record of the glyph 3540');
+        };
+        const getFirstLayerRecordOffset = (view, colrOffset) =>
+            colrOffset + view.getUint32(colrOffset + 8) + 4 * view.getUint16(getBaseGlyphRecordOffset(view, colrOffset) + 2);
+        const getLayers = (bytes, parseOptions) => {
+            const font = parse(bytes.buffer, parseOptions);
+            const path = font.glyphs.get(3540).getPath(0, 0, 72, { colorFormat: 'hexa' }, font);
+            return path._layers.map(layer => ({ commands: layer.commands, fill: layer.fill }));
+        };
+        const getLayerGlyphCommands = glyphIndex => emojiFont.glyphs.get(glyphIndex).getPath(0, 0, 72, {}, emojiFont).commands;
+        const getMissingLayerGlyphFontBytes = () => getEmojiFontBytes((fontBytes, view, getTableRange) => {
+            const layerRecordOffset = getFirstLayerRecordOffset(view, getTableRange('COLR').offset);
+            assert.deepStrictEqual([view.getUint16(layerRecordOffset), view.getUint16(layerRecordOffset + 2)], [21090, 8]);
+            view.setUint16(layerRecordOffset, 0xFFFF);
+        });
+
+        for (const parseOptions of [undefined, { lowMemory: true }]) {
+            it('draws nothing for a layer of a glyph id the font has not' + (parseOptions ? ', with lowMemory' : ''), function() {
+                assert.deepStrictEqual(getLayers(getMissingLayerGlyphFontBytes(), parseOptions),
+                    [{ commands: getLayerGlyphCommands(21091), fill: '#000000ff' }]);
+            });
+        }
+
+        // the base glyph record of the glyph 3540 with its firstLayerIndex set to the last of the 57 layer records (the
+        // glyph 21091 of the color 3), so that its second layer is past them: HarfBuzz takes the layers of a glyph as a
+        // sub-array of the layer records, which keeps the ones that exist (COLR::get_glyph_layers), and hb-view renders
+        // the glyph 21091 in #000000 only, without the #3f3f3f of the glyph 21090
+        const getLayersPastLayerRecordsFontBytes = () => getEmojiFontBytes((fontBytes, view, getTableRange) => {
+            const colrOffset = getTableRange('COLR').offset;
+            const baseGlyphRecordOffset = getBaseGlyphRecordOffset(view, colrOffset);
+            const layerRecordCount = view.getUint16(colrOffset + 12);
+            assert.strictEqual(layerRecordCount, 57);
+            assert.strictEqual(view.getUint16(baseGlyphRecordOffset + 4), 2);
+            const lastLayerRecordOffset = colrOffset + view.getUint32(colrOffset + 8) + 4 * (layerRecordCount - 1);
+            assert.deepStrictEqual([view.getUint16(lastLayerRecordOffset), view.getUint16(lastLayerRecordOffset + 2)], [21091, 3]);
+            view.setUint16(baseGlyphRecordOffset + 2, layerRecordCount - 1);
+        });
+
+        for (const parseOptions of [undefined, { lowMemory: true }]) {
+            it('draws only the layers that are layer records of the table' + (parseOptions ? ', with lowMemory' : ''), function() {
+                const bytes = getLayersPastLayerRecordsFontBytes();
+                assert.deepStrictEqual(getLayers(bytes, parseOptions), [{ commands: getLayerGlyphCommands(21091), fill: '#000000ff' }]);
+                const font = parse(bytes.buffer, parseOptions);
+                assert.deepStrictEqual(font.warnings, []);
+                const contextLogs = [];
+                font.glyphs.get(3540).drawPoints(createMockObject(contextLogs), 0, 0, 72, { drawLayers: true }, font);
+                const expectedContextLogs = [];
+                emojiFont.glyphs.get(21091).drawPoints(createMockObject(expectedContextLogs), 0, 0, 72);
+                assert.deepStrictEqual(contextLogs, expectedContextLogs);
+                assert.strictEqual(font.getPath('\u2194', 0, 0, 72)._layers.length, 1);
+            });
+        }
+
+        it('draws the points of the other layers only for a layer of a glyph id the font has not', function() {
+            const font = parse(getMissingLayerGlyphFontBytes().buffer);
+            const contextLogs = [];
+            font.glyphs.get(3540).drawPoints(createMockObject(contextLogs), 0, 0, 72, { drawLayers: true }, font);
+            // the layers are drawn without the font (see Glyph.drawPoints)
+            const expectedContextLogs = [];
+            emojiFont.glyphs.get(21091).drawPoints(createMockObject(expectedContextLogs), 0, 0, 72);
+            assert.ok(expectedContextLogs.length > 0);
+            assert.deepStrictEqual(contextLogs, expectedContextLogs);
+        });
+
+        it('throws for a palette the CPAL table has not, an error of the caller and not of the font', function() {
+            // OpenMojiCOLRv0-subset.otf has one palette; hb-view --font-palette=7 renders it with the palette 0, as
+            // cairo falls back to the default palette, where opentype.js throws the error of getPaletteColor
+            const font = loadSync('./test/fonts/OpenMojiCOLRv0-subset.otf');
+            assert.strictEqual(font.tables.cpal.colorRecordIndices.length, 1);
+            // a negative or non-integer index is not a palette either
+            for (const usePalette of [1, 7, -1, 0.5]) {
+                assert.throws(() => font.glyphs.get(3540).getPath(0, 0, 72, { drawLayers: true, usePalette }, font),
+                    { message: `Palette index out of range (colorRecordIndices.length: 1, index: ${usePalette})` });
+            }
+            assert.strictEqual(font.glyphs.get(3540).getPath(0, 0, 72, { drawLayers: true, usePalette: 0 }, font)._layers.length, 2);
+        });
+
+        it('draws nothing for a layer of a color the palette has not', function() {
+            const bytes = getEmojiFontBytes((fontBytes, view, getTableRange) => {
+                const layerRecordOffset = getFirstLayerRecordOffset(view, getTableRange('COLR').offset) + 4;
+                assert.deepStrictEqual([view.getUint16(layerRecordOffset), view.getUint16(layerRecordOffset + 2)], [21091, 3]);
+                view.setUint16(layerRecordOffset + 2, 35);
+            });
+            assert.deepStrictEqual(getLayers(bytes), [{ commands: getLayerGlyphCommands(21090), fill: '#3f3f3fff' }]);
+        });
+
+        describe('with the color index 0xFFFF in the second layer', function() {
+            let foregroundLayerFont;
+
+            before(function() {
+                foregroundLayerFont = parse(getEmojiFontBytes((fontBytes, view, getTableRange) => {
+                    view.setUint16(getFirstLayerRecordOffset(view, getTableRange('COLR').offset) + 6, 0xFFFF);
+                }).buffer);
+            });
+
+            itFailsUntilFixed('draws the layer of the color index 0xFFFF in the color of the text',
+                'Glyph.prototype.getPath (src/glyph.mjs): the fill of a layer is set on the options of the layers after it, so a layer of the color index 0xFFFF after another one gets its color',
+                function() {
+                    const path = foregroundLayerFont.glyphs.get(3540).getPath(0, 0, 72, { colorFormat: 'hexa', fill: '#0000ff' }, foregroundLayerFont);
+                    assert.deepStrictEqual(path._layers.map(layer => layer.fill), ['#3f3f3fff', '#0000ff']);
+                });
+        });
+
+        it('draws no layer with a CPAL table without palettes', function() {
+            // the CPAL table set to 0 after its version: no palette entries, palettes nor color records
+            const bytes = getEmojiFontBytes((fontBytes, view, getTableRange) => {
+                const { offset, length } = getTableRange('CPAL');
+                fontBytes.fill(0, offset + 2, offset + length);
+            });
+            const font = parse(bytes.buffer);
+            assert.deepStrictEqual(font.warnings, []);
+            assert.deepStrictEqual(font.tables.cpal.colorRecordIndices, []);
+            assert.deepStrictEqual(getLayers(bytes), []);
+            assert.ok(Number.isFinite(font.getAdvanceWidth('\u2194', 72)));
+            assert.strictEqual(font.getPath('\u2194', 0, 0, 72).toPathData(), '');
         });
     });
 

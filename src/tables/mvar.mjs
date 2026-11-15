@@ -2,16 +2,27 @@
 // tables (e.g. the caret slope of hhea, the x-height of OS/2), by value tag.
 // https://learn.microsoft.com/en-us/typography/opentype/spec/mvar
 
-import parse from '../parse.mjs';
+import check from '../check.mjs';
+import { Parser, createSkippablePartParser, throwError } from '../parse.mjs';
 
-function parseMvarTable(data, start) {
-    const p = new parse.Parser(data, start);
+/**
+ * Parse an MVAR table. Like HarfBuzz (MVAR::sanitize) neuters the offset of an ItemVariationStore table that fails to
+ * sanitize, an ItemVariationStore table that fails to parse is read as a NULL offset, which varies no metric; a header
+ * or value records that fail to parse, or a major version other than 1, throw an error.
+ * https://learn.microsoft.com/en-us/typography/opentype/spec/mvar
+ * @param {DataView} data
+ * @param {number} start - the offset of the table in the data
+ * @param {function(Error, string)} [onPartError] - called with the error and the name of the part that fails to parse,
+ * 'ItemVariationStore table'; the error is thrown if omitted
+ * @returns {Object}
+ */
+function parseMvarTable(data, start, onPartError = throwError) {
+    const p = new Parser(data, start);
     const tableVersionMajor = p.parseUShort();
     const tableVersionMinor = p.parseUShort();
 
-    if (tableVersionMajor !== 1) {
-        console.warn(`Unsupported mvar table version ${tableVersionMajor}.${tableVersionMinor}`);
-    }
+    // like HarfBuzz, a table of another major version is not read (MVAR::sanitize)
+    check.argument(tableVersionMajor === 1, `Unsupported MVAR table version ${tableVersionMajor}.${tableVersionMinor}`);
 
     const version = [
         tableVersionMajor, tableVersionMinor
@@ -20,9 +31,7 @@ function parseMvarTable(data, start) {
     p.parseUShort(); // reserved
     const valueRecordSize = p.parseUShort();
     const valueRecordCount = p.parseUShort();
-    const itemVariationStore = p.parsePointer(function() {
-        return this.parseItemVariationStore();
-    });
+    const itemVariationStoreOffset = p.parseOffset16();
 
     // the value records follow the header, each valueRecordSize bytes long
     // (a larger size leaves room for fields of future versions)
@@ -36,6 +45,9 @@ function parseMvarTable(data, start) {
             innerIndex: p.parseUShort(),
         };
     }
+
+    const itemVariationStore = createSkippablePartParser(data, start, onPartError)('ItemVariationStore table',
+        itemVariationStoreOffset, Parser.prototype.parseItemVariationStore);
 
     return {
         version,

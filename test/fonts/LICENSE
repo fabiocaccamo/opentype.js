@@ -97,6 +97,27 @@ TestContextualPositioning.ttf
     Public domain (CC0 1.0 Universal)
     https://creativecommons.org/publicdomain/zero/1.0/
 
+TestAlternateSubstitution-Malformed.ttf
+TestContextualPositioning-Malformed.ttf
+TestMarkAttachment-Malformed.ttf
+TestMarkAttachment-Malformed.woff2
+TestMarkAttachment-MalformedGDEF.ttf
+TestMarkAttachment-MalformedOffsets.ttf
+TestMarkAttachment-NullOffsets.ttf
+TestPairPositioning-Malformed.ttf
+TestPairPositioning-MalformedOffsets.ttf
+TestSingleAdjustment-Malformed.ttf
+    Patched copies of TestAlternateSubstitution.ttf, TestContextualPositioning.ttf, TestMarkAttachment.ttf,
+    TestPairPositioning.ttf and TestSingleAdjustment.ttf for the opentype.js test suite
+    (test/generate-malformed-layout-fonts.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+TestCVARAllPoints.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-cvar-all-points-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 TestCVARGVAROne.ttf
 TestCVARGVARTwo.ttf
     Copyright 2015 Google Inc. All Rights Reserved.
@@ -105,6 +126,17 @@ TestCVARGVARTwo.ttf
 
 TestDefaultIgnorables.ttf
     Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-default-ignorables-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+TestExtensionLookups.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-extension-lookups-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+TestFvarOnly.ttf
+TestFvarOnly-CFF.otf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-fvar-only-fonts.py).
     Public domain (CC0 1.0 Universal)
     https://creativecommons.org/publicdomain/zero/1.0/
 
@@ -150,8 +182,18 @@ TestHVARTwo.ttf
     SIL Open Font License
     http://scripts.sil.org/OFL
 
+TestGVARBrokenTuple.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-gvar-broken-tuple-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
 TestHVARLsbMap.ttf
     Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-hvar-lsb-map-font.py).
+    Public domain (CC0 1.0 Universal)
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+TestHVARRegionAxes.ttf
+    Generated with fontTools FontBuilder for the opentype.js test suite (test/generate-hvar-region-axes-font.py).
     Public domain (CC0 1.0 Universal)
     https://creativecommons.org/publicdomain/zero/1.0/
 

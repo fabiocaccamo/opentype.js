@@ -87,6 +87,25 @@ describe('tables/gpos.mjs', function() {
         });
     });
 
+    it('reads a Device or VariationIndex table that ends past the end of the data as a NULL offset, like HarfBuzz', function() {
+        // the subtable of the test above with the offset of its VariationIndex table set to 0xFFF0: in
+        // TestSingleAdjustment-Malformed.ttf (see test/generate-malformed-layout-fonts.py) hb-shape keeps the value of
+        // the value record of O without its variation delta
+        const data = '0001 001C 0099   0050 00D2 000E FFF0   000B 000F 0001 5540   0003 0007 8000   0001 0001 0005';
+        assert.deepEqual(parseLookup(1, data).value, {
+            xPlacement: 80,
+            yAdvance: 210,
+            xPlaDevice: { deltaFormat: 1, startSize: 11, endSize: 15 },
+            yAdvDevice: undefined
+        });
+        // XPlacement and XPlaDevice, a Device table of format 1 for the sizes 11 to 15 at 0x10, whose deltas (one 16-bit
+        // word after its 6 bytes, HintingDevice::get_size of HarfBuzz) end past the end of the data
+        assert.deepEqual(parseLookup(1, '0001 000A 0011 0050 0010   0001 0001 0005   000B 000F 0001').value, {
+            xPlacement: 80,
+            xPlaDevice: undefined
+        });
+    });
+
     it('can parse lookup1 SinglePosFormat2 with VariationIndex tables', function() {
         // ValueFormat 0x0044 (XAdvance, XAdvDevice), two ValueRecords whose VariationIndex tables (deltaFormat 0x8000)
         // are at the offsets 0x10 and 0x16 from the start of the subtable, then the Coverage at 0x1c
@@ -234,11 +253,31 @@ describe('tables/gpos.mjs', function() {
         });
     });
 
-    it('throws on an anchor format that is not 1, 2 or 3, and on a lookup4 format that is not 1', function() {
-        // the mark anchor of format 4
+    it('reads an anchor of a format that is not 1, 2 or 3 as the anchor 0 0, like HarfBuzz, and throws on a lookup4 format that is not 1', function() {
+        // the mark anchor of format 4, its coordinates 0 500 not read: in TestMarkAttachment-Malformed.ttf (see
+        // test/generate-malformed-layout-fonts.py) the anchor of i of format 4 is at 0 0 for hb-shape
         const data = '0001 000C 0012 0001 0018 0024   0001 0001 000A   0001 0001 0005   0001 0000 0006 0004 0000 01F4   0001 0004 0001 0000 0258';
-        assert.throws(() => parseLookup(4, data), /GPOS anchor format must be 1, 2 or 3/);
+        assert.deepStrictEqual(parseLookup(4, data).markArray, [
+            { markClass: 0, markAnchor: { anchorFormat: 4, xCoordinate: 0, yCoordinate: 0 } }
+        ]);
         assert.throws(() => parseLookup(4, '0002' + data.slice(4)), /GPOS lookup type 4 format must be 1/);
+    });
+
+    it('reads an anchor of format 3 with a Device table that ends past the end of the data as a NULL anchor, like HarfBuzz', function() {
+        // the base anchor of the subtable of the test above, of format 3 with an x Device table at 0x0A from it, whose
+        // 6 bytes end 2 bytes past the end of the data; the same with its y Device table, and with the 2 bytes there
+        // (in TestMarkAttachment-Malformed.ttf the entry anchor of z with a Device table past the end of GPOS does
+        // not attach for hb-shape)
+        const lookup = '0001 000C 0012 0001 0018 0024   0001 0001 000A   0001 0001 0005   0001 0000 0006 0001 0000 01F4   0001 0004   ';
+        assert.strictEqual(parseLookup(4, lookup + '0003 0000 0258 000A 0000   0000 0000').baseArray[0][0], undefined);
+        assert.strictEqual(parseLookup(4, lookup + '0003 0000 0258 0000 000A   0000 0000').baseArray[0][0], undefined);
+        assert.deepStrictEqual(parseLookup(4, lookup + '0003 0000 0258 000A 0000   0000 0000 8000').baseArray[0][0], {
+            anchorFormat: 3,
+            xCoordinate: 0,
+            yCoordinate: 600,
+            xDevice: { deltaFormat: 0x8000, deltaSetOuterIndex: 0, deltaSetInnerIndex: 0 },
+            yDevice: undefined
+        });
     });
 
     it('throws on a lookup3, lookup5 or lookup6 format that is not 1', function() {
@@ -487,8 +526,79 @@ describe('tables/gpos.mjs', function() {
         assert.deepEqual(subtable.extension.classRecords[1][1], { value1: { xAdvance: -50 }, value2: undefined });
     });
 
-    it('skips a malformed lookup9 subtable without throwing', function() {
-        assert.match(parseLookup(9, '0002 0002 00000008').error, /GPOS lookup type 9 format must be 1/);
-        assert.match(parseLookup(9, '0001 0009 00000008').error, /GPOS extension lookup type must be 1 to 8/);
+    it('throws on a malformed lookup9 subtable', function() {
+        assert.throws(() => parseLookup(9, '0002 0002 00000008'), /GPOS lookup type 9 format must be 1/);
+        assert.throws(() => parseLookup(9, '0001 0009 00000008'), /GPOS extension lookup type must be 1 to 8/);
+    });
+
+    describe('with a callback for the subtables that fail to parse', function() {
+        // a GPOS table of two lookups: the first one with the subtables at the offsets of subtableOffsets from the
+        // lookup (subtableData starts after the lookup table: at the offset 0x0a for two subtables, 0x08 for one), the
+        // second one with one single adjustment subtable
+        function parseLookups(lookupType, subtableOffsets, subtableData) {
+            const toHex = value => value.toString(16).padStart(4, '0');
+            const offsets = subtableOffsets.map(toHex).join(' ');
+            const firstLookup = '000' + lookupType + ' 0000 ' + toHex(subtableOffsets.length) + ' ' + offsets + subtableData;
+            // after the LookupList table (its count and two offsets) and the first lookup
+            const firstLookupSize = 6 + 2 * subtableOffsets.length + subtableData.replace(/ /g, '').length / 2;
+            const secondLookupOffset = toHex(6 + firstLookupSize);
+            const data = unhex('00010000 000A 000C 000E' +   // header
+                '0000' +                                        // ScriptTable - 0 scripts
+                '0000' +                                        // FeatureListTable - 0 features
+                '0002 0006 ' + secondLookupOffset +             // LookupListTable - 2 lookup tables
+                firstLookup +
+                '0001 0000 0001 0008   0001 0008 0004 FFF6   0001 0001 0005');
+            const errors = [];
+            const lookups = gpos.parse(data, 0, (error, lookupIndex, subtableIndex) => {
+                errors.push([error.message, lookupIndex, subtableIndex]);
+            }).lookups;
+            return { lookups, errors };
+        }
+
+        it('reads a subtable of an unknown format as undefined, with its error, and parses the other subtables', function() {
+            // a mark-to-base subtable of format 2, then a NULL subtable offset; HarfBuzz skips a subtable of an unknown
+            // format (TestMarkAttachment-Malformed.ttf, see test/generate-malformed-layout-fonts.py)
+            const { lookups, errors } = parseLookups(4, [0x0a, 0], '0002 0000 0000 0000 0000 0000');
+            assert.deepStrictEqual(lookups[0].subtables, [undefined, undefined]);
+            assert.deepStrictEqual(errors, [['0x1e: GPOS lookup type 4 format must be 1.', 0, 0]]);
+            assert.deepStrictEqual(lookups[1].subtables, [{ posFormat: 1, coverage: { format: 1, glyphs: [5] }, value: { xAdvance: -10 } }]);
+        });
+
+        it('reads the malformed subtables of the lookup types 1 to 9 as undefined, with their errors', function() {
+            const malformedSubtables = [
+                [1, '0003 0000 0000', /GPOS lookup type 1 format must be 1 or 2/],
+                [2, '0003 0000 0000 0000', /GPOS lookup type 2 format must be 1 or 2/],
+                [3, '0002 0000 0000', /GPOS lookup type 3 format must be 1/],
+                [5, '0002 0000 0000 0000 0000 0000', /GPOS lookup type 5 format must be 1/],
+                [6, '0002 0000 0000 0000 0000 0000', /GPOS lookup type 6 format must be 1/],
+                [7, '0004 0000 0000 0000', /GPOS lookup type 7 format must be 1, 2 or 3/],
+                [8, '0004 0000 0000 0000', /GPOS lookup type 8 format must be 1, 2 or 3/],
+                [9, '0002 0002 00000008', /GPOS lookup type 9 format must be 1/],
+                [9, '0001 0009 00000008', /GPOS extension lookup type must be 1 to 8/],
+                // an extension subtable that wraps a mark-to-mark subtable of format 2
+                [9, '0001 0006 00000008 0002 0000 0000 0000 0000 0000', /GPOS lookup type 6 format must be 1/],
+                // a coverage table of format 3 (like the fonts of Tabler Icons, opentype.js issue 617)
+                [1, '0001 0006 0000 0003 0001 0005', /Coverage format must be 1 or 2/]
+            ];
+            for (const [lookupType, subtableData, expectedError] of malformedSubtables) {
+                // an extension lookup of one subtable: in an extension lookup, a NULL subtable offset (of the extension
+                // lookup type 0) next to a subtable of another extension lookup type skips the whole lookup, like
+                // HarfBuzz (see parseLookup in parse.mjs)
+                const subtableOffsets = lookupType === 9 ? [0x08] : [0x0a, 0];
+                const { lookups, errors } = parseLookups(lookupType, subtableOffsets, subtableData);
+                assert.deepStrictEqual(lookups[0].subtables, subtableOffsets.map(() => undefined), subtableData);
+                assert.strictEqual(errors.length, 1, subtableData);
+                assert.match(errors[0][0], expectedError, subtableData);
+                assert.deepStrictEqual(errors[0].slice(1), [0, 0], subtableData);
+            }
+        });
+
+        it('passes the errors of the subtables as Error objects', function() {
+            const errors = [];
+            const data = unhex('00010000 000A 000C 000E 0000 0000 0001 0004 0004 0000 0001 0008 0002 0000 0000');
+            gpos.parse(data, 0, error => errors.push(error));
+            assert.strictEqual(errors.length, 1);
+            assert.ok(errors[0] instanceof Error);
+        });
     });
 });

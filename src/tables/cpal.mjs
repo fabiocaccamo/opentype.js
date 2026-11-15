@@ -65,17 +65,49 @@ function parseCPALColor(bgra) {
     return { b, g, r, a };
 }
 
+// the color index of the color of the text
+const FOREGROUND_COLOR_INDEX = 0xFFFF;
+
+/**
+ * Throw an Error for a palette index that is not one of the palettes of a CPAL table: an index that is not an integer
+ * from 0 to the last palette
+ * @param {Object} cpalTable
+ * @param {number} [palette=0]
+ */
+function checkPaletteIndex(cpalTable, palette = 0) {
+    if (!Number.isInteger(palette) || palette < 0 || palette >= cpalTable.colorRecordIndices.length) {
+        throw new Error(`Palette index out of range (colorRecordIndices.length: ${cpalTable.colorRecordIndices.length}, index: ${palette})`);
+    }
+}
+
+/**
+ * Whether a color index of a palette of a CPAL table is drawn, like HarfBuzz draws the layers of a COLR glyph: the
+ * color index 0xFFFF (the color of the text) and the colors of the palette are, a color the table has not (an index
+ * past the entries or the color records of the palette, any index of a CPAL table without palettes) is not
+ * @param {Object} cpalTable
+ * @param {number} index - the color index
+ * @param {number} [palette=0] - one of the palettes of the table, when it has palettes (see checkPaletteIndex)
+ * @returns {boolean}
+ */
+function isPaletteColorDrawn(cpalTable, index, palette = 0) {
+    if (index === FOREGROUND_COLOR_INDEX) {
+        return true;
+    }
+    if (!cpalTable.colorRecordIndices.length) {
+        return false;
+    }
+    return index < cpalTable.numPaletteEntries && cpalTable.colorRecordIndices[palette] + index < cpalTable.colorRecords.length;
+}
+
 function getPaletteColor(font, index, palette = 0, colorFormat = 'hexa') {
-    if (index == 0xFFFF) {
+    if (index == FOREGROUND_COLOR_INDEX) {
         return 'currentColor';
     }
 
     const cpalTable = font && font.tables && font.tables.cpal;
     if (!cpalTable) return 'currentColor';
 
-    if (palette > cpalTable.colorRecordIndices.length - 1) {
-        throw new Error(`Palette index out of range (colorRecordIndices.length: ${cpalTable.colorRecordIndices.length}, index: ${index})`);
-    }
+    checkPaletteIndex(cpalTable, palette);
 
     if (index > cpalTable.numPaletteEntries) {
         throw new Error(`Color index out of range (numPaletteEntries: ${cpalTable.numPaletteEntries}, index: ${index})`);
@@ -307,6 +339,6 @@ function formatColor(bgra, format = 'hexa') {
     }
 }
 
-export default { parse: parseCpalTable, make: makeCpalTable, getPaletteColor, parseColor, formatColor };
-export { parseCpalTable, makeCpalTable, getPaletteColor, parseColor, formatColor };
+export default { parse: parseCpalTable, make: makeCpalTable, getPaletteColor, checkPaletteIndex, isPaletteColorDrawn, parseColor, formatColor };
+export { parseCpalTable, makeCpalTable, getPaletteColor, checkPaletteIndex, isPaletteColorDrawn, parseColor, formatColor };
 

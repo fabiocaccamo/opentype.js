@@ -388,6 +388,29 @@ describe('tables/gsub.mjs', function() {
         });
     });
 
+    it('throws on a lookup7 subtable of an extension lookup type that is not 1 to 6 or 8', function() {
+        for (const extensionLookupType of ['0000', '0007', '0009']) {
+            assert.throws(() => parseLookup(7, '0001 ' + extensionLookupType + ' 00000008 0001 0006 00C0'),
+                /GSUB extension lookup type must be 1 to 6 or 8/, extensionLookupType);
+        }
+    });
+
+    it('reads a subtable that fails to parse as undefined, with its error, given a callback', function() {
+        // a single substitution of format 3, then a valid one (see the lookup1 substFormat 1 test)
+        const data = unhex('00010000 000A 000C 000E 0000 0000 0001 0004   0001 0000 0002 000A 0010' +
+            '0003 0006 00C0   0001 0006 00C0   0002 0001 004E 0058 0000');
+        const errors = [];
+        const table = gsub.parse(data, 0, undefined, (error, lookupIndex, subtableIndex) => {
+            errors.push([error.message, lookupIndex, subtableIndex]);
+        });
+        assert.deepStrictEqual(table.lookups[0].subtables, [
+            undefined,
+            { substFormat: 1, coverage: { format: 2, ranges: [{ start: 0x4e, end: 0x58, index: 0 }] }, deltaGlyphId: 0xc0 }
+        ]);
+        assert.deepStrictEqual(errors, [['0x1c: lookup type 1 format must be 1 or 2.', 0, 0]]);
+        assert.throws(() => gsub.parse(data), /lookup type 1 format must be 1 or 2/);
+    });
+
     //// Lookup type 8 ////////////////////////////////////////////////////////
     it('can parse lookup8', function() {
         // https://www.microsoft.com/typography/OTSPEC/GSUB.htm#EX10

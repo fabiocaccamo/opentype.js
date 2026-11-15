@@ -6,7 +6,7 @@ import Layout, {
     getLigatureComponent, isMarkIgnoredWithoutGlyphClasses, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES, IGNORE_MARKS, RIGHT_TO_LEFT, getRequiredFeatureIndex,
     matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue, HarfBuzzShaper, getHarfBuzzShaper,
     createIgnorableMatching, AUTO_JOINER_FLAGS, areJoinerFlagsEqual, NO_IGNORABLE_MATCHING, getSubtablesFirstGlyphDigest,
-    mayGlyphDigestHave, createLookupFirstGlyphFilter, getLookupFilterGlyphDigest
+    mayGlyphDigestHave, createLookupFirstGlyphFilter, getLookupFilterGlyphDigest, getLookupTableSubtables
 } from './layout.mjs';
 import { DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from './char.mjs';
 import { getLookupJoinerFlags } from './features/featureValues.mjs';
@@ -421,11 +421,27 @@ function applyCursiveAttachment(position, lookupTable, subtable, glyphRun, index
 }
 
 /**
+ * The record of a glyph in an array of a mark attachment subtable (MarkArray, BaseArray, LigatureArray, Mark2Array),
+ * by its coverage index: none for a NULL array offset, an empty array like in HarfBuzz
+ * @param {Array|undefined} records - the records of the array, undefined for a NULL offset
+ * @param {number} coverageIndex
+ * @returns {*} undefined when the array has no record at the coverage index
+ */
+function getMarkAttachmentRecord(records, coverageIndex) {
+    return records ? records[coverageIndex] : undefined;
+}
+
+// the mark record of a mark that the MarkArray of its subtable has not (a NULL MarkArray offset, or a MarkArray shorter
+// than the mark coverage, which the specification does not allow), like the Null MarkRecord of HarfBuzz: the mark class
+// 0 and no anchor
+const NULL_MARK_RECORD = { markClass: 0, markAnchor: undefined };
+
+/**
  * Attach a mark to a glyph before it in a run, like HarfBuzz (MarkArray::apply): the mark is moved so that its anchor
  * of its mark record is on the anchor of the glyph for its mark class, its offsets then follow the glyph (see
- * propagateAttachmentOffsets). The attachment does not apply when the glyph has no anchor for the mark class, nor when
- * the mark has no mark record (a malformed subtable); like HarfBuzz, a mark record without anchor (a NULL offset, which
- * the specification does not allow) has its anchor at 0 0.
+ * propagateAttachmentOffsets). The attachment does not apply when the glyph has no anchor for the mark class; like
+ * HarfBuzz, a mark without mark record has the mark record NULL_MARK_RECORD, and a mark record without anchor (a NULL
+ * offset, which the specification does not allow) has its anchor at 0 0.
  * @param {Position} position
  * @param {GlyphRun} glyphRun - updated
  * @param {number} index - the position of the mark in the run
@@ -435,11 +451,12 @@ function applyCursiveAttachment(position, lookupTable, subtable, glyphRun, index
  * @returns {number} the position the lookup goes on at, -1 when the attachment does not apply
  */
 function attachMark(position, glyphRun, index, markRecord, parentAnchors, parentIndex) {
-    const parentAnchor = markRecord && parentAnchors && parentAnchors[markRecord.markClass];
+    const { markClass, markAnchor } = markRecord || NULL_MARK_RECORD;
+    const parentAnchor = parentAnchors && parentAnchors[markClass];
     if (!parentAnchor) {
         return -1;
     }
-    const markCoordinates = markRecord.markAnchor ? getAnchorCoordinates(position, markRecord.markAnchor, glyphRun.variation) : { x: 0, y: 0 };
+    const markCoordinates = markAnchor ? getAnchorCoordinates(position, markAnchor, glyphRun.variation) : { x: 0, y: 0 };
     const parentCoordinates = getAnchorCoordinates(position, parentAnchor, glyphRun.variation);
     const glyphPosition = glyphRun.glyphPositions[index];
     glyphPosition.xOffset = parentCoordinates.x - markCoordinates.x;
@@ -513,7 +530,8 @@ function applyMarkToBaseAttachment(position, lookupTable, subtable, glyphRun, in
     if (baseCoverageIndex < 0) {
         return -1;
     }
-    return attachMark(position, glyphRun, index, subtable.markArray[markCoverageIndex], subtable.baseArray[baseCoverageIndex], baseIndex);
+    return attachMark(position, glyphRun, index, getMarkAttachmentRecord(subtable.markArray, markCoverageIndex),
+        getMarkAttachmentRecord(subtable.baseArray, baseCoverageIndex), baseIndex);
 }
 
 /**
@@ -554,14 +572,16 @@ function applyMarkToLigatureAttachment(position, lookupTable, subtable, glyphRun
     }
     const ligatureIndex = getRunMarkBaseIndexes(glyphRun.gdef, glyphRun)[index];
     const ligatureCoverageIndex = ligatureIndex < 0 ? -1 : position.getCoverageIndex(subtable.ligatureCoverage, glyphRun.glyphIndexes[ligatureIndex]);
-    const componentAnchors = ligatureCoverageIndex < 0 ? undefined : subtable.ligatureArray[ligatureCoverageIndex];
+    const componentAnchors = ligatureCoverageIndex < 0 ? undefined :
+        getMarkAttachmentRecord(subtable.ligatureArray, ligatureCoverageIndex);
     if (!componentAnchors || !componentAnchors.length) {
         return -1;
     }
     const componentIndex = getMarkLigatureComponentIndex(
         glyphRun.ligatureProperties[index], glyphRun.ligatureProperties[ligatureIndex], componentAnchors.length
     );
-    return attachMark(position, glyphRun, index, subtable.markArray[markCoverageIndex], componentAnchors[componentIndex], ligatureIndex);
+    return attachMark(position, glyphRun, index, getMarkAttachmentRecord(subtable.markArray, markCoverageIndex),
+        componentAnchors[componentIndex], ligatureIndex);
 }
 
 /**
@@ -618,7 +638,8 @@ function applyMarkToMarkAttachment(position, lookupTable, subtable, glyphRun, in
     if (mark2CoverageIndex < 0) {
         return -1;
     }
-    return attachMark(position, glyphRun, index, subtable.mark1Array[mark1CoverageIndex], subtable.mark2Array[mark2CoverageIndex], previousIndex);
+    return attachMark(position, glyphRun, index, getMarkAttachmentRecord(subtable.mark1Array, mark1CoverageIndex),
+        getMarkAttachmentRecord(subtable.mark2Array, mark2CoverageIndex), previousIndex);
 }
 
 /**
@@ -777,18 +798,17 @@ function zeroMarkAdvances(gdef, glyphRun, isOffsetMovedBack) {
 
 /**
  * The subtables of a lookup with their lookup type, the subtables of an extension lookup (type 9) unwrapped,
- * each one with the lookup type of its extension subtable, like HarfBuzz; a malformed extension subtable
- * (without lookup type, see the GPOS parser) is skipped.
+ * each one with the lookup type of its extension subtable, like HarfBuzz; the undefined subtables are left out (see
+ * getLookupTableSubtables in layout.mjs).
  * @param {object} lookupTable
  * @returns {Array<{lookupType: number, subtable: object}>}
  */
 function getLookupSubtables(lookupTable) {
+    const subtables = getLookupTableSubtables(lookupTable);
     if (lookupTable.lookupType !== EXTENSION_LOOKUP_TYPE) {
-        return lookupTable.subtables.map(subtable => ({ lookupType: lookupTable.lookupType, subtable }));
+        return subtables.map(subtable => ({ lookupType: lookupTable.lookupType, subtable }));
     }
-    return lookupTable.subtables
-        .filter(subtable => subtable.lookupType !== undefined)
-        .map(subtable => ({ lookupType: subtable.lookupType, subtable: subtable.extension }));
+    return subtables.map(subtable => ({ lookupType: subtable.lookupType, subtable: subtable.extension }));
 }
 
 /**

@@ -171,6 +171,10 @@ function getFeatureLookupTables(query, feature) {
     return feature.lookupListIndexes.map(lookupIndex => query.getLookupByIndex(lookupIndex));
 }
 
+// the sizes of the header and of a table record of the table directory of an sfnt font file
+const SFNT_HEADER_SIZE = 12;
+const TABLE_RECORD_SIZE = 16;
+
 /**
  * The header, the table records and the tables of an sfnt font file, read as the OpenType specification describes
  * them (not with opentype.js); each table is a copy of its bytes
@@ -185,7 +189,7 @@ function readSfntFile(bytes) {
     const records = [];
     const tables = {};
     for (let i = 0; i < numTables; i += 1) {
-        const recordOffset = 12 + i * 16;
+        const recordOffset = SFNT_HEADER_SIZE + i * TABLE_RECORD_SIZE;
         const record = {
             tag: readTag(recordOffset),
             checkSum: view.getUint32(recordOffset + 4),
@@ -223,4 +227,73 @@ function getSpecificationCheckSum(bytes) {
     return sum;
 }
 
-export { hex, unhex, unhexArray, createMockObject, enableMockCanvas, replaceTextGlyphs, getFeatureLookupTables, readSfntFile, getSpecificationCheckSum };
+/**
+ * The offset of the table record of a tag in the table directory of an sfnt font file (see readSfntFile)
+ * @param {Uint8Array} bytes
+ * @param {string} tag
+ * @returns {number}
+ */
+function getTableRecordOffset(bytes, tag) {
+    const recordIndex = readSfntFile(bytes).records.findIndex(record => record.tag === tag);
+    if (recordIndex < 0) {
+        throw new Error('No ' + tag + ' table');
+    }
+    return SFNT_HEADER_SIZE + recordIndex * TABLE_RECORD_SIZE;
+}
+
+/**
+ * The offset in an sfnt font file of the Offset16 field of a lookup in the LookupList of its GSUB or GPOS table, read
+ * as the OpenType specification describes it (not with opentype.js)
+ * @param {Uint8Array} bytes
+ * @param {string} tag - 'GSUB' or 'GPOS'
+ * @param {number} lookupIndex
+ * @returns {{offsetField: number, lookupListStart: number}}
+ */
+function getLookupOffsetField(bytes, tag, lookupIndex) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const tableStart = view.getUint32(getTableRecordOffset(bytes, tag) + 8);
+    // the lookupListOffset of the header, after the majorVersion, the minorVersion, the scriptListOffset and the
+    // featureListOffset
+    const lookupListStart = tableStart + view.getUint16(tableStart + 8);
+    // the lookupCount, then the lookup offsets
+    return { offsetField: lookupListStart + 2 + 2 * lookupIndex, lookupListStart };
+}
+
+/**
+ * The offsets in an sfnt font file of the subtable of a lookup of its GSUB or GPOS table, read as the OpenType
+ * specification describes them (not with opentype.js): the offset of its Offset16 field in the Lookup table, and the
+ * offset of the subtable
+ * @param {Uint8Array} bytes
+ * @param {string} tag - 'GSUB' or 'GPOS'
+ * @param {number} lookupIndex
+ * @param {number} subtableIndex
+ * @returns {{offsetField: number, subtableStart: number}}
+ */
+function getLookupSubtableOffsets(bytes, tag, lookupIndex, subtableIndex) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const lookup = getLookupOffsetField(bytes, tag, lookupIndex);
+    const lookupStart = lookup.lookupListStart + view.getUint16(lookup.offsetField);
+    // the lookupType, the lookupFlag and the subTableCount, then the subtable offsets
+    const offsetField = lookupStart + 6 + 2 * subtableIndex;
+    return { offsetField, subtableStart: lookupStart + view.getUint16(offsetField) };
+}
+
+/**
+ * The glyphs of font.shape as `hb-shape --no-glyph-names --cluster-level=1` prints them, e.g. [2=0+500|10=1@-250,20+0]
+ * @param {opentype.Font} font
+ * @param {number[]} codePoints - the code points of the text, the -u of hb-shape
+ * @param {Object} [options] - the options of font.shape
+ * @returns {string}
+ */
+function formatShape(font, codePoints, options) {
+    const text = String.fromCodePoint(...codePoints);
+    return '[' + font.shape(text, options).map(glyphPosition => {
+        const offsets = glyphPosition.xOffset || glyphPosition.yOffset ? `@${glyphPosition.xOffset},${glyphPosition.yOffset}` : '';
+        return `${glyphPosition.glyph.index}=${glyphPosition.start}${offsets}+${glyphPosition.xAdvance}`;
+    }).join('|') + ']';
+}
+
+export {
+    hex, unhex, unhexArray, createMockObject, enableMockCanvas, replaceTextGlyphs, getFeatureLookupTables, readSfntFile,
+    getSpecificationCheckSum, getTableRecordOffset, getLookupOffsetField, getLookupSubtableOffsets, formatShape
+};

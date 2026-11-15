@@ -74,4 +74,35 @@ describe('tables/mvar.mjs', function() {
         const processor = createVariationProcessor(mvar.parse(unhex(data), 0));
         assert.equal(processor.getMetricAdjustment('xhgt', { wght: 900 }), 0);
     });
+
+    it('reads an item variation store that fails to parse as a NULL offset, like HarfBuzz (MVAR::sanitize)', function() {
+        const data =
+            // version 1.0, reserved, valueRecordSize 8, valueRecordCount 1, item variation store at 0x40, past the end of
+            // the 20 bytes of the table: HarfBuzz neuters an offset that fails to sanitize
+            '00 01 00 00 00 00 00 08 00 01 00 40 ' +
+            // "xhgt" -> outer 0, inner 0
+            '78 68 67 74 00 00 00 00';
+        const partErrors = [];
+        const table = mvar.parse(unhex(data), 0, (error, partName) => partErrors.push({ error, partName }));
+        assert.deepStrictEqual(table, {
+            version: [1, 0],
+            itemVariationStore: undefined,
+            valueRecords: { xhgt: { outerIndex: 0, innerIndex: 0 } },
+        });
+        assert.deepStrictEqual(partErrors.map(({ partName }) => partName), ['ItemVariationStore table']);
+        assert.ok(partErrors[0].error instanceof RangeError);
+        assert.equal(createVariationProcessor(table).getMetricAdjustment('xhgt', { wght: 900 }), 0);
+        assert.throws(() => mvar.parse(unhex(data), 0), /^RangeError: Offset is outside the bounds of the DataView$/);
+    });
+
+    it('throws an error for value records that run past the end of the table, which HarfBuzz does not read (MVAR::sanitize)', function() {
+        // version 1.0, reserved, valueRecordSize 8, valueRecordCount 2, no item variation store, one value record
+        const data = '00 01 00 00 00 00 00 08 00 02 00 00 78 68 67 74 00 00 00 00';
+        assert.throws(() => mvar.parse(unhex(data), 0, () => assert.fail('no part is skipped')), /^RangeError: Offset is outside the bounds of the DataView$/);
+    });
+
+    it('throws an error for a table of another major version, which HarfBuzz does not read (MVAR::sanitize)', function() {
+        // version 2.0, reserved, valueRecordSize 8, valueRecordCount 0, no item variation store
+        assert.throws(() => mvar.parse(unhex('00 02 00 00 00 00 00 08 00 00 00 00'), 0), /^Error: Unsupported MVAR table version 2.0$/);
+    });
 });

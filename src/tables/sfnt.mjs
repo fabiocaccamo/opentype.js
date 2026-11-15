@@ -374,6 +374,9 @@ function fontToSfntTable(font) {
     const englishFullName = englishFamilyName + ' ' + englishStyleName;
     let postScriptName = font.getEnglishName('postScriptName');
     if (!postScriptName) {
+        if (englishFamilyName === undefined || englishStyleName === undefined) {
+            throw new Error('A font without the English postScriptName name, nor the fontFamily and fontSubfamily names to make it from (e.g. a parsed font without a name table), cannot be written.');
+        }
         postScriptName = englishFamilyName.replace(/\s/g, '') + '-' + englishStyleName;
     }
 

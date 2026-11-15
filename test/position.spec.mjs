@@ -14,7 +14,7 @@ import {
 import { DEFAULT_IGNORABLE_TYPES, SPACE_TYPES } from '../src/char.mjs';
 import { AUTO_JOINER_FLAGS, getCoveragesGlyphDigest, mayGlyphDigestHave } from '../src/layout.mjs';
 import { glyphIndexes, createLookupFlagsFont, createLayoutTable } from './lookup-flags-font.mjs';
-import { replaceTextGlyphs } from './testutil.mjs';
+import { replaceTextGlyphs, formatShape, getTableRecordOffset, getLookupOffsetField, getLookupSubtableOffsets } from './testutil.mjs';
 import { loadFont, shapeText, assertShape, itFailsUntilFixed } from './regression/helpers.mjs';
 
 // a pair adjustment subtable (format 1) kerning leftGlyph + rightGlyph by xAdvance
@@ -469,10 +469,11 @@ describe('position.mjs', function() {
         });
 
         it('skips a malformed extension subtable without a warning, and applies the next subtable', function() {
-            // the GPOS parser gives { error } for an extension subtable whose format or lookup type is wrong (parseLookup9);
+            // the GPOS parser gives undefined for an extension subtable whose format or lookup type is wrong (parseLookup9,
+            // parseLookupList), like for a NULL subtable offset;
             // the a b -50 of KERN_IGNORE_MARKS, -u 0061,0062: [1=0+450|2=1+500]
             const extensionLookupTable = extensionLookup([{ lookupType: 2, extension: pairPosSubtable(glyphA, glyphB, -50) }]);
-            extensionLookupTable.subtables.unshift({ error: '0x0: GPOS lookup type 9 format must be 1.' });
+            extensionLookupTable.subtables.unshift(undefined);
             const warnings = [];
             const consoleWarn = console.warn;
             console.warn = message => warnings.push(message);
@@ -663,11 +664,144 @@ describe('position.mjs', function() {
             assert.strictEqual(positionText('Tdo'), '3+460|8@15,-10+500|9+500');
         });
 
+        it('gives every glyph the class 0 in a class definition table of an unknown format, like HarfBuzz', function() {
+            // TestPairPositioning.ttf with the format of the ClassDef1 (at 448 in GPOS, an empty format 2: T has the class
+            // 0) or of the ClassDef2 (at 452, a format 1: d and o of the class 1) of the class pairs (lookup 2) set to 3:
+            // hb-shape --no-glyph-names --cluster-level=1 <font> -u 0054,006F [3=0+460|9=1@15,-10+500] with the ClassDef1
+            // patched, as TestPairPositioning.ttf, and [3=0+500|9=1+500] with the ClassDef2 patched (the class 0 of o)
+            const parsePatchedFont = (classDefOffset, format) => {
+                const bytes = new Uint8Array(readFileSync('./test/fonts/TestPairPositioning.ttf'));
+                const view = new DataView(bytes.buffer);
+                const gposOffset = view.getUint32(getTableRecordOffset(bytes, 'GPOS') + 8);
+                assert.strictEqual(view.getUint16(gposOffset + classDefOffset), format);
+                view.setUint16(gposOffset + classDefOffset, 3);
+                return parse(bytes.buffer);
+            };
+            const classDef1Font = parsePatchedFont(448, 2);
+            assert.strictEqual(formatShape(classDef1Font, [0x54, 0x6F]), '[3=0+460|9=1@15,-10+500]');
+            assert.deepStrictEqual(classDef1Font.tables.gpos.lookups[2].subtables[0].classDef1, { format: 3 });
+            const classDef2Font = parsePatchedFont(452, 1);
+            assert.strictEqual(formatShape(classDef2Font, [0x54, 0x6F]), '[3=0+500|9=1+500]');
+            assert.deepStrictEqual(classDef2Font.tables.gpos.lookups[2].subtables[0].classDef2, { format: 3 });
+        });
+
         it('goes on after the second glyph of a pair with a second value record, at the second glyph otherwise', function() {
             // -u 0061,0062,0063,0064: [5=0+450|6=1+480|7=2+460|8=3+500], b c skipped after a b, c d applied
             assert.strictEqual(positionText('abcd'), '5+450|6+480|7+460|8+500');
             // -u 0062,0063,0064: [6=0+470|7=1+460|8=2+500], b c then c d
             assert.strictEqual(positionText('bcd'), '6+470|7+460|8+500');
+        });
+
+        it('applies no lookup of a feature whose Feature offset is NULL, like the Null Feature of HarfBuzz', function() {
+            // TestPairPositioning.ttf with the Feature offset of the FeatureRecord 5 (kern) of GPOS set to 0:
+            // -u 0041,0056,0041 [2=0+600|4=1+600|2=2+600], the same as TestPairPositioning.ttf with --features=-kern
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestPairPositioning.ttf'));
+            const view = new DataView(bytes.buffer);
+            const gposOffset = view.getUint32(getTableRecordOffset(bytes, 'GPOS') + 8);
+            const featureListOffset = gposOffset + view.getUint16(gposOffset + 6);
+            // featureCount, then the FeatureRecords: featureTag, featureOffset
+            const kernRecordOffset = featureListOffset + 2 + 6 * 5;
+            assert.strictEqual(String.fromCharCode(...bytes.subarray(kernRecordOffset, kernRecordOffset + 4)), 'kern');
+            view.setUint16(kernRecordOffset + 4, 0);
+            const font = parse(bytes.buffer);
+            assert.deepStrictEqual(font.warnings, []);
+            assert.strictEqual(formatShape(font, [0x41, 0x56, 0x41]), '[2=0+600|4=1+600|2=2+600]');
+            assert.strictEqual(formatShape(pairFont, [0x41, 0x56, 0x41], { features: { kern: false } }), '[2=0+600|4=1+600|2=2+600]');
+            assert.strictEqual(font.getAdvanceWidth('AVA', 1000), 1800);
+        });
+
+        it('applies none of the subtables of an extension lookup whose subtables have different extension lookup types, like HarfBuzz', function() {
+            // TestExtensionLookups.ttf (see test/generate-extension-lookups-font.py), the GPOS lookup 0 (kern, pos c d
+            // -100, then pos [d] [c] -200) with its subtable 1 patched: HarfBuzz drops an extension lookup whose
+            // subtables have not all the same extensionLookupType (Lookup::sanitize), the type of a NULL subtable and of
+            // a subtable of another format being 0 (Extension::get_type):
+            // hb-shape --no-glyph-names --cluster-level=1 <font> -u 0061,0062 [3=0+800|4=1+900], -u 0064,0063
+            // [4=0+900|3=1+800] for each patch below, [3=0+700|4=1+900] and [4=0+700|3=1+800] for TestExtensionLookups.ttf
+            const patches = [
+                { patch: (view, offsetField, subtableStart) => view.setUint16(subtableStart + 2, 10), types: '2, 10' },
+                { patch: (view, offsetField, subtableStart) => view.setUint16(subtableStart + 2, 1), types: '2, 1' },
+                { patch: (view, offsetField) => view.setUint16(offsetField, 0), types: '2, 0' },
+                { patch: (view, offsetField, subtableStart) => view.setUint16(subtableStart, 2), types: '2, 0' }
+            ];
+            const font = parse(readFileSync('./test/fonts/TestExtensionLookups.ttf'));
+            assert.strictEqual(formatShape(font, [0x61, 0x62]), '[3=0+700|4=1+900]');
+            assert.strictEqual(formatShape(font, [0x64, 0x63]), '[4=0+700|3=1+800]');
+            for (const { patch, types } of patches) {
+                const bytes = new Uint8Array(readFileSync('./test/fonts/TestExtensionLookups.ttf'));
+                const view = new DataView(bytes.buffer);
+                const { offsetField, subtableStart } = getLookupSubtableOffsets(bytes, 'GPOS', 0, 1);
+                assert.deepStrictEqual([view.getUint16(subtableStart), view.getUint16(subtableStart + 2)], [1, 2]);
+                patch(view, offsetField, subtableStart);
+                const patchedFont = parse(bytes.buffer);
+                assert.strictEqual(formatShape(patchedFont, [0x61, 0x62]), '[3=0+800|4=1+900]', types);
+                assert.strictEqual(formatShape(patchedFont, [0x64, 0x63]), '[4=0+900|3=1+800]', types);
+                assert.deepStrictEqual(patchedFont.warnings.map(({ table, message }) => ({ table, message })), [{
+                    table: 'GPOS',
+                    message: 'The lookup 0 is skipped: The subtables of an extension lookup must have the same extension lookup type, not ' + types
+                }]);
+            }
+        });
+
+        describe('an extension lookup of two subtables with an offset past the end of the table', function() {
+            // TestExtensionLookups.ttf (see test/generate-extension-lookups-font.py), the GPOS lookup 0 (kern, pos c d
+            // -100, then pos [d] [c] -200) with its subtable 1 patched, and the lookup 1 (kern, pos a 50), which tells a
+            // skipped lookup from a skipped table. HarfBuzz 11.3.2 rejects the whole GPOS table for both patches below:
+            // hb-shape --no-glyph-names --cluster-level=1 --features=-liga <font> -u 0061,0064,0063
+            // [1=0+600|4=1+900|3=2+800], -u 0063,0064 [3=0+800|4=1+900]; the fork skips less (see the Unlike HarfBuzz
+            // paragraph of Fonts with broken tables in README.md)
+            const parsePatchedFont = patchSubtable => {
+                const bytes = new Uint8Array(readFileSync('./test/fonts/TestExtensionLookups.ttf'));
+                const view = new DataView(bytes.buffer);
+                const { offsetField, subtableStart } = getLookupSubtableOffsets(bytes, 'GPOS', 0, 1);
+                assert.deepStrictEqual([view.getUint16(subtableStart), view.getUint16(subtableStart + 2)], [1, 2]);
+                patchSubtable(view, offsetField, subtableStart);
+                return parse(bytes.buffer);
+            };
+            const noLiga = { features: { liga: false } };
+
+            it('applies the other lookups of TestExtensionLookups.ttf', function() {
+                // -u 0061,0064,0063 [1=0+650|4=1+700|3=2+800], -u 0063,0064 [3=0+700|4=1+900]
+                const font = parse(readFileSync('./test/fonts/TestExtensionLookups.ttf'));
+                assert.strictEqual(formatShape(font, [0x61, 0x64, 0x63], noLiga), '[1=0+650|4=1+700|3=2+800]');
+                assert.strictEqual(formatShape(font, [0x63, 0x64], noLiga), '[3=0+700|4=1+900]');
+            });
+
+            it('skips only the lookup whose subtable offset is past the end of the table, its type being 0', function() {
+                const font = parsePatchedFont((view, offsetField) => view.setUint16(offsetField, 65000));
+                assert.strictEqual(formatShape(font, [0x61, 0x64, 0x63], noLiga), '[1=0+650|4=1+900|3=2+800]');
+                assert.strictEqual(formatShape(font, [0x63, 0x64], noLiga), '[3=0+800|4=1+900]');
+                assert.deepStrictEqual(font.tables.gpos.lookups[0].subtables, [undefined, undefined]);
+                assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+                    table: 'GPOS',
+                    message: 'The lookup 0 is skipped: The subtables of an extension lookup must have the same extension lookup type, not 2, 0'
+                }]);
+            });
+
+            it('skips only the subtable whose extensionOffset is past the end of the table', function() {
+                const font = parsePatchedFont((view, offsetField, subtableStart) => view.setUint32(subtableStart + 4, 0x00FFFF00));
+                assert.strictEqual(formatShape(font, [0x61, 0x64, 0x63], noLiga), '[1=0+650|4=1+900|3=2+800]');
+                assert.strictEqual(formatShape(font, [0x63, 0x64], noLiga), '[3=0+700|4=1+900]');
+                assert.strictEqual(font.tables.gpos.lookups[0].subtables[1], undefined);
+                assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+                    table: 'GPOS',
+                    message: 'The subtable 1 of the lookup 0 is skipped: Offset is outside the bounds of the DataView'
+                }]);
+            });
+        });
+
+        it('applies no lookup for a NULL lookup offset of the LookupList, like the Null lookup of HarfBuzz', function() {
+            // TestExtensionLookups.ttf (see test/generate-extension-lookups-font.py) with the offset of the GPOS lookup 0
+            // (kern, pos c d -100, then pos [d] [c] -200) in the LookupList set to 0, the lookup 1 (kern, pos a 50) kept:
+            // hb-shape --no-glyph-names --cluster-level=1 <font> -u 0061,0062 [3=0+800|4=1+900], -u 0064,0063
+            // [4=0+900|3=1+800]; --features=-liga -u 0061,0064,0063 [1=0+650|4=1+900|3=2+800]
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestExtensionLookups.ttf'));
+            new DataView(bytes.buffer).setUint16(getLookupOffsetField(bytes, 'GPOS', 0).offsetField, 0);
+            const font = parse(bytes.buffer);
+            assert.deepStrictEqual(font.warnings, []);
+            assert.strictEqual(font.tables.gpos.lookups[0], undefined);
+            assert.strictEqual(formatShape(font, [0x61, 0x62]), '[3=0+800|4=1+900]');
+            assert.strictEqual(formatShape(font, [0x64, 0x63]), '[4=0+900|3=1+800]');
+            assert.strictEqual(formatShape(font, [0x61, 0x64, 0x63], { features: { liga: false } }), '[1=0+650|4=1+900|3=2+800]');
         });
 
         it('kerns across the marks a lookup ignores', function() {
@@ -2507,6 +2641,184 @@ describe('position.mjs', function() {
             assert.equal(pairFont.position.getGlyphRunKerningValue(kerningLookups, textGlyphIndexes, 2), 0);
             assert.equal(pairFont.position.getGlyphRunKerningValue(kerningLookups, textGlyphIndexes, -1), 0);
             assert.equal(pairFont.position.getGlyphRunKerningValue(kerningLookups, [], 0), 0);
+        });
+    });
+
+    // the fonts of test/generate-malformed-layout-fonts.py, patched copies of the fonts of the other tests:
+    // hb-shape --no-glyph-names --cluster-level=1 <font> -u <code points> [--features=<features>] [--variations=<variation>]
+    describe('the malformed GPOS subtables, read like HarfBuzz', function() {
+        let malformedMarkFont;
+        let nullOffsetsMarkFont;
+        let malformedContextualFont;
+
+        before(function() {
+            malformedMarkFont = loadFont('../TestMarkAttachment-Malformed.ttf');
+            nullOffsetsMarkFont = loadFont('../TestMarkAttachment-NullOffsets.ttf');
+            malformedContextualFont = loadFont('../TestContextualPositioning-Malformed.ttf');
+        });
+
+        it('skips the mark attachment and cursive subtables of an unknown format (lookup types 3 to 6)', function() {
+            // TestMarkAttachment-Malformed.ttf, the subtable that the mark-to-base lookups 4, 15 and 16 (ss04, ss13,
+            // ss14) share: -u 0061,0301 --features=ss13,-mark [2=0+500|10=1+0], the same with ss04
+            assert.strictEqual(formatShape(malformedMarkFont, [0x61, 0x301], { features: { ss13: true, mark: false } }), '[2=0+500|10=1+0]');
+            assert.strictEqual(formatShape(malformedMarkFont, [0x61, 0x301], { features: { ss04: true, mark: false } }), '[2=0+500|10=1+0]');
+            // MARK_TO_LIGATURE_ATTACHMENT_TYPE: -u 0066,0069,0301 --features=ss15,-mark [9=0+550|10=2+0]
+            assert.strictEqual(formatShape(malformedMarkFont, [0x66, 0x69, 0x301], { features: { ss15: true, mark: false } }), '[9=0+550|10=2+0]');
+            // the subtable of mkmk and of MARK_TO_MARK_FILTERED: -u 0061,0301,0301 [2=0+500|10=1@-250,20+0|10=2@-250,20+0],
+            // the same with --features=ss02,-mkmk; the second acute is on the a like the first one
+            assert.strictEqual(formatShape(malformedMarkFont, [0x61, 0x301, 0x301]), '[2=0+500|10=1@-250,20+0|10=2@-250,20+0]');
+            assert.strictEqual(formatShape(malformedMarkFont, [0x61, 0x301, 0x301], { features: { ss02: true, mkmk: false } }),
+                '[2=0+500|10=1@-250,20+0|10=2@-250,20+0]');
+            // CURSIVE_X_Y: -u 0078,0079 --features=ss05,-curs [6=0+500|7=1+500]
+            assert.strictEqual(formatShape(malformedMarkFont, [0x78, 0x79], { features: { ss05: true, curs: false } }), '[6=0+500|7=1+500]');
+        });
+
+        it('reads an anchor of an unknown format as the anchor 0 0', function() {
+            // the anchor of i in MARK_TO_BASE: -u 0069,0301 [5=0+250|10=1@-250,-500+0], the acute at 0 500 on 0 0
+            assert.strictEqual(formatShape(malformedMarkFont, [0x69, 0x301]), '[5=0+250|10=1@-250,-500+0]');
+            // the other anchors of the lookup: -u 0061,0301 [2=0+500|10=1@-250,20+0]
+            assert.strictEqual(formatShape(malformedMarkFont, [0x61, 0x301]), '[2=0+500|10=1@-250,20+0]');
+        });
+
+        it('reads an anchor with a Device table past the end of the table as a NULL anchor offset', function() {
+            // the entry anchor of z in CURSIVE_LEFT_TO_RIGHT: -u 0079,007A [7=0+500|8=1+500], y and z not joined
+            assert.strictEqual(formatShape(malformedMarkFont, [0x79, 0x7A]), '[7=0+500|8=1+500]');
+        });
+
+        it('reads the NULL MarkArray, BaseArray, LigatureArray and Mark2Array offsets as empty arrays', function() {
+            // TestMarkAttachment-NullOffsets.ttf: a NULL MarkArray in the mark-to-base subtable of ss13, whose mark then
+            // has the class 0 and the anchor 0 0: -u 0061,0301 --features=ss13,-mark [2=0+500|10=1@-250,900+0]
+            assert.strictEqual(formatShape(nullOffsetsMarkFont, [0x61, 0x301], { features: { ss13: true, mark: false } }), '[2=0+500|10=1@-250,900+0]');
+            // a NULL MarkArray in MARK_TO_LIGATURE_ATTACHMENT_TYPE: -u 0066,0069,0301 --features=ss15,-mark
+            // [9=0+550|10=2@-130,900+0]
+            assert.strictEqual(formatShape(nullOffsetsMarkFont, [0x66, 0x69, 0x301], { features: { ss15: true, mark: false } }), '[9=0+550|10=2@-130,900+0]');
+            // a NULL BaseArray in MARK_TO_BASE: -u 0061,0301 [2=0+500|10=1+0]; a NULL LigatureArray in MARK_TO_LIGATURE:
+            // -u 0066,0069,0301 [9=0+550|10=2+0]
+            assert.strictEqual(formatShape(nullOffsetsMarkFont, [0x61, 0x301]), '[2=0+500|10=1+0]');
+            assert.strictEqual(formatShape(nullOffsetsMarkFont, [0x66, 0x69, 0x301]), '[9=0+550|10=2+0]');
+            // a NULL Mark2Array in the subtable of mkmk: -u 0061,0301,0301 [2=0+500|10=1+0|10=2+0]
+            assert.strictEqual(formatShape(nullOffsetsMarkFont, [0x61, 0x301, 0x301]), '[2=0+500|10=1+0|10=2+0]');
+        });
+
+        it('reads a NULL subtable offset as a subtable that applies to no glyph', function() {
+            // CURSIVE_REVERSED: -u 0078,0079 --features=ss03,-curs [6=0+500|7=1+500]
+            assert.strictEqual(formatShape(nullOffsetsMarkFont, [0x78, 0x79], { features: { ss03: true, curs: false } }), '[6=0+500|7=1+500]');
+        });
+
+        it('reads the NULL coverage offset of a contextual subtable of format 1 or 2 as an empty coverage', function() {
+            // TestContextualPositioning-Malformed.ttf: -u 0061,0062 --features=ss01 [5=0+500|6=1+500] (type 7 format 1),
+            // -u 0061,0063 --features=ss02 [5=0+500|7=1+500] (type 7 format 2), -u 0054,0061,0062,0078 --features=ss04
+            // [3=0+600|5=1+500|6=2+500|13=3+500] (type 8 format 1), -u 0054,0061,0062 --features=ss05
+            // [3=0+600|5=1+500|6=2+500] (type 8 format 2)
+            assert.strictEqual(formatShape(malformedContextualFont, [0x61, 0x62], { features: { ss01: true } }), '[5=0+500|6=1+500]');
+            assert.strictEqual(formatShape(malformedContextualFont, [0x61, 0x63], { features: { ss02: true } }), '[5=0+500|7=1+500]');
+            assert.strictEqual(formatShape(malformedContextualFont, [0x54, 0x61, 0x62, 0x78], { features: { ss04: true } }),
+                '[3=0+600|5=1+500|6=2+500|13=3+500]');
+            assert.strictEqual(formatShape(malformedContextualFont, [0x54, 0x61, 0x62], { features: { ss05: true } }), '[3=0+600|5=1+500|6=2+500]');
+        });
+
+        it('reads a NULL rule offset as a rule of no glyph, which matches the glyph and applies no lookup', function() {
+            // TestContextualPositioning-Malformed.ttf, CONTEXT_MARKS without its second rule f_i acutecomb' (type 8
+            // format 1): -u 0065,0301 --features=ss12 [9=0+500|14=1@-150,20+0], the rule before it applies;
+            // -u 0066,0069,0301 --features=ss12 [17=0+600|14=2+0], the NULL rule matches the acute and the rules after it
+            // do not apply (TestContextualPositioning.ttf: [17=0+600|14=2@-50,250+0])
+            assert.strictEqual(formatShape(malformedContextualFont, [0x65, 0x301], { features: { ss12: true } }), '[9=0+500|14=1@-150,20+0]');
+            assert.strictEqual(formatShape(malformedContextualFont, [0x66, 0x69, 0x301], { features: { ss12: true } }), '[17=0+600|14=2+0]');
+        });
+
+        it('applies nothing for a contextual subtable of format 3 without input glyphs', function() {
+            // CONTEXT_COVERAGES with a glyphCount of 0: -u 0041,0056 --features=ss03 [2=0+600|4=1+600]; CHAIN_COVERAGES
+            // with an inputGlyphCount of 0: -u 0041,0061,0062,0078 --features=ss06 [2=0+600|5=1+500|6=2+500|13=3+500]
+            assert.strictEqual(formatShape(malformedContextualFont, [0x41, 0x56], { features: { ss03: true } }), '[2=0+600|4=1+600]');
+            assert.strictEqual(formatShape(malformedContextualFont, [0x41, 0x61, 0x62, 0x78], { features: { ss06: true } }),
+                '[2=0+600|5=1+500|6=2+500|13=3+500]');
+        });
+
+        it('skips the contextual subtables of an unknown format (lookup types 7 and 8)', function() {
+            // TYPE7_IGNORE_MARKS: -u 0054,0301,006F --features=ss18 [3=0+600|14=1+0|12=2+500]; CONTEXT_IGNORE_MARKS:
+            // -u 0054,006F,0078 --features=ss07 [3=0+600|12=1+500|13=2+500]
+            assert.strictEqual(formatShape(malformedContextualFont, [0x54, 0x301, 0x6F], { features: { ss18: true } }), '[3=0+600|14=1+0|12=2+500]');
+            assert.strictEqual(formatShape(malformedContextualFont, [0x54, 0x6F, 0x78], { features: { ss07: true } }), '[3=0+600|12=1+500|13=2+500]');
+        });
+
+        it('applies no subtable of a lookup of an unknown type, and the other lookups', function() {
+            // TestMarkAttachment-Malformed.ttf, SINGLE_BEH of the lookup type 10: -u 0628,064E --features=ss09
+            // [14=1@260,30+0|13=0+500], the fatha on the beh without its offset of 15 (TestMarkAttachment.ttf:
+            // [14=1@275,30+0|13=0@15,0+500])
+            assert.deepStrictEqual(malformedMarkFont.tables.gpos.lookups[7].subtables, [undefined]);
+            assert.strictEqual(formatShape(malformedMarkFont, [0x628, 0x64E], { features: { ss09: true } }), '[14=1@260,30+0|13=0+500]');
+        });
+
+        it('reads the Device and VariationIndex offsets of a value record past the end of the table as NULL offsets', function() {
+            // TestPairPositioning-Malformed.ttf, the XAdvDevice of the first value record of T a in VARIABLE_PAIR:
+            // -u 0054,0061 --variations=wght=900 [3=0@30,40+480|5=1@-10,20+488], -u 0054,0061 --variations=wght=500
+            // [3=0@20,20+480|5=1@-5,10+494]: the x advance of T without its variation delta
+            const pairFont = loadFont('../TestPairPositioning-Malformed.ttf');
+            assert.strictEqual(formatShape(pairFont, [0x54, 0x61], { variation: { wght: 900 } }), '[3=0@30,40+480|5=1@-10,20+488]');
+            assert.strictEqual(formatShape(pairFont, [0x54, 0x61], { variation: { wght: 500 } }), '[3=0@20,20+480|5=1@-5,10+494]');
+            // TestSingleAdjustment-Malformed.ttf, the XAdvDevice of the value record of O in SINGLE_VARIABLE:
+            // -u 004F --features=halt --variations=wght=900 [6=0@30,40+580]
+            const singleFont = loadFont('../TestSingleAdjustment-Malformed.ttf');
+            assert.strictEqual(formatShape(singleFont, [0x4F], { features: { halt: true }, variation: { wght: 900 } }), '[6=0@30,40+580]');
+            assert.deepStrictEqual(pairFont.warnings, []);
+            assert.deepStrictEqual(singleFont.warnings, []);
+        });
+
+        describe('the subtables with an offset past the end of the table inside them', function() {
+            // TestMarkAttachment-MalformedOffsets.ttf and TestPairPositioning-MalformedOffsets.ttf: HarfBuzz reads the
+            // offset as a NULL offset and keeps the rest of the subtable, where the fork skips the whole subtable (see
+            // Fonts with broken tables in README.md)
+            const offsetReason = 'Parser.prototype.parseLookup (src/parse.mjs): a subtable with an offset inside it that fails to parse is skipped whole, HarfBuzz reads the offset as a NULL offset';
+            let malformedOffsetsMarkFont;
+            let malformedOffsetsPairFont;
+
+            before(function() {
+                malformedOffsetsMarkFont = loadFont('../TestMarkAttachment-MalformedOffsets.ttf');
+                malformedOffsetsPairFont = loadFont('../TestPairPositioning-MalformedOffsets.ttf');
+            });
+
+            it('skips the subtable, with a warning', function() {
+                assert.deepStrictEqual(malformedOffsetsMarkFont.warnings.map(warning => warning.message), [
+                    'The subtable 0 of the lookup 0 is skipped: Offset is outside the bounds of the DataView',
+                    'The subtable 0 of the lookup 1 is skipped: Offset is outside the bounds of the DataView'
+                ]);
+                assert.deepStrictEqual(malformedOffsetsPairFont.warnings.map(warning => warning.message), [
+                    'The subtable 0 of the lookup 1 is skipped: Offset is outside the bounds of the DataView'
+                ]);
+                // the glyphs of the broken offset, the same as HarfBuzz: the anchor of a for @TOP in MARK_TO_BASE,
+                // -u 0061,0301 [2=0+500|10=1+0]; the PairSet of b in PAIR_SECOND_GLYPH, -u 0062,0063 [6=0+500|7=1+500]
+                assert.strictEqual(formatShape(malformedOffsetsMarkFont, [0x61, 0x301]), '[2=0+500|10=1+0]');
+                assert.strictEqual(formatShape(malformedOffsetsPairFont, [0x62, 0x63]), '[6=0+500|7=1+500]');
+            });
+
+            itFailsUntilFixed('keeps the other anchors of a mark-to-base subtable with an anchor offset past the end of the table, like HarfBuzz', offsetReason, function() {
+                // MARK_TO_BASE: -u 0062,0301 [3=0+500|10=1@-240,200+0]
+                assert.strictEqual(formatShape(malformedOffsetsMarkFont, [0x62, 0x301]), '[3=0+500|10=1@-240,200+0]');
+            });
+
+            itFailsUntilFixed('keeps the anchors of the other mark classes of a base with an anchor offset past the end of the table, like HarfBuzz', offsetReason, function() {
+                // MARK_TO_BASE, the anchor of a for @BOTTOM: -u 0061,0323 [2=0+500|12=1@-300,30+0]
+                assert.strictEqual(formatShape(malformedOffsetsMarkFont, [0x61, 0x323]), '[2=0+500|12=1@-300,30+0]');
+            });
+
+            itFailsUntilFixed('reads a MarkArray offset past the end of the table as a NULL MarkArray, like HarfBuzz', offsetReason, function() {
+                // MARK_TO_LIGATURE, the mark of the class 0 and the anchor 0 0: -u 0066,0069,0301 [9=0+550|10=2@-130,700+0]
+                assert.strictEqual(formatShape(malformedOffsetsMarkFont, [0x66, 0x69, 0x301]), '[9=0+550|10=2@-130,700+0]');
+            });
+
+            itFailsUntilFixed('keeps the other pairs of a pair subtable with a PairSet offset past the end of the table, like HarfBuzz', offsetReason, function() {
+                // PAIR_SECOND_GLYPH: -u 0063,0064 [7=0+460|8=1+500]
+                assert.strictEqual(formatShape(malformedOffsetsPairFont, [0x63, 0x64]), '[7=0+460|8=1+500]');
+            });
+        });
+
+        it('draws and measures a text with the malformed subtables', function() {
+            const text = 'a\u0301 i\u0301 f i\u0301 xyz a\u0301\u0301';
+            for (const font of [malformedMarkFont, nullOffsetsMarkFont, malformedContextualFont]) {
+                assert.ok(font.getPath(text, 0, 0, 1000).commands.length > 0);
+                assert.ok(Number.isFinite(font.getAdvanceWidth(text, 1000)));
+                assert.ok(Number.isFinite(font.getKerningValue(font.charToGlyphIndex('T'), font.charToGlyphIndex('o'))));
+            }
         });
     });
 });

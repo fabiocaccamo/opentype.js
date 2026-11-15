@@ -379,6 +379,27 @@ describe('tables/cff.mjs', function () {
         assert.strictEqual(pathData.split('Z')[0], 'M10 0L220 0L220 59L131 74L114 74L10 59L10 0');
     });
 
+    it('keeps the fractional coordinates of a CFF1 outline in a font with an fvar table (also in lowMemory mode)', function() {
+        // TestFvarOnly-CFF.otf (test/generate-fvar-only-fonts.py): CFF outlines, an fvar table, no CFF2 nor gvar table.
+        // A CFF1 charstring has no blend operator, so its outline does not vary and is not rounded, like fontTools:
+        // python -c "from fontTools.ttLib import TTFont; from fontTools.pens.recordingPen import RecordingPen; pen =
+        // RecordingPen(); TTFont('TestFvarOnly-CFF.otf').getGlyphSet()['A'].draw(pen); print(pen.value)"
+        // [('moveTo', ((100.5, 0),)), ('lineTo', ((400.25, 0),)), ('lineTo', ((250.75, 700.5),)), ('closePath', ())]
+        // and hb-view -O svg --font-size=1000 [--variations=wght=900] TestFvarOnly-CFF.otf --glyphs '[1]', the y axis
+        // going down: M 100.5 0 L 400.25 0 L 250.75 -700.5 Z
+        for (const options of loadModes) {
+            const font = loadSync('./test/fonts/TestFvarOnly-CFF.otf', options);
+            assert.ok(font.variation);
+            const glyph = font.glyphs.get(1);
+            assert.deepStrictEqual(glyph.path.commands.map(command => [command.type, command.x, command.y]),
+                [['M', 100.5, 0], ['L', 400.25, 0], ['L', 250.75, 700.5], ['Z', undefined, undefined]]);
+            for (const variation of [undefined, { wght: 900 }]) {
+                const pathData = glyph.getPath(0, 0, font.unitsPerEm, { variation }, font).toPathData({ decimalPlaces: 2, optimize: false, flipY: false });
+                assert.strictEqual(pathData, 'M100.50 0L400.25 0L250.75-700.50Z', JSON.stringify(variation));
+            }
+        }
+    });
+
     describe('advance widths', function() {
         // TestCFF1-WidthMismatch.otf (test/generate-cff-width-fonts.py --hmtx-mismatch): each glyph gives
         // its charstring width with another operator (rmoveto, endchar, hmoveto, vmoveto, hstem, hstemhm

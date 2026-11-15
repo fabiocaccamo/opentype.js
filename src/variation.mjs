@@ -1,5 +1,15 @@
 import { VariationProcessor } from './variationprocessor.mjs';
 
+/**
+ * The named instances of an fvar table: none for an fvar table without an instances array (e.g. built in code), like
+ * an fvar table of instanceCount 0
+ * @param {Object} fvar
+ * @returns {Array<Object>}
+ */
+function getNamedInstances(fvar) {
+    return fvar.instances || [];
+}
+
 export class VariationManager {
     constructor(font) {
         this.font = font;
@@ -45,7 +55,7 @@ export class VariationManager {
         let defaultInstanceIndex = this.getInstanceIndex(defaultCoordinates);
         
         if (defaultInstanceIndex < 0) {
-            defaultInstanceIndex = this.fvar().instances.findIndex(instance => instance.name && instance.name.en === 'Regular');
+            defaultInstanceIndex = getNamedInstances(this.fvar()).findIndex(instance => instance.name && instance.name.en === 'Regular');
         }
 
         return defaultInstanceIndex;
@@ -57,7 +67,7 @@ export class VariationManager {
      * @returns {integer} The index of the matching instance or -1 if no match is found.
      */
     getInstanceIndex(coordinates) {
-        return this.fvar().instances.findIndex(instance =>
+        return getNamedInstances(this.fvar()).findIndex(instance =>
             Object.keys(coordinates).every(axis =>
                 instance.coordinates[axis] === coordinates[axis]
             )
@@ -70,7 +80,7 @@ export class VariationManager {
      * @returns {Object} - variation instance or null if the index is invalid.
      */
     getInstance(index) {
-        return this.fvar().instances && this.fvar().instances[index];
+        return getNamedInstances(this.fvar())[index];
     }
 
     /**

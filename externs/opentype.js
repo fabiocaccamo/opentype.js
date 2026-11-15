@@ -310,8 +310,11 @@ opentype.Font.prototype.drawPoints = function(ctx, text, x, y, fontSize, options
 opentype.Font.prototype.drawMetrics = function(ctx, text, x, y, fontSize, options) {};
 
 /**
+ * The English name of a name ID (e.g. 'fontFamily') in the first platform names the font has (Unicode, else Macintosh,
+ * else Windows); undefined when that platform does not have it or the font has no names, e.g. a parsed font without a
+ * name table.
  * @param  {string}
- * @return {string}
+ * @return {string|undefined}
  */
 opentype.Font.prototype.getEnglishName = function(name) {};
 
@@ -337,9 +340,25 @@ opentype.Font.prototype.getEnglishName = function(name) {};
 var NamePlatform;
 
 /**
+ * The names of the font: {} for a font parsed without a name table, or with a name table that failed to parse.
  * @type {{unicode: ?NamePlatform, macintosh: ?NamePlatform, windows: ?NamePlatform}}
  */
 opentype.Font.prototype.names = {};
+
+/**
+ * A table of a parsed font, or a part of a GDEF, GSUB, GPOS, gvar, cvar, HVAR or MVAR table, that failed to parse and
+ * was skipped: the tag of the table, a message and the Error it failed to parse with.
+ * @typedef {{table: string, message: string, error: Error}}
+ */
+var FontWarning;
+
+/**
+ * The optional tables, and the parts of the GDEF, GSUB, GPOS, gvar, cvar, HVAR and MVAR tables, that failed to parse
+ * and were skipped, added by opentype.parse and, for the variation data of a gvar or cvar table, when they are first
+ * read; empty for a font without problems.
+ * @type {Array<FontWarning>}
+ */
+opentype.Font.prototype.warnings = [];
 
 /**
  * Validate
@@ -357,7 +376,8 @@ opentype.Font.prototype.toTables = function() {};
  */
 opentype.Font.prototype.toBuffer = function() {};
 /**
- * Converts a `opentype.Font` into an `ArrayBuffer`
+ * Converts a `opentype.Font` into an `ArrayBuffer`. Throws an Error for a font without the English postScriptName name,
+ * nor the fontFamily and fontSubfamily names to make it from, e.g. a parsed font without a name table.
  * @return {ArrayBuffer}
  */
 opentype.Font.prototype.toArrayBuffer = function() {};
@@ -643,8 +663,9 @@ opentype.Layout.prototype.getLookupTables = function(script, language, feature, 
  * Returns the list of glyph indexes of a coverage table.
  * Format 1: the list is stored raw
  * Format 2: compact list as range records.
+ * A NULL coverage offset (undefined) covers no glyph.
  * @instance
- * @param  {Object} coverageTable
+ * @param  {Object|undefined} coverageTable
  * @return {Array}
  */
 opentype.Layout.prototype.expandCoverage = function(coverageTable) {};
@@ -881,6 +902,14 @@ opentype.loadSync = function(url) {};
  * the font, nor the kerning lookups of Font.getKerningValue, so a change made directly to the objects of these tables
  * applies at the next layout; any value other than a boolean or undefined throws a TypeError. The charstrings of a CFF
  * font and the glyph variations of a gvar table are read from the font data when they are first used.
+ * Throws an Error for a file that is not a supported font file, a truncated font file or table directory, a WOFF table
+ * that fails to decompress, or a font without a head, hhea, maxp, hmtx or cmap table or outlines (glyf and loca, CFF
+ * or CFF2), or with one of them that fails to parse. Any other table that fails to parse is skipped, and so is a GSUB
+ * or GPOS lookup subtable that fails to parse or of a lookup of an unknown type, all the subtables of an extension
+ * lookup whose subtables have not all the same extension lookup type, and a part of a GDEF, HVAR or MVAR table that
+ * fails to parse: the font is parsed without them, with a warning in font.warnings. A font whose GSUB
+ * table has a skipped or NULL subtable, or a NULL offset in a subtable, cannot be written by toArrayBuffer, nor a font
+ * without the English postScriptName name, nor the fontFamily and fontSubfamily names (e.g. without a name table).
  * @param  {ArrayBuffer} buffer
  * @param  {Object=} opt
  * @return {opentype.Font}

@@ -2,6 +2,7 @@ import assert from 'assert';
 import { readFileSync } from 'fs';
 import { parse } from '../src/opentype.mjs';
 import Tokenizer from '../src/tokenizer.mjs';
+import { formatShape, getLookupOffsetField, getLookupSubtableOffsets } from './testutil.mjs';
 import FeatureQuery, { SubstitutionAction } from '../src/features/featureQuery.mjs';
 import applySubstitution, {
     getTokenGlyphIndexes,
@@ -1487,5 +1488,74 @@ describe('applySubstitution.mjs', function() {
                     assert.deepStrictEqual(requiredFont.stringToGlyphIndexes('b', { features: { salt: 2 } }), [6]);
                 });
         });
+    });
+
+    describe('an extension lookup with an undefined subtable', function() {
+        it('applies none of its subtables, like HarfBuzz', function() {
+            // TestAlternateSubstitution-Malformed.ttf (see test/generate-malformed-layout-fonts.py), the extension
+            // subtable of C_ALTERNATES with the extensionLookupType 9, skipped:
+            // hb-shape --no-glyph-names --cluster-level=1 TestAlternateSubstitution-Malformed.ttf -u 0063 --features=cv01
+            // [9=0+500] (TestAlternateSubstitution.ttf: [10=0+500])
+            const font = parse(readFileSync('./test/fonts/TestAlternateSubstitution-Malformed.ttf'));
+            assert.deepStrictEqual(font.tables.gsub.lookups[4].subtables, [undefined]);
+            assert.deepStrictEqual(font.stringToGlyphIndexes('c', { features: { cv01: true } }), [9]);
+        });
+    });
+
+    it('applies no lookup for a NULL lookup offset of the LookupList, like the Null lookup of HarfBuzz', function() {
+        // TestExtensionLookups.ttf (see test/generate-extension-lookups-font.py) with the offset of the GSUB lookup 0
+        // (liga, sub a by c, then sub b by d) in the LookupList set to 0, so that a takes the pos a 50 of kern:
+        // hb-shape --no-glyph-names --cluster-level=1 <font> -u 0061,0062 [1=0+650|2=1+700], -u 0064,0063 [4=0+700|3=1+800]
+        const bytes = new Uint8Array(readFileSync('./test/fonts/TestExtensionLookups.ttf'));
+        new DataView(bytes.buffer).setUint16(getLookupOffsetField(bytes, 'GSUB', 0).offsetField, 0);
+        const font = parse(bytes.buffer);
+        assert.deepStrictEqual(font.warnings, []);
+        assert.strictEqual(font.tables.gsub.lookups[0], undefined);
+        assert.strictEqual(formatShape(font, [0x61, 0x62]), '[1=0+650|2=1+700]');
+        assert.strictEqual(formatShape(font, [0x64, 0x63]), '[4=0+700|3=1+800]');
+    });
+
+    describe('an extension lookup whose subtables have different extension lookup types', function() {
+        // TestExtensionLookups.ttf (see test/generate-extension-lookups-font.py), the GSUB lookup 0 (liga, sub a by c,
+        // then sub b by d) with its subtable 1 patched: HarfBuzz drops an extension lookup whose subtables have not all
+        // the same extensionLookupType (Lookup::sanitize), the type of a NULL subtable and of a subtable of another
+        // format being 0 (Extension::get_type), so a is not substituted and takes the pos a 50 of kern:
+        // hb-shape --no-glyph-names --cluster-level=1 <font> -u 0061,0062 [1=0+650|2=1+700] for each patch below,
+        // [3=0+700|4=1+900] for TestExtensionLookups.ttf. For a subtable offset past the end of the table, HarfBuzz
+        // rejects the whole GSUB table where the fork gives the subtable the type 0 and skips only the lookup: the only
+        // lookup of this GSUB table gives the same output (see position.spec.mjs for a GPOS table that tells them apart)
+        const parsePatchedFont = patchSubtable => {
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestExtensionLookups.ttf'));
+            const view = new DataView(bytes.buffer);
+            const { offsetField, subtableStart } = getLookupSubtableOffsets(bytes, 'GSUB', 0, 1);
+            assert.deepStrictEqual([view.getUint16(subtableStart), view.getUint16(subtableStart + 2)], [1, 1]);
+            patchSubtable(view, offsetField, subtableStart);
+            return parse(bytes.buffer);
+        };
+        const patches = [
+            { name: 'the extensionLookupType 9', patch: (view, offsetField, subtableStart) => view.setUint16(subtableStart + 2, 9), types: '1, 9' },
+            { name: 'the extensionLookupType 2', patch: (view, offsetField, subtableStart) => view.setUint16(subtableStart + 2, 2), types: '1, 2' },
+            { name: 'a NULL subtable offset', patch: (view, offsetField) => view.setUint16(offsetField, 0), types: '1, 0' },
+            { name: 'the format 2', patch: (view, offsetField, subtableStart) => view.setUint16(subtableStart, 2), types: '1, 0' },
+            { name: 'a subtable offset past the end of the table', patch: (view, offsetField) => view.setUint16(offsetField, 65000), types: '1, 0' }
+        ];
+
+        it('substitutes a and b in TestExtensionLookups.ttf', function() {
+            const font = parse(readFileSync('./test/fonts/TestExtensionLookups.ttf'));
+            assert.strictEqual(formatShape(font, [0x61, 0x62]), '[3=0+700|4=1+900]');
+            assert.deepStrictEqual(font.warnings, []);
+        });
+
+        for (const { name, patch, types } of patches) {
+            it('applies none of its subtables, like HarfBuzz, with ' + name, function() {
+                const font = parsePatchedFont(patch);
+                assert.strictEqual(formatShape(font, [0x61, 0x62]), '[1=0+650|2=1+700]');
+                assert.deepStrictEqual(font.tables.gsub.lookups[0].subtables, [undefined, undefined]);
+                assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+                    table: 'GSUB',
+                    message: 'The lookup 0 is skipped: The subtables of an extension lookup must have the same extension lookup type, not ' + types
+                }]);
+            });
+        }
     });
 });

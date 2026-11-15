@@ -2,6 +2,7 @@ import assert  from 'assert';
 import Font from '../src/font.mjs';
 import Glyph from '../src/glyph.mjs';
 import Path from '../src/path.mjs';
+import { itFailsUntilFixed } from './regression/helpers.mjs';
 // import { parse } from '../src/js';
 // import { PaletteManager } from '../src/palettes.mjs';
 // import { readFileSync } from 'fs';
@@ -140,6 +141,107 @@ describe('layers.mjs', function() {
             { "glyphID": 3, "paletteIndex": 2 },
         ]);
 
+    });
+
+    it('gets only the layers of a glyph that are layer records of the COLR table, like HarfBuzz', function() {
+        // a base glyph record whose firstLayerIndex + numLayers is past the 2 layer records: HarfBuzz takes the layers
+        // of a glyph as a sub-array of the layer records, which keeps the ones that exist (COLR::get_glyph_layers)
+        const layersFont = new Font({
+            familyName: 'MyFont',
+            styleName: 'Medium',
+            unitsPerEm: 1000,
+            ascender: 800,
+            descender: -200,
+            glyphs: [colorGlyph, colorGlyphLayer1, colorGlyphLayer2]
+        });
+        layersFont.palettes.add(['#ffaa00', '#99cc00']);
+        layersFont.tables.colr = {
+            version: 0,
+            baseGlyphRecords: [{ glyphID: 0, firstLayerIndex: 1, numLayers: 3 }],
+            layerRecords: [{ glyphID: 1, paletteIndex: 0 }, { glyphID: 2, paletteIndex: 1 }],
+        };
+        assert.deepStrictEqual(layersFont.layers.get(0), [{ glyph: colorGlyphLayer2, paletteIndex: 1 }]);
+        layersFont.tables.colr.baseGlyphRecords[0].firstLayerIndex = 2;
+        assert.deepStrictEqual(layersFont.layers.get(0), []);
+    });
+
+    describe('a glyph with a layer of a glyph id the font has not', function() {
+        // the glyph 0 has 2 layers, the first one of the glyph id 0xFFFF (get gives it the glyph undefined), and the
+        // glyph 4 one layer after them
+        let layersFont;
+
+        beforeEach(function() {
+            layersFont = new Font({
+                familyName: 'MyFont',
+                styleName: 'Medium',
+                unitsPerEm: 1000,
+                ascender: 800,
+                descender: -200,
+                glyphs: [colorGlyph, colorGlyphLayer1, colorGlyphLayer2, colorGlyphLayer3, colorGlyph2]
+            });
+            layersFont.palettes.add(['#ffaa00', '#99cc00']);
+            layersFont.tables.colr = {
+                version: 0,
+                baseGlyphRecords: [{ glyphID: 0, firstLayerIndex: 0, numLayers: 2 }, { glyphID: 4, firstLayerIndex: 2, numLayers: 1 }],
+                layerRecords: [{ glyphID: 0xFFFF, paletteIndex: 0 }, { glyphID: 2, paletteIndex: 1 }, { glyphID: 3, paletteIndex: 0 }],
+            };
+        });
+
+        it('gets the layer with the glyph undefined', function() {
+            assert.deepStrictEqual(layersFont.layers.get(0), [
+                { glyph: undefined, paletteIndex: 0 },
+                { glyph: colorGlyphLayer2, paletteIndex: 1 }
+            ]);
+        });
+
+        itFailsUntilFixed('removes a layer of the glyph, keeping the glyph id of the other one',
+            'remove (src/layers.mjs): reads layer.glyph.index of a layer whose glyph is undefined and throws a TypeError',
+            function() {
+                layersFont.layers.remove(0, 1);
+                assert.deepStrictEqual(layersFont.tables.colr.layerRecords, [{ glyphID: 0xFFFF, paletteIndex: 0 }, { glyphID: 3, paletteIndex: 0 }]);
+            }, TypeError);
+
+        itFailsUntilFixed('sets the palette index of a layer of the glyph, keeping the glyph id of the other one',
+            'setPaletteIndex (src/layers.mjs): reads layer.glyph.index of a layer whose glyph is undefined and throws a TypeError',
+            function() {
+                layersFont.layers.setPaletteIndex(0, 1, 0);
+                assert.deepStrictEqual(layersFont.tables.colr.layerRecords.slice(0, 2), [{ glyphID: 0xFFFF, paletteIndex: 0 }, { glyphID: 2, paletteIndex: 0 }]);
+            }, TypeError);
+
+        itFailsUntilFixed('adds a layer to the glyph, keeping the glyph id of the other ones',
+            'add (src/layers.mjs): reads currentLayers[i].glyph.index of a layer whose glyph is undefined and throws a TypeError',
+            function() {
+                layersFont.layers.add(0, { glyph: 1, paletteIndex: 1 });
+                assert.deepStrictEqual(layersFont.tables.colr.layerRecords.slice(0, 3), [
+                    { glyphID: 0xFFFF, paletteIndex: 0 }, { glyphID: 2, paletteIndex: 1 }, { glyphID: 1, paletteIndex: 1 }
+                ]);
+            }, TypeError);
+    });
+
+    it('removes a layer of a glyph whose layers run past the layer records, the other base glyphs kept', function() {
+        // the glyph 4, the last one of the layer records, with 3 layers of which only 2 are layer records (see get)
+        const layersFont = new Font({
+            familyName: 'MyFont',
+            styleName: 'Medium',
+            unitsPerEm: 1000,
+            ascender: 800,
+            descender: -200,
+            glyphs: [colorGlyph, colorGlyphLayer1, colorGlyphLayer2, colorGlyphLayer3, colorGlyph2]
+        });
+        layersFont.palettes.add(['#ffaa00', '#99cc00']);
+        layersFont.tables.colr = {
+            version: 0,
+            baseGlyphRecords: [{ glyphID: 0, firstLayerIndex: 0, numLayers: 1 }, { glyphID: 4, firstLayerIndex: 1, numLayers: 3 }],
+            layerRecords: [{ glyphID: 1, paletteIndex: 0 }, { glyphID: 2, paletteIndex: 1 }, { glyphID: 3, paletteIndex: 0 }],
+        };
+        layersFont.layers.remove(4, 0);
+        assert.deepStrictEqual(layersFont.tables.colr.baseGlyphRecords, [
+            { glyphID: 0, firstLayerIndex: 0, numLayers: 1 },
+            { glyphID: 4, firstLayerIndex: 1, numLayers: 1 }
+        ]);
+        assert.deepStrictEqual(layersFont.tables.colr.layerRecords, [{ glyphID: 1, paletteIndex: 0 }, { glyphID: 3, paletteIndex: 0 }]);
+        assert.deepStrictEqual(layersFont.layers.get(4), [{ glyph: colorGlyphLayer3, paletteIndex: 0 }]);
+        assert.deepStrictEqual(layersFont.layers.get(0), [{ glyph: colorGlyphLayer1, paletteIndex: 0 }]);
     });
 
 });

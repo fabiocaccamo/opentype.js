@@ -5,7 +5,8 @@ import { getLookupJoinerFlags } from './featureValues.mjs';
 import {
     getLayoutGdefTable, getGdefGlyphClass, getLigatureId, getLigatureComponent, BASE_GLYPH_CLASS, LIGATURE_GLYPH_CLASS,
     MARK_GLYPH_CLASS, getCachedLayoutValue, createIgnorableMatching, AUTO_JOINER_FLAGS, getSubtablesFirstGlyphCoverages,
-    getSubtablesFirstGlyphDigest, mayGlyphDigestHave, createLookupFirstGlyphFilter, getLookupFilterGlyphDigest
+    getSubtablesFirstGlyphDigest, mayGlyphDigestHave, createLookupFirstGlyphFilter, getLookupFilterGlyphDigest,
+    getLookupTableSubtables
 } from '../layout.mjs';
 
 /**
@@ -452,13 +453,14 @@ function applySubstitution(action, glyphSequence, position) {
 
 /**
  * Get the subtables of a lookup the coverage tables of their first glyph are read from (see
- * getSubtablesFirstGlyphCoverages in layout.mjs): the subtables its extension subtables wrap for an extension lookup
+ * getSubtablesFirstGlyphCoverages in layout.mjs): the subtables its extension subtables wrap for an extension lookup,
+ * without the undefined subtables (see getLookupTableSubtables in layout.mjs)
  * @param {any} lookupTable
- * @returns {Array<any|undefined>}
+ * @returns {Array<any>}
  */
 function getLookupFirstGlyphSubtables(lookupTable) {
-    return lookupTable.lookupType === 7 ?
-        lookupTable.subtables.map(subtable => subtable.extension) : lookupTable.subtables;
+    const subtables = getLookupTableSubtables(lookupTable);
+    return lookupTable.lookupType === 7 ? subtables.map(subtable => subtable.extension) : subtables;
 }
 
 /**

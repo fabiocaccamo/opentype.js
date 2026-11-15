@@ -1,5 +1,6 @@
 import assert from 'assert';
-import { parse } from '../../src/opentype.mjs';
+import { parse, removeTables } from '../../src/opentype.mjs';
+import { getTableRecordOffset } from '../testutil.mjs';
 import { readFileSync } from 'fs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
@@ -318,6 +319,286 @@ describe('tables/gvar.mjs', function() {
         expectedPoints.forEach(([x, y], index) => {
             assert.ok(Math.abs(points[index].x - x) <= 1, `point ${index} x: ${points[index].x} != ${x}`);
             assert.ok(Math.abs(points[index].y - y) <= 1, `point ${index} y: ${points[index].y} != ${y}`);
+        });
+    });
+
+    it('skips the variation data of a glyph that fails to parse when it is first read, with a warning', function() {
+        // TestGVAROne.ttf with the glyphVariationDataArrayOffset of its gvar table (at 16 in the table) set to the
+        // length of the file: the variation data of each glyph, read when the glyph is first varied, starts past the
+        // end of the file; HarfBuzz reads such data as no variation data (gvar::get_glyph_var_data_bytes)
+        const bytes = new Uint8Array(readFileSync('./test/fonts/TestGVAROne.ttf'));
+        const view = new DataView(bytes.buffer);
+        view.setUint32(view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8) + 16, bytes.length);
+        for (const options of [undefined, { lowMemory: true }]) {
+            const optionsName = JSON.stringify(options);
+            const font = parse(bytes.buffer, options);
+            const fontWithoutGvar = parse(removeTables(readFileSync('./test/fonts/TestGVAROne.ttf'), ['gvar']), options);
+            assert.deepStrictEqual(font.warnings, [], optionsName);
+            const variation = { wght: 700 };
+            const path = font.glyphs.get(13).getPath(0, 0, 1000, { variation }, font).toPathData(3);
+            assert.strictEqual(path, fontWithoutGvar.glyphs.get(13).getPath(0, 0, 1000, { variation }, fontWithoutGvar).toPathData(3), optionsName);
+            assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+                table: 'gvar',
+                message: 'The variation data of the glyph 13 is skipped: Start offset 27964 is outside the bounds of the buffer'
+            }], optionsName);
+            assert.ok(font.warnings[0].error instanceof RangeError, optionsName);
+            // the variation data is read once
+            font.glyphs.get(13).getPath(0, 0, 1000, { variation }, font);
+            assert.strictEqual(font.warnings.length, 1, optionsName);
+        }
+    });
+
+    it('reads the variation data of a glyph from its bytes only, and does not vary the glyph where a tuple whose data run past them applies, with a warning', function() {
+        // TestGVAROne.ttf (one axis, wght 300 400 700, two tuples by glyph: the minimum then the maximum) with the
+        // offset of the end of the GlyphVariationData of the glyph 13 (uni9EAF, the last offset of the long offsets at
+        // 20 in the table) 10 bytes lower, so that the data of its tuple 1 run past it. HarfBuzz reads the data of a
+        // glyph from its bytes only (gvar::get_glyph_var_data_bytes) and the data of a tuple only where it is active
+        // (gvar::apply_deltas_to_points): where the tuple 1 is inactive the tuple 0 varies the glyph, where it is active
+        // the glyph is not varied:
+        // hb-shape --no-glyph-names --show-extents --variations=wght=300 <font> -u 9EAF [13=0+1000<47,801,871,-903>],
+        // the same as TestGVAROne.ttf; --variations=wght=700 [13=0+1000<31,809,895,-899>], the extents of the default
+        // instance (--variations=wght=400), where TestGVAROne.ttf gives [13=0+1000<39,809,899,-922>]
+        const bytes = new Uint8Array(readFileSync('./test/fonts/TestGVAROne.ttf'));
+        const view = new DataView(bytes.buffer);
+        const gvarOffset = view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8);
+        const glyphCount = view.getUint16(gvarOffset + 12);
+        assert.strictEqual(view.getUint16(gvarOffset + 14) & 1, 1, 'long offsets');
+        const lastOffsetField = gvarOffset + 20 + 4 * glyphCount;
+        view.setUint32(lastOffsetField, view.getUint32(lastOffsetField) - 10);
+        const font = parse(bytes.buffer);
+        // the bounding box of the outline of the glyph 13 at a font size of one em, the y axis going down
+        const getExtents = wght => {
+            const box = font.glyphs.get(13).getPath(0, 0, font.unitsPerEm, { variation: { wght } }, font).getBoundingBox();
+            return [box.x1, -box.y1, box.x2 - box.x1, box.y1 - box.y2].map(Math.round);
+        };
+        assert.strictEqual(font.unitsPerEm, 1000);
+        assert.deepStrictEqual(getExtents(300), [47, 801, 871, -903]);
+        assert.deepStrictEqual(font.warnings, []);
+        assert.deepStrictEqual(getExtents(700), [31, 809, 895, -899]);
+        assert.deepStrictEqual(getExtents(400), [31, 809, 895, -899]);
+        assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+            table: 'gvar',
+            message: 'The glyph 13 is not varied where its tuple 1 applies: The serialized data of the tuple end past the end of the data'
+        }]);
+        assert.ok(font.warnings[0].error instanceof RangeError);
+    });
+
+    describe('of a glyph with a tuple whose data fail to parse, of a font with two axes', function() {
+        // TestGVARBrokenTuple.ttf, generated by test/generate-gvar-broken-tuple-font.py: the glyph 1 (a) has a tuple
+        // at wght max with all the points and a tuple at wdth max whose private point numbers run past the end of the
+        // variation data of the glyph. HarfBuzz reads the data of a tuple only where it is active, and does not vary the
+        // glyph, its outline nor its advance width, where an active tuple fails to read (gvar::apply_deltas_to_points):
+        // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=100 <font> -u 0061 [1=0+550<100,600,300,-600>]
+        // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=200 <font> -u 0061 [1=0+500<100,500,300,-500>]
+        const getShapedGlyph = (font, variation) => {
+            const box = font.glyphs.get(1).getPath(0, 0, font.unitsPerEm, { variation }, font).getBoundingBox();
+            return {
+                advance: font.getAdvanceWidth('a', font.unitsPerEm, { variation }),
+                extents: [box.x1, -box.y1, box.x2 - box.x1, box.y1 - box.y2].map(Math.round)
+            };
+        };
+
+        for (const options of [undefined, { lowMemory: true }]) {
+            const optionsName = options ? ' with lowMemory' : '';
+
+            it('varies the glyph by its other tuples where the broken tuple is inactive' + optionsName, function() {
+                const font = loadSync('./test/fonts/TestGVARBrokenTuple.ttf', options);
+                assert.strictEqual(font.unitsPerEm, 1000);
+                assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 100 }), { advance: 550, extents: [100, 600, 300, -600] });
+                assert.deepStrictEqual(font.warnings, []);
+            });
+
+            it('does not vary the glyph where the broken tuple is active, with a warning' + optionsName, function() {
+                const font = loadSync('./test/fonts/TestGVARBrokenTuple.ttf', options);
+                assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 200 }), { advance: 500, extents: [100, 500, 300, -500] });
+                assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+                    table: 'gvar',
+                    message: 'The glyph 1 is not varied where its tuple 1 applies: The serialized data of the tuple end past the end of the data'
+                }]);
+                assert.ok(font.warnings[0].error instanceof RangeError);
+                // the data of the tuple are read once
+                assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 100 }), { advance: 550, extents: [100, 600, 300, -600] });
+                assert.strictEqual(font.warnings.length, 1);
+            });
+        }
+
+        it('reads a tuple whose shared tuple index is past the shared tuples as inactive, like HarfBuzz', function() {
+            // TestGVARBrokenTuple.ttf (no shared tuples) with the tupleIndex of the tuple 1 of the glyph 1 (its header at 38
+            // in the table, after the 4 bytes of the GlyphVariationData of the glyph at 26 and the 8 bytes of the header of
+            // the tuple 0) set from 0xA000 (an embedded peak, private point numbers) to 0x2005 (private point numbers, the
+            // shared tuple 5): HarfBuzz gives the scalar 0 to a tuple whose peak is not a shared tuple
+            // (TupleVariationHeader::calculate_scalar), so its data are not read and the tuple 0 still varies the glyph:
+            // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=200 <font> -u 0061 [1=0+550<100,600,300,-600>]
+            // hb-shape --no-glyph-names --show-extents --variations=wght=400,wdth=200 <font> -u 0061 [1=0+500<100,500,300,-500>]
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestGVARBrokenTuple.ttf'));
+            const view = new DataView(bytes.buffer);
+            const gvarOffset = view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8);
+            assert.strictEqual(view.getUint16(gvarOffset + 6), 0, 'sharedTupleCount');
+            assert.strictEqual(view.getUint16(gvarOffset + 38 + 2), 0xA000);
+            view.setUint16(gvarOffset + 38 + 2, 0x2005);
+            const font = parse(bytes.buffer);
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 200 }), { advance: 550, extents: [100, 600, 300, -600] });
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 400, wdth: 200 }), { advance: 500, extents: [100, 500, 300, -500] });
+            assert.deepStrictEqual(font.shape('a', { variation: { wght: 900, wdth: 200 } }).map(({ xAdvance }) => xAdvance), [550]);
+            assert.deepStrictEqual(font.warnings, []);
+        });
+
+        it('keeps the tuples before the first tuple variation header that does not fit in the data, like HarfBuzz', function() {
+            // TestGVARBrokenTuple.ttf with the high byte of the tupleVariationCount of the glyph 1 (at 26 in the table)
+            // set from 0x80 to 0xFF: a count of 3842 tuples (0xF02) for the 2 headers of the glyph. HarfBuzz reads the
+            // headers up to the first one that does not fit in the data of the glyph (tuple_iterator_t), the bytes after
+            // the 2 headers read as headers too, and keeps varying the glyph by them (fontTools rejects the font):
+            // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=100 <font> -u 0061 [1=0+550<100,600,300,-600>]
+            // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=50 <font> -u 0061 [1=0+550<100,600,300,-600>]
+            // hb-shape --no-glyph-names --show-extents --variations=wght=600,wdth=150 <font> -u 0061 [1=0+500<100,500,300,-500>]
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestGVARBrokenTuple.ttf'));
+            const view = new DataView(bytes.buffer);
+            const gvarOffset = view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8);
+            assert.strictEqual(view.getUint16(gvarOffset + 26), 0x8002);
+            bytes[gvarOffset + 26] = 0xFF;
+            const font = parse(bytes.buffer);
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 100 }), { advance: 550, extents: [100, 600, 300, -600] });
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 50 }), { advance: 550, extents: [100, 600, 300, -600] });
+            assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+                table: 'gvar',
+                message: 'The tuples of the glyph 1 from its tuple 5 are skipped: Offset is outside the bounds of the DataView'
+            }]);
+            assert.ok(font.warnings[0].error instanceof RangeError);
+            assert.strictEqual(font.tables.gvar.glyphVariations[1].headers.length, 5);
+            // where the tuple 1, whose data run past the data of the glyph, is active, the glyph is not varied
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 600, wdth: 150 }), { advance: 500, extents: [100, 500, 300, -500] });
+        });
+
+        it('skips the variation data of a glyph whose shared point numbers fail to parse after a header that does not fit, with its warning only', function() {
+            // TestGVARBrokenTuple.ttf with the tupleVariationCount of the glyph 1 (at 26 in the table) set to 0x8FFF
+            // (shared point numbers, 4095 tuples) and its dataOffset (at 28) to 0xFFF0: a header past the 2 headers of the
+            // glyph does not fit, and the shared point numbers at the dataOffset are past the end of the data of the
+            // glyph, so its variation data are skipped and the tuples before the header that does not fit are not kept:
+            // HarfBuzz does not vary a glyph whose shared point numbers fail to read (gvar::apply_deltas_to_points):
+            // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=100 <font> -u 0061 [1=0+500<100,500,300,-500>]
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestGVARBrokenTuple.ttf'));
+            const view = new DataView(bytes.buffer);
+            const gvarOffset = view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8);
+            assert.strictEqual(view.getUint16(gvarOffset + 26), 0x8002);
+            view.setUint16(gvarOffset + 26, 0x8FFF);
+            view.setUint16(gvarOffset + 28, 0xFFF0);
+            const font = parse(bytes.buffer);
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 100 }), { advance: 500, extents: [100, 500, 300, -500] });
+            assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+                table: 'gvar',
+                message: 'The variation data of the glyph 1 is skipped: Offset is outside the bounds of the DataView'
+            }]);
+            assert.strictEqual(font.tables.gvar.glyphVariations[1], undefined);
+        });
+
+        // TestGVARBrokenTuple.ttf with the axisCount of the gvar table (at 4) set from 2, the axes of the fvar table, to
+        // another count: HarfBuzz reads the tuples with the axisCount of the gvar table and an axis past the
+        // coordinates of the font at 0 (TupleVariationHeader::calculate_scalar)
+        const parseFontWithGvarAxisCount = axisCount => {
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestGVARBrokenTuple.ttf'));
+            const view = new DataView(bytes.buffer);
+            const gvarOffset = view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8);
+            assert.strictEqual(view.getUint16(gvarOffset + 4), 2);
+            view.setUint16(gvarOffset + 4, axisCount);
+            return parse(bytes.buffer);
+        };
+
+        it('reads the tuples of a gvar axisCount below the axes of the fvar table, like HarfBuzz', function() {
+            // with 1 axis the tuple 0 is the peak wght 1 and the bytes after it read as an inactive tuple:
+            // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=100 <font> -u 0061 [1=0+550<100,600,300,-600>]
+            // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=200 <font> -u 0061 [1=0+550<100,600,300,-600>]
+            // hb-shape --no-glyph-names --show-extents --variations=wght=650,wdth=150 <font> -u 0061 [1=0+525<100,550,300,-550>]
+            const font = parseFontWithGvarAxisCount(1);
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 100 }), { advance: 550, extents: [100, 600, 300, -600] });
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 200 }), { advance: 550, extents: [100, 600, 300, -600] });
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 650, wdth: 150 }), { advance: 525, extents: [100, 550, 300, -550] });
+            assert.deepStrictEqual(font.shape('a', { variation: { wght: 900, wdth: 200 } }).map(({ xAdvance }) => xAdvance), [550]);
+            assert.deepStrictEqual(font.warnings, []);
+        });
+
+        it('reads the tuples of a gvar axisCount above the axes of the fvar table, like HarfBuzz', function() {
+            // with 3 axes the peak of the tuple 0 has a third axis that is not 0, past the 2 coordinates of the font, so
+            // the tuple is inactive, and so are the bytes after it read as a tuple:
+            // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=100 <font> -u 0061 [1=0+500<100,500,300,-500>]
+            // hb-shape --no-glyph-names --show-extents --variations=wght=900,wdth=200 <font> -u 0061 [1=0+500<100,500,300,-500>]
+            const font = parseFontWithGvarAxisCount(3);
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 100 }), { advance: 500, extents: [100, 500, 300, -500] });
+            assert.deepStrictEqual(getShapedGlyph(font, { wght: 900, wdth: 200 }), { advance: 500, extents: [100, 500, 300, -500] });
+            assert.deepStrictEqual(font.warnings, []);
+        });
+    });
+
+    it('skips the variation data of a glyph whose end offset is below its start offset, with a warning', function() {
+        // TestGVAROne.ttf with the offset of the end of the GlyphVariationData of the glyph 13 (the last offset of the
+        // long offsets at 20 in the table) set 4 bytes below its start offset: HarfBuzz reads the data of a glyph whose
+        // end offset is below its start offset as no variation data (gvar::get_glyph_var_data_bytes), fontTools as no
+        // tuple (TTFont(path)['gvar'].variations['uni9EAF'] is []):
+        // hb-shape --no-glyph-names --show-extents --variations=wght=300 <font> -u 9EAF [13=0+1000<31,809,895,-899>]
+        // hb-shape --no-glyph-names --show-extents --variations=wght=700 <font> -u 9EAF [13=0+1000<31,809,895,-899>]
+        const bytes = new Uint8Array(readFileSync('./test/fonts/TestGVAROne.ttf'));
+        const view = new DataView(bytes.buffer);
+        const gvarOffset = view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8);
+        const glyphCount = view.getUint16(gvarOffset + 12);
+        assert.strictEqual(glyphCount, 14);
+        assert.strictEqual(view.getUint16(gvarOffset + 14) & 1, 1, 'long offsets');
+        const lastOffsetField = gvarOffset + 20 + 4 * glyphCount;
+        view.setUint32(lastOffsetField, view.getUint32(lastOffsetField - 4) - 4);
+        const font = parse(bytes.buffer);
+        const getExtents = wght => {
+            const box = font.glyphs.get(13).getPath(0, 0, font.unitsPerEm, { variation: { wght } }, font).getBoundingBox();
+            return [box.x1, -box.y1, box.x2 - box.x1, box.y1 - box.y2].map(Math.round);
+        };
+        assert.deepStrictEqual(font.warnings, []);
+        assert.deepStrictEqual(getExtents(300), [31, 809, 895, -899]);
+        assert.deepStrictEqual(getExtents(700), [31, 809, 895, -899]);
+        assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+            table: 'gvar',
+            message: 'The variation data of the glyph 13 is skipped: Invalid DataView length -4'
+        }]);
+        assert.ok(font.warnings[0].error instanceof RangeError);
+    });
+
+    describe('of a patched TestGVAROne.ttf', function() {
+        // TestGVAROne.ttf (one axis, wght 300 400 700, two shared tuples) with a field of the header of its gvar table
+        // set to a value; the extents of the glyph 13 (uni9EAF), the y axis going down, as hb-shape --show-extents
+        const parsePatchedFont = (fieldOffset, setField) => {
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestGVAROne.ttf'));
+            const view = new DataView(bytes.buffer);
+            setField(view, view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8) + fieldOffset);
+            return parse(bytes.buffer);
+        };
+        const getExtents = (font, wght) => {
+            const box = font.glyphs.get(13).getPath(0, 0, font.unitsPerEm, { variation: { wght } }, font).getBoundingBox();
+            return [box.x1, -box.y1, box.x2 - box.x1, box.y1 - box.y2].map(Math.round);
+        };
+
+        it('reads the shared tuples of a sharedTuplesOffset 0 at the start of the table, like HarfBuzz', function() {
+            // the sharedTuplesOffset (at 8) set to 0: HarfBuzz reads this offset as not nullable (NNOffset32To), so the
+            // two shared tuples are the first 4 bytes of the table, the version 1.0 (peaks 1/16384 and 0): the tuple of
+            // the peak 0 applies everywhere, hb-shape --no-glyph-names --show-extents --variations=wght=300 (500, 700)
+            // <font> -u 9EAF [13=0+1000<39,809,899,-922>] at the 3 coordinates, where TestGVAROne.ttf gives
+            // <47,801,871,-903> at wght 300 and <39,809,899,-922> at wght 700
+            const font = parsePatchedFont(8, (view, fieldOffset) => view.setUint32(fieldOffset, 0));
+            assert.deepStrictEqual(font.tables.gvar.sharedTuples, [[1 / 16384], [0]]);
+            for (const wght of [300, 500, 700]) {
+                assert.deepStrictEqual(getExtents(font, wght), [39, 809, 899, -922], String(wght));
+                assert.strictEqual(font.getAdvanceWidth('\u9EAF', 1000, { variation: { wght } }), 1000, String(wght));
+            }
+            assert.deepStrictEqual(font.warnings, []);
+            assert.deepStrictEqual(getExtents(fonts.gvarTest1, 300), [47, 801, 871, -903]);
+        });
+
+        it('skips a table of another major version, like HarfBuzz', function() {
+            // the majorVersion (at 0) set to 2: HarfBuzz does not read the table (gvar::sanitize_shallow), the glyph is
+            // not varied, hb-shape --no-glyph-names --show-extents --variations=wght=700 <font> -u 9EAF
+            // [13=0+1000<31,809,895,-899>], the extents of the default instance
+            const font = parsePatchedFont(0, (view, fieldOffset) => view.setUint16(fieldOffset, 2));
+            assert.deepStrictEqual(font.warnings.map(({ table, message }) => ({ table, message })), [{
+                table: 'gvar',
+                message: 'The table is skipped: Unsupported gvar table version 2.0'
+            }]);
+            assert.strictEqual(font.tables.gvar, undefined);
+            assert.deepStrictEqual(getExtents(font, 700), [31, 809, 895, -899]);
         });
     });
 });

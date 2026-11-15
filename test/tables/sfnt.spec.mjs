@@ -158,6 +158,20 @@ describe('tables/sfnt.mjs', function () {
             assert.deepEqual(parsedNameTable.windows.preferredSubfamily, { en: preferredSubfamily });
         });
 
+        it('throws an error for a font without the English postScriptName name, nor the fontFamily and fontSubfamily names', ()=>{
+            const message = 'A font without the English postScriptName name, nor the fontFamily and fontSubfamily names to make it from (e.g. a parsed font without a name table), cannot be written.';
+            for (const names of [{}, { windows: { fontFamily: { en: 'My Family' } } }, { windows: { fontSubfamily: { en: 'Bold' } } }]) {
+                font.names = names;
+                assert.throws(() => sfnt.fontToTable(font), { name: 'Error', message }, JSON.stringify(names));
+            }
+            // with the postScriptName name only, or with both the fontFamily and fontSubfamily names, the font is written
+            font.names = { windows: { postScriptName: { en: 'MyFamily-Bold' } } };
+            assert.strictEqual(sfnt.fontToTable(font).tableName, 'sfnt');
+            font.names = { windows: { fontFamily: { en: 'My Family' }, fontSubfamily: { en: 'Bold' } } };
+            const nameTable = sfnt.fontToTable(font).tables.find(table => table.tableName === 'name');
+            assert.deepStrictEqual(encodeAndParseTable(nameTable, name.parse).windows.postScriptName, { en: 'MyFamily-Bold' });
+        });
+
         it('writes the hmtx advances of a CFF font, not the widths of its charstrings, once the outlines are read', ()=>{
             // TestCFF1-WidthMismatch.otf: the hmtx advances of A and V differ from the widths of their charstrings
             // python -c "from fontTools.ttLib import TTFont; font = TTFont('TestCFF1-WidthMismatch.otf'); print([font['hmtx'][name][0] for name in font.getGlyphOrder()])"

@@ -5,7 +5,7 @@
 import {
     getCoverageIndex, getLayoutGdefTable, isGlyphIgnoredByLookup, matchGlyphSequence, matchesGlyphIndex,
     getRequiredFeatureIndex, matchSequenceContext, matchChainedSequenceContext, getCachedLayoutValue,
-    createIgnorableMatching, NO_IGNORABLE_MATCHING
+    createIgnorableMatching, NO_IGNORABLE_MATCHING, getLookupTableSubtables
 } from '../layout.mjs';
 import { DEFAULT_IGNORABLE_TYPES } from '../char.mjs';
 import { warnOncePerFont } from '../util.mjs';
@@ -108,7 +108,8 @@ function singleSubstitutionFormat2(glyphIndex, subtable) {
  * Handle alternate substitution - format 1
  * @param {number} glyphIndex glyph index
  * @param {any} subtable subtable
- * @returns {number[]|null} the alternates of the glyph, null if the subtable does not cover it
+ * @returns {number[]|null|undefined} the alternates of the glyph, null if the subtable does not cover it, undefined for
+ * a NULL AlternateSet offset, which has no alternate like the empty AlternateSet of HarfBuzz
  */
 function alternateSubstitutionFormat1(glyphIndex, subtable) {
     const alternateSetIndex = lookupCoverage(glyphIndex, subtable.coverage);
@@ -393,12 +394,18 @@ function contextualSubstitution(contextParams, subtable, lookupTable, matchSubta
  */
 function ligatureSubstitutionFormat1(contextParams, subtable, lookupTable, ignorableMatching) {
     const ligatureSetIndex = lookupCoverage(contextParams.current, subtable.coverage);
-    if (ligatureSetIndex === -1) {
+    const ligatureSet = ligatureSetIndex === -1 ? undefined : subtable.ligatureSets[ligatureSetIndex];
+    // like HarfBuzz, a NULL LigatureSet offset (undefined) is an empty ligature set
+    if (!ligatureSet) {
         return null;
     }
     const gdef = getLayoutGdefTable(this.font);
     // the components are in the order of the text
-    for (const ligature of subtable.ligatureSets[ligatureSetIndex]) {
+    for (const ligature of ligatureSet) {
+        // like HarfBuzz, a NULL Ligature offset (undefined) is a ligature without components, which matches nothing
+        if (!ligature) {
+            continue;
+        }
         const componentPositions = matchGlyphSequence(
             gdef, lookupTable, contextParams.context, contextParams.index, 1,
             { items: ligature.components, matchesItem: matchesGlyphIndex }, ignorableMatching.isSkippedInInput
@@ -417,11 +424,13 @@ function ligatureSubstitutionFormat1(contextParams, subtable, lookupTable, ignor
  * Handle decomposition substitution - format 1
  * @param {number} glyphIndex glyph index
  * @param {any} subtable subtable
+ * @returns {number[]|null} the sequence that replaces the glyph, null if the subtable does not cover it; like
+ * HarfBuzz, a NULL Sequence offset (undefined) is an empty sequence, which deletes the glyph
  */
 function decompositionSubstitutionFormat1(glyphIndex, subtable) {
     let substituteIndex = lookupCoverage(glyphIndex, subtable.coverage);
     if (substituteIndex === -1) return null;
-    return subtable.sequences[substituteIndex];
+    return subtable.sequences[substituteIndex] || [];
 }
 
 /**
@@ -782,11 +791,11 @@ FeatureQuery.prototype.lookupSubstitution = function (
 };
 
 /**
- * Get lookup table subtables
+ * Get lookup table subtables, without the undefined ones (see getLookupTableSubtables in layout.mjs)
  * @param {any} lookupTable lookup table
  */
 FeatureQuery.prototype.getLookupSubtables = function (lookupTable) {
-    return lookupTable.subtables || null;
+    return lookupTable.subtables ? getLookupTableSubtables(lookupTable) : null;
 };
 
 /**

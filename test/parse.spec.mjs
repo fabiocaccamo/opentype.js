@@ -1,6 +1,6 @@
 import assert from 'assert';
 import { unhex } from './testutil.mjs';
-import { Parser } from '../src/parse.mjs';
+import { Parser, createSkippablePartParser, getTableView, isDeviceTableInData, parseSkippableStruct, throwError } from '../src/parse.mjs';
 
 describe('parse.mjs', function() {
     // interpret hex as signed integer
@@ -124,6 +124,18 @@ describe('parse.mjs', function() {
                 [{ a: 0x12, b: 0x3456 }, { a: 0x78, b: 0x9abc }],
                 [{ a: 0xde, b: 0xf012 }]
             ]);
+        });
+
+        it('reads a NULL offset to a list or to an item as undefined', function() {
+            // like a LigatureSet (list 1) whose first Ligature offset is NULL, and a NULL LigatureSet (list 2): the item
+            // is not read from the bytes of its list
+            const data = '0002 0006 0000' +                   // 2 lists, the second one NULL
+                '0002 0000 0006 12 34 56';                  // list 1: a NULL item, then an item
+            const p = new Parser(unhex(data), 0);
+            function parseRecord() {
+                return { a: p.parseByte(), b: p.parseUShort() };
+            }
+            assert.deepStrictEqual(p.parseListOfLists(parseRecord), [[undefined, { a: 0x12, b: 0x3456 }], undefined]);
         });
     });
 
@@ -270,6 +282,17 @@ describe('parse.mjs', function() {
             ]);
         });
 
+        it('reads a NULL Feature offset as a Feature table without lookups, like the Null Feature of HarfBuzz', function() {
+            const data = '0004 0000' +                  // table offset + filler
+                '0002 6B65726E 0000 6C696761 000E' +    // feature list: kern with a NULL Feature offset, liga
+                '0000 0001 0003';                       // liga feature
+            const p = new Parser(unhex(data), 0);
+            assert.deepStrictEqual(p.parseFeatureList(), [
+                { tag: 'kern', feature: { featureParams: 0, lookupListIndexes: [] } },
+                { tag: 'liga', feature: { featureParams: 0, lookupListIndexes: [3] } }
+            ]);
+        });
+
     describe('parseLookupList', function() {
         it('should parse a LookupList table', function() {
             // https://www.microsoft.com/typography/OTSPEC/chapter2.htm Example 4
@@ -289,6 +312,208 @@ describe('parse.mjs', function() {
                 { lookupType: 4, lookupFlag: 0x000c, subtables: [0x9abc], markFilteringSet: undefined },
             ]);
             assert.equal(p.relativeOffset, 2);
+        });
+
+        describe('of malformed lookups', function() {
+            // a lookup list of three lookups: a NULL lookup offset, a lookup of type 1 with a NULL subtable offset and
+            // the subtables 0x1234 and 0x0BAD (which its parser rejects), a lookup of type 2 with the subtable 0x0BAD
+            const data = '0004 0000' +                    // table offset + filler
+                '0003 0000 0008 0018' +                 // lookup list
+                '0001 0000 0003 0000 000C 000E' +       // lookup of type 1
+                '1234 0BAD' +
+                '0002 0000 0001 0008 0BAD';             // lookup of type 2
+            const parseSubtable = function() {
+                const value = this.parseUShort();
+                if (value === 0x0BAD) {
+                    throw new Error('bad subtable');
+                }
+                return value;
+            };
+            const lookupTableParsers = [undefined, parseSubtable, parseSubtable];
+
+            it('reads a NULL lookup or subtable offset and a subtable that fails to parse as undefined', function() {
+                const errors = [];
+                const lookups = new Parser(unhex(data), 0).parseLookupList(lookupTableParsers, (error, lookupIndex, subtableIndex) => {
+                    assert.ok(error instanceof Error);
+                    errors.push([error.message, lookupIndex, subtableIndex]);
+                });
+                assert.deepStrictEqual(lookups, [
+                    undefined,
+                    { lookupType: 1, lookupFlag: 0, subtables: [undefined, 0x1234, undefined], markFilteringSet: undefined },
+                    { lookupType: 2, lookupFlag: 0, subtables: [undefined], markFilteringSet: undefined }
+                ]);
+                assert.deepStrictEqual(errors, [['bad subtable', 1, 2], ['bad subtable', 2, 0]]);
+            });
+
+            it('throws the error of a subtable that fails to parse without a callback', function() {
+                assert.throws(() => new Parser(unhex(data), 0).parseLookupList(lookupTableParsers), /bad subtable/);
+            });
+
+            it('reads the subtables of a lookup type without a parser as subtables that fail to parse, like HarfBuzz', function() {
+                // HarfBuzz ignores a lookup of an unknown type (Lookup::dispatch): it keeps its type and applies nothing
+                const errors = [];
+                const lookups = new Parser(unhex(data), 0).parseLookupList([undefined, parseSubtable], (error, lookupIndex, subtableIndex) => {
+                    errors.push([error.message, lookupIndex, subtableIndex]);
+                });
+                assert.deepStrictEqual(lookups[2], { lookupType: 2, lookupFlag: 0, subtables: [undefined], markFilteringSet: undefined });
+                assert.deepStrictEqual(errors, [['bad subtable', 1, 2], ['GPOS/GSUB lookup type 2 unknown.', 2, 0]]);
+                assert.throws(() => new Parser(unhex(data), 0).parseLookupList([undefined, value => value]),
+                    /GPOS\/GSUB lookup type 2 unknown./);
+            });
+        });
+
+        describe('of extension lookups', function() {
+            // four lookups of type 7, the extension lookup type given to parseLookupList, whose subtables are an
+            // Extension format (1) and an extensionLookupType: two subtables of type 1; a subtable of type 1 and one of
+            // type 9; a subtable of type 1 and a NULL subtable; a NULL subtable, a subtable of format 2 and a subtable
+            // past the end of the data, which HarfBuzz all reads as of type 0 (Extension::get_type)
+            const data = '0004 0000' +                    // table offset + filler
+                '0004 000A 001C 002E 003C' +            // lookup list
+                '0007 0000 0002 000A 000E 0001 0001 0001 0001' +
+                '0007 0000 0002 000A 000E 0001 0001 0001 0009' +
+                '0007 0000 0002 000A 0000 0001 0001' +
+                '0007 0000 0003 0000 000C 0FFF 0002 0001';
+            const parseExtensionHeader = function() {
+                return [this.parseUShort(), this.parseUShort()];
+            };
+            const lookupTableParsers = [undefined, undefined, undefined, undefined, undefined, undefined, undefined, parseExtensionHeader];
+            const parseLookups = extensionLookupType => {
+                const errors = [];
+                const lookups = new Parser(unhex(data), 0).parseLookupList(lookupTableParsers, (error, lookupIndex, subtableIndex) => {
+                    errors.push([error.message, lookupIndex, subtableIndex]);
+                }, extensionLookupType);
+                return { subtables: lookups.map(lookup => lookup.subtables), errors };
+            };
+
+            it('skips the subtables of an extension lookup whose subtables have different extension lookup types, like HarfBuzz', function() {
+                // HarfBuzz drops such a lookup (Lookup::sanitize), whose subtables are then not parsed
+                const { subtables, errors } = parseLookups(7);
+                assert.deepStrictEqual(subtables, [[[1, 1], [1, 1]], [undefined, undefined], [undefined, undefined], [undefined, [2, 1], undefined]]);
+                assert.deepStrictEqual(errors, [
+                    ['The subtables of an extension lookup must have the same extension lookup type, not 1, 9', 1, undefined],
+                    ['The subtables of an extension lookup must have the same extension lookup type, not 1, 0', 2, undefined],
+                    ['Offset is outside the bounds of the DataView', 3, 2]
+                ]);
+                assert.throws(() => new Parser(unhex(data), 0).parseLookupList(lookupTableParsers, undefined, 7),
+                    /The subtables of an extension lookup must have the same extension lookup type, not 1, 9/);
+            });
+
+            it('does not compare the subtables of the lookups of another type than the extension lookup type', function() {
+                const { subtables, errors } = parseLookups(9);
+                assert.deepStrictEqual(subtables, [[[1, 1], [1, 1]], [[1, 1], [1, 9]], [[1, 1], undefined], [undefined, [2, 1], undefined]]);
+                assert.deepStrictEqual(errors, [['Offset is outside the bounds of the DataView', 3, 2]]);
+            });
+        });
+    });
+
+    describe('parseTupleVariationStore', function() {
+        // a cvar table of one axis: its version, a tupleVariationCount of 0x8002 (shared point numbers, 2 tuples), a
+        // dataOffset, the header of the tuple 0 (variationDataSize 2, an embedded peak of 0.25), and the header of the
+        // tuple 1 does not fit in the data
+        const parseStore = data => {
+            const errors = [];
+            const store = new Parser(unhex(data), 0).parseTupleVariationStore(0, 1, 'cvar', [0], undefined,
+                (error, tupleIndex, isHeaderError) => errors.push([error.message, tupleIndex, isHeaderError]));
+            return { store, errors };
+        };
+
+        it('passes the error of the first header that does not fit once the shared point numbers are parsed', function() {
+            // the shared point numbers at the dataOffset 14: a packed point count of 0, all the points
+            const { store, errors } = parseStore('0001 0000 8002 000E 0002 8000 1000 00');
+            assert.deepStrictEqual(store.headers.map(header => header.peakTuple), [[0.25]]);
+            assert.deepStrictEqual(store.sharedPoints, []);
+            assert.deepStrictEqual(errors, [['Offset is outside the bounds of the DataView', 1, true]]);
+        });
+
+        it('passes no header error for a store whose shared point numbers fail to parse', function() {
+            // the shared point numbers at the dataOffset 0xFF, past the end of the data: the store fails whole
+            const errors = [];
+            assert.throws(() => new Parser(unhex('0001 0000 8002 00FF 0002 8000 1000 00'), 0).parseTupleVariationStore(0, 1,
+                'cvar', [0], undefined, error => errors.push(error.message)), /Offset is outside the bounds of the DataView/);
+            assert.deepStrictEqual(errors, []);
+        });
+    });
+
+    describe('parseSkippableStruct', function() {
+        it('reads a part that fails to parse as undefined, with its error passed to the callback', function() {
+            const errors = [];
+            const parseUShortPair = function() {
+                return [this.parseUShort(), this.parseUShort()];
+            };
+            assert.deepStrictEqual(parseSkippableStruct(unhex('0001 0002 0003'), 2, parseUShortPair, error => errors.push(error)), [2, 3]);
+            assert.deepStrictEqual(errors, []);
+            assert.strictEqual(parseSkippableStruct(unhex('0001 0002 0003'), 4, parseUShortPair, error => errors.push(error)), undefined);
+            assert.strictEqual(errors.length, 1);
+            assert.ok(errors[0] instanceof RangeError);
+            assert.throws(() => parseSkippableStruct(unhex('0001'), 0, parseUShortPair, throwError), RangeError);
+        });
+    });
+
+    describe('createSkippablePartParser', function() {
+        it('reads a part at its offset from the start of the table, undefined for a NULL offset or a part that fails to parse, with its error and its name', function() {
+            const partErrors = [];
+            const parseUShortPair = function() {
+                return [this.parseUShort(), this.parseUShort()];
+            };
+            // a table at 2 in the data, the ushorts 2 and 3 at 2 in the table
+            const parsePart = createSkippablePartParser(unhex('FFFF 0001 0002 0003'), 2, (error, partName) => partErrors.push({ error, partName }));
+            assert.deepStrictEqual(parsePart('first part', 2, parseUShortPair), [2, 3]);
+            assert.strictEqual(parsePart('NULL part', 0, parseUShortPair), undefined);
+            assert.deepStrictEqual(partErrors, []);
+            assert.strictEqual(parsePart('second part', 4, parseUShortPair), undefined);
+            assert.deepStrictEqual(partErrors.map(({ partName }) => partName), ['second part']);
+            assert.ok(partErrors[0].error instanceof RangeError);
+            assert.throws(() => createSkippablePartParser(unhex('0001'), 0, throwError)('part', 1, parseUShortPair), RangeError);
+        });
+    });
+
+    describe('getTableView', function() {
+        const getBytes = view => Array.from(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+
+        it('gives a view on the bytes of a part of the data only', function() {
+            const data = unhex('0001 0203 0405');
+            const view = getTableView(data, 2, 3);
+            assert.strictEqual(view.buffer, data.buffer);
+            assert.deepStrictEqual([view.byteOffset, view.byteLength], [2, 3]);
+            assert.deepStrictEqual(getBytes(view), [2, 3, 4]);
+            assert.strictEqual(getTableView(data, 6, 0).byteLength, 0);
+        });
+
+        it('cuts a part that ends past the end of the data there', function() {
+            const view = getTableView(unhex('0001 0203 0405'), 4, 10);
+            assert.deepStrictEqual([view.byteOffset, view.byteLength], [4, 2]);
+            assert.deepStrictEqual(getBytes(view), [4, 5]);
+        });
+
+        it('throws a RangeError for a part that starts past the end of the data, or of a negative length', function() {
+            assert.throws(() => getTableView(unhex('0001 0203 0405'), 7, 1), RangeError);
+            assert.throws(() => getTableView(unhex('0001 0203 0405'), 2, -1), RangeError);
+        });
+
+        it('gives a view on a part of a view, from the offset of the view', function() {
+            const data = getTableView(unhex('0001 0203 0405'), 1, 4);
+            const view = getTableView(data, 1, 10);
+            assert.deepStrictEqual([view.byteOffset, view.byteLength], [2, 3]);
+            assert.deepStrictEqual(getBytes(view), [2, 3, 4]);
+            assert.throws(() => getTableView(data, 5, 1), RangeError);
+        });
+    });
+
+    describe('isDeviceTableInData', function() {
+        it('tells whether a Device or VariationIndex table ends inside the data, like HarfBuzz', function() {
+            // a VariationIndex table (6 bytes), and Device tables of format 1, 2 and 3 for the sizes 11 to 15 (5 deltas of
+            // 2, 4 and 8 bits: one, two and three 16-bit words after the 6 bytes of the header)
+            assert.strictEqual(isDeviceTableInData(unhex('0000 0001 8000'), 0), true);
+            assert.strictEqual(isDeviceTableInData(unhex('0000 0001 8000'), 2), false);
+            assert.strictEqual(isDeviceTableInData(unhex('0000 0000 0001 8000'), 2), true);
+            for (const [deltaFormat, wordCount] of [[1, 1], [2, 2], [3, 3]]) {
+                const header = '000B 000F 000' + deltaFormat;
+                assert.strictEqual(isDeviceTableInData(unhex(header + ' 0000'.repeat(wordCount)), 0), true, 'format ' + deltaFormat);
+                assert.strictEqual(isDeviceTableInData(unhex(header + ' 0000'.repeat(wordCount - 1)), 0), false, 'format ' + deltaFormat);
+            }
+            // a Device table of an unknown format or whose startSize is after its endSize has no deltas
+            assert.strictEqual(isDeviceTableInData(unhex('000B 000F 0004'), 0), true);
+            assert.strictEqual(isDeviceTableInData(unhex('000F 000B 0001'), 0), true);
         });
     });
 
@@ -398,6 +623,17 @@ describe('parse.mjs', function() {
             ]);
             assert.equal(p.relativeOffset, 12);
         });
+
+        it('reads a device table that ends past the end of the data as a NULL offset, like HarfBuzz (sanitize_value_devices)', function() {
+            // the data above without the last byte of the second VariationIndex table: the second value record keeps
+            // its x advance, without its device
+            const p = new Parser(unhex(data.slice(0, -2)), 4);
+            assert.deepStrictEqual(p.parseValueRecordList(2), [
+                { xAdvance: -10, xAdvDevice: { deltaFormat: 0x8000, deltaSetOuterIndex: 0, deltaSetInnerIndex: 1 } },
+                { xAdvance: -20, xAdvDevice: undefined }
+            ]);
+            assert.equal(p.relativeOffset, 12);
+        });
     });
 
     describe('parseDeltaSets', function() {
@@ -462,6 +698,25 @@ describe('parse.mjs', function() {
         });
     });
 
+    describe('parseDeltaSetIndexMap', function() {
+        it('should parse a DeltaSetIndexMap', function() {
+            // https://learn.microsoft.com/en-us/typography/opentype/spec/otvarcommonformats#associating-target-items-to-variation-data
+            // format 0, entryFormat 0x10 (2-byte entries, 1 bit of inner index), mapCount 2
+            assert.deepStrictEqual(new Parser(unhex('00 10 0002 0003 0004'), 0).parseDeltaSetIndexMap(), {
+                format: 0,
+                entryFormat: 0x10,
+                map: [{ outerIndex: 1, innerIndex: 1 }, { outerIndex: 2, innerIndex: 0 }]
+            });
+        });
+
+        it('gives a map without entries for a mapCount of 0 and for an unknown format, like HarfBuzz (DeltaSetIndexMap::map)', function() {
+            // HarfBuzz maps each index to itself with such a map, the implicit mapping of getVariableAdjustment
+            assert.deepStrictEqual(new Parser(unhex('00 10 0000'), 0).parseDeltaSetIndexMap(), { format: 0, entryFormat: 0x10, map: [] });
+            assert.deepStrictEqual(new Parser(unhex('01 10 00000000'), 0).parseDeltaSetIndexMap(), { format: 1, entryFormat: 0x10, map: [] });
+            assert.deepStrictEqual(new Parser(unhex('FF 10 0002 0003 0004'), 0).parseDeltaSetIndexMap(), { format: 0xFF, entryFormat: 0x10, map: [] });
+        });
+    });
+
     describe('parseLongDateTime', function() {
         it('should parse LONGDATETIME values', function() {
             // FIXME: test dates > 2038 once all 64bit are supported
@@ -508,6 +763,139 @@ describe('parse.mjs', function() {
                 256, 257, 258, 259, 260, 261, 262, 263, 264, 266, 268, 270, 272, 274, 276, 278, 280, 282, 284, 286, 288, 290, 292,
                 294, 296, 298, 300, 302, 304, 306, 308, 310, 312, 314, 316, 318, 320, 322, 324, 326
             ]);
+        });
+
+        describe('of a GlyphVariationData table whose tuple data end past the end of the data', function() {
+            // one tuple (tupleVariationCount 1, its serialized data at 0x0a), with an embedded peak tuple of one axis
+            // (1.0) and private point numbers (tupleIndex 0xA000), of 7 bytes: the point 0, the x delta 5, then no
+            // byte for the y delta
+            const data = '0001 000A   0007 A000 4000   01 00 00   00 05';
+
+            it('reads the point numbers and the deltas of the tuple as null when they are first read, with the error passed to the callback', function() {
+                const errors = [];
+                const store = new Parser(unhex(data), 0).parseTupleVariationStore(0, 1, 'gvar', [], 0,
+                    (error, tupleIndex) => errors.push([error, tupleIndex]));
+                assert.deepStrictEqual(errors, []);
+                assert.strictEqual(store.headers[0].privatePoints, null);
+                assert.strictEqual(store.headers[0].deltas, null);
+                assert.strictEqual(store.headers[0].deltasY, null);
+                assert.strictEqual(errors.length, 1);
+                assert.ok(errors[0][0] instanceof RangeError);
+                assert.strictEqual(errors[0][1], 0);
+            });
+
+            it('throws the error when the data of the tuple are first read without a callback', function() {
+                const store = new Parser(unhex(data), 0).parseTupleVariationStore(0, 1, 'gvar', [], 0);
+                assert.throws(() => store.headers[0].privatePoints, RangeError);
+                assert.throws(() => store.headers[0].deltas, RangeError);
+            });
+        });
+
+        it('reads the data of a tuple from its variationDataSize bytes only, like HarfBuzz', function() {
+            // the store above with a variationDataSize of 5 and two more bytes (00 07) after the data of the tuple: the
+            // y delta would be 7, but HarfBuzz decompiles the deltas of a tuple up to the end of its serialized data
+            // (gvar::apply_deltas_to_points, decompile_deltas with end = p + length), so the y delta runs past them
+            const errors = [];
+            const store = new Parser(unhex('0001 000A   0005 A000 4000   01 00 00   00 05   00 07'), 0)
+                .parseTupleVariationStore(0, 1, 'gvar', [], 0, (error, tupleIndex) => errors.push([error, tupleIndex]));
+            assert.strictEqual(store.headers[0].deltasY, null);
+            assert.strictEqual(errors.length, 1);
+            assert.ok(errors[0][0] instanceof RangeError);
+            const validStore = new Parser(unhex('0001 000A   0007 A000 4000   01 00 00   00 05   00 07'), 0)
+                .parseTupleVariationStore(0, 1, 'gvar', [], 0);
+            assert.deepStrictEqual(validStore.headers[0].privatePoints, [0]);
+            assert.deepStrictEqual(validStore.headers[0].deltas, [5]);
+            assert.deepStrictEqual(validStore.headers[0].deltasY, [7]);
+        });
+
+        it('parses the private point numbers of a tuple only when the data of the tuple are first read', function() {
+            // two tuples: the private point numbers of the tuple 0 (a count of 2, then a run of a single point) run past
+            // its 3 bytes, the tuple 1 (5 bytes) is the point 0 with the x and y deltas 0 (a run of 1 zero delta, 0x80)
+            const errors = [];
+            const store = new Parser(unhex('0002 0010   0003 A000 4000   0005 A000 C000   02 00 00   01 00 00 80 80'), 0)
+                .parseTupleVariationStore(0, 1, 'gvar', [], 0, (error, tupleIndex) => errors.push([error, tupleIndex]));
+            assert.deepStrictEqual(errors, []);
+            assert.deepStrictEqual(store.headers[1].privatePoints, [0]);
+            assert.deepStrictEqual(store.headers[1].deltas, [0]);
+            assert.deepStrictEqual(store.headers[1].deltasY, [0]);
+            assert.deepStrictEqual(errors, []);
+            assert.strictEqual(store.headers[0].privatePoints, null);
+            assert.deepStrictEqual(errors.map(([error, tupleIndex]) => [error instanceof RangeError, tupleIndex]), [[true, 0]]);
+        });
+
+        it('skips the tuples from the first tuple variation header that does not fit in the data, like HarfBuzz (tuple_iterator_t)', function() {
+            // a cvar store (after the 4 bytes of the version) of 2 tuples and shared point numbers (tupleVariationCount
+            // 0x8002), its serialized data at 0x0E, with the header of the tuple 0 only (2 bytes of data, an embedded
+            // peak of one axis, 1.0): the shared point numbers are all the points (00), the delta of the cvt value 0 is
+            // 5 (00 05); the header of the tuple 1 would start at 0x0E, where 3 bytes are left
+            const data = '0001 0000   8002 000E   0002 8000 4000   00   00 05';
+            const errors = [];
+            const store = new Parser(unhex(data), 0).parseTupleVariationStore(0, 1, 'cvar', [100], undefined,
+                (error, tupleIndex, isHeaderError) => errors.push([error, tupleIndex, isHeaderError]));
+            assert.deepStrictEqual(errors.map(([error, tupleIndex, isHeaderError]) => [error.name, error.message, tupleIndex, isHeaderError]),
+                [['RangeError', 'Offset is outside the bounds of the DataView', 1, true]]);
+            assert.strictEqual(store.headers.length, 1);
+            assert.deepStrictEqual(store.headers[0].peakTuple, [1]);
+            assert.deepStrictEqual(store.headers[0].deltas, [5]);
+            assert.deepStrictEqual(store.sharedPoints, []);
+            assert.strictEqual(errors.length, 1);
+            // without a callback the error is thrown
+            assert.throws(() => new Parser(unhex(data), 0).parseTupleVariationStore(0, 1, 'cvar', [100]),
+                { name: 'RangeError', message: 'Offset is outside the bounds of the DataView' });
+        });
+
+        it('sets the point numbers and the deltas of a tuple, the other data of the tuple kept', function() {
+            // the valid store of the test of the variationDataSize above: the point 0 with the x delta 5 and the y delta 7
+            const parseStore = () => new Parser(unhex('0001 000A   0007 A000 4000   01 00 00   00 05   00 07'), 0)
+                .parseTupleVariationStore(0, 1, 'gvar', [], 0);
+            const header = parseStore().headers[0];
+            header.deltas = [9];
+            assert.deepStrictEqual([header.privatePoints, header.deltas, header.deltasY], [[0], [9], [7]]);
+            header.deltasY = [8];
+            assert.deepStrictEqual([header.privatePoints, header.deltas, header.deltasY], [[0], [9], [8]]);
+            header.privatePoints = [1];
+            assert.deepStrictEqual([header.privatePoints, header.deltas, header.deltasY], [[1], [9], [8]]);
+            // a setter parses the data first
+            const unreadHeader = parseStore().headers[0];
+            unreadHeader.privatePoints = [2];
+            assert.deepStrictEqual([unreadHeader.privatePoints, unreadHeader.deltas, unreadHeader.deltasY], [[2], [5], [7]]);
+        });
+
+        it('passes the error and the glyph index of the variation data of a glyph that fails to parse when it is first read', function() {
+            // a GlyphVariationData offsets array (glyphCount 2, short offsets, the data array at 0x10) where the data of
+            // the glyph 1, from 0 to 0x14 bytes after the array, ends past the end of the data
+            const errors = [];
+            const glyphVariations = new Parser(unhex('0002 0000 00000010 0000 0000 000A'), 0)
+                .parseTupleVariationStoreList(1, 'gvar', [], (error, glyphIndex, tupleIndex) => errors.push([error, glyphIndex, tupleIndex]));
+            assert.deepStrictEqual(errors, []);
+            assert.strictEqual(glyphVariations[0], undefined);
+            assert.strictEqual(glyphVariations[1], undefined);
+            assert.strictEqual(errors.length, 1);
+            assert.ok(errors[0][0] instanceof RangeError);
+            assert.strictEqual(errors[0][1], 1);
+            assert.strictEqual(errors[0][2], undefined);
+            const throwingVariations = new Parser(unhex('0002 0000 00000010 0000 0000 000A'), 0).parseTupleVariationStoreList(1, 'gvar', []);
+            assert.throws(() => throwingVariations[1], RangeError);
+        });
+
+        it('reads the variation data of a glyph from its bytes only, like HarfBuzz', function() {
+            // glyphCount 2, short offsets (0, 16 and 18 bytes), the data array at 0x0e: the data of the glyph 0 is the
+            // store of the tests above with the run header of its y delta (00, one byte), whose value would be the
+            // first byte (09) of the data of the glyph 1; HarfBuzz reads the data of a glyph up to the offset of the
+            // next one (gvar::get_glyph_var_data_bytes), so the y delta runs past the data of the glyph 0
+            const data = '0002 0000 0000000E   0000 0008 0009' +
+                '0001 000A   0007 A000 4000   01 00 00   00 05   00' +
+                '09 00';
+            const errors = [];
+            const glyphVariations = new Parser(unhex(data), 0)
+                .parseTupleVariationStoreList(1, 'gvar', [], (error, glyphIndex, tupleIndex) => errors.push([error, glyphIndex, tupleIndex]));
+            const header = glyphVariations[0].headers[0];
+            assert.strictEqual(header.privatePoints, null);
+            assert.strictEqual(header.deltas, null);
+            assert.strictEqual(header.deltasY, null);
+            assert.strictEqual(errors.length, 1);
+            assert.ok(errors[0][0] instanceof RangeError);
+            assert.deepStrictEqual(errors[0].slice(1), [0, 0]);
         });
     });
 });

@@ -275,11 +275,15 @@ function searchRange(ranges, value) {
 /**
  * Find a glyph in a class definition table
  * https://docs.microsoft.com/en-us/typography/opentype/spec/chapter2#class-definition-table
- * @param {object} classDefTable - an OpenType Layout class definition table
+ * @param {object|undefined} classDefTable - an OpenType Layout class definition table, undefined for a NULL offset,
+ * which, like a table of an unknown format, gives every glyph the class 0, like HarfBuzz
  * @param {number} glyphIndex - the index of the glyph to find
  * @returns {number} 0 if not found
  */
 function getGlyphClass(classDefTable, glyphIndex) {
+    if (!classDefTable) {
+        return 0;
+    }
     switch (classDefTable.format) {
         case 1: {
             if (classDefTable.startGlyph <= glyphIndex && glyphIndex < classDefTable.startGlyph + classDefTable.classes.length) {
@@ -291,17 +295,23 @@ function getGlyphClass(classDefTable, glyphIndex) {
             const range = searchRange(classDefTable.ranges, glyphIndex);
             return range ? range.classId : 0;
         }
+        default:
+            return 0;
     }
 }
 
 /**
  * Find a glyph in a coverage table
  * https://docs.microsoft.com/en-us/typography/opentype/spec/chapter2#coverage-table
- * @param {object} coverageTable - an OpenType Layout coverage table
+ * @param {object|undefined} coverageTable - an OpenType Layout coverage table, undefined for a NULL offset, which
+ * covers no glyph, like the empty coverage of HarfBuzz
  * @param {number} glyphIndex - the index of the glyph to find
  * @returns {number} -1 if not found
  */
 function getCoverageIndex(coverageTable, glyphIndex) {
+    if (!coverageTable) {
+        return -1;
+    }
     switch (coverageTable.format) {
         case 1: {
             const index = binSearch(coverageTable.glyphs, glyphIndex);
@@ -385,6 +395,19 @@ function mayGlyphDigestHave(glyphDigest, glyphIndex) {
 }
 
 /**
+ * The subtables of a GSUB or GPOS lookup that can apply: all but the undefined ones, a NULL subtable offset or a
+ * subtable that failed to parse (see parseLookupList in parse.mjs), which apply to no glyph, like a NULL subtable of
+ * HarfBuzz. The subtables array of the lookup itself when it has no undefined subtable, as the layout reads the
+ * subtables of a lookup at each glyph.
+ * @param {{subtables: Array<object|undefined>}} lookupTable
+ * @returns {object[]}
+ */
+function getLookupTableSubtables(lookupTable) {
+    const subtables = lookupTable.subtables;
+    return subtables.includes(undefined) ? subtables.filter(subtable => subtable !== undefined) : subtables;
+}
+
+/**
  * The coverage table of the first glyph of a GSUB or GPOS subtable, the glyph it applies at: the coverage table of a
  * single, multiple, alternate, ligature, pair, cursive or reverse chaining subtable and of a contextual subtable of
  * format 1 or 2, the mark coverage of a mark attachment subtable, the first input coverage of a contextual subtable
@@ -400,8 +423,8 @@ function getSubtableFirstGlyphCoverage(subtable) {
 
 /**
  * The coverage tables of the first glyph of subtables (see getSubtableFirstGlyphCoverage)
- * @param {Array<object|undefined>} subtables - GSUB or GPOS subtables, not extension subtables: undefined for the
- * missing subtable of a malformed extension subtable
+ * @param {Array<object|undefined>} subtables - GSUB or GPOS subtables, not extension subtables, e.g. the ones of
+ * getLookupTableSubtables; an undefined subtable has no coverage of its first glyph
  * @returns {object[]|null} null when a subtable has no coverage of its first glyph, and may apply at any glyph
  */
 function getSubtablesFirstGlyphCoverages(subtables) {
@@ -931,7 +954,7 @@ function matchContextRule(gdef, lookupTable, glyphIndexes, index, rule, ignorabl
  * @param {{lookupFlag: number, markFilteringSet: number}} lookupTable - the lookup of the rules
  * @param {number[]} glyphIndexes - the glyphs of the context
  * @param {number} index - the position of the glyph
- * @param {object[]|undefined} ruleSet - the rules, none if undefined
+ * @param {Array<object|undefined>|undefined} ruleSet - the rules (undefined for a NULL rule offset), none if undefined
  * @param {function(object): {backtrack: RuleSequence, input: RuleSequence, lookahead: RuleSequence}} getRuleSequences -
  * the sequences of a rule, its input without its first glyph
  * @param {IgnorableMatching} ignorableMatching - the default ignorables of the context
@@ -939,6 +962,11 @@ function matchContextRule(gdef, lookupTable, glyphIndexes, index, rule, ignorabl
  */
 function matchRuleSet(gdef, lookupTable, glyphIndexes, index, ruleSet, getRuleSequences, ignorableMatching) {
     for (const rule of ruleSet || []) {
+        // like HarfBuzz, a NULL rule offset (undefined) is a rule of no glyph, which matches the glyph and applies no
+        // lookup (see getRuleInputLength in parse.mjs)
+        if (!rule) {
+            return { inputPositions: [index], lookupRecords: [] };
+        }
         const inputPositions = matchContextRule(gdef, lookupTable, glyphIndexes, index, getRuleSequences(rule), ignorableMatching);
         if (inputPositions) {
             return { inputPositions, lookupRecords: rule.lookupRecords };
@@ -1299,7 +1327,9 @@ Layout.prototype = {
             // lookupListIndexes are in no particular order, so use naive search.
             for (let i = 0; i < lookupListIndexes.length; i++) {
                 lookupTable = allLookups[lookupListIndexes[i]];
-                if (lookupTable.lookupType === lookupType) {
+                // a NULL lookup offset (see parseLookupList in parse.mjs) is a lookup of no type, like the Null lookup
+                // of HarfBuzz
+                if (lookupTable && lookupTable.lookupType === lookupType) {
                     tables.push(lookupTable);
                 }
             }
@@ -1326,7 +1356,8 @@ Layout.prototype = {
      * @instance
      * @function getGlyphClass
      * @memberof opentype.Layout
-     * @param {object} classDefTable - an OpenType Layout class definition table
+     * @param {object|undefined} classDefTable - an OpenType Layout class definition table, undefined for a NULL offset
+     * (every glyph of the class 0, as in a table of an unknown format)
      * @param {number} glyphIndex - the index of the glyph to find
      * @returns {number} 0 if not found
      */
@@ -1338,7 +1369,8 @@ Layout.prototype = {
      * @instance
      * @function getCoverageIndex
      * @memberof opentype.Layout
-     * @param {object} coverageTable - an OpenType Layout coverage table
+     * @param {object|undefined} coverageTable - an OpenType Layout coverage table, undefined for a NULL offset (no
+     * glyph covered)
      * @param {number} glyphIndex - the index of the glyph to find
      * @returns {number} -1 if not found
      */
@@ -1348,11 +1380,15 @@ Layout.prototype = {
      * Returns the list of glyph indexes of a coverage table.
      * Format 1: the list is stored raw
      * Format 2: compact list as range records.
+     * A NULL coverage offset (undefined) covers no glyph (see getCoverageIndex).
      * @instance
-     * @param  {Object} coverageTable
+     * @param  {Object|undefined} coverageTable
      * @return {Array}
      */
     expandCoverage: function(coverageTable) {
+        if (!coverageTable) {
+            return [];
+        }
         if (coverageTable.format === 1) {
             return coverageTable.glyphs;
         } else {
@@ -1375,6 +1411,7 @@ Layout.prototype = {
 export default Layout;
 export {
     getCoverageIndex,
+    getLookupTableSubtables,
     getCoveragesGlyphDigest,
     mayGlyphDigestHave,
     getSubtablesFirstGlyphCoverages,
