@@ -2,7 +2,7 @@
 // https://docs.microsoft.com/en-us/typography/opentype/spec/gdef
 
 import check from '../check.mjs';
-import { Parser } from '../parse.mjs';
+import { Parser, createSkippablePartParser, throwError } from '../parse.mjs';
 
 var attachList = function() {
     return {
@@ -36,33 +36,62 @@ var ligCaretList = function() {
     };
 };
 
-var markGlyphSets = function() {
-    this.parseUShort(); // Format
-    // the coverage offsets of the mark glyph sets are 32-bit
-    return this.parseList(Parser.pointer32(Parser.coverage));
-};
+/**
+ * The parser of a MarkGlyphSetsDef table: like HarfBuzz, the coverage of a mark glyph set that fails to parse is read
+ * as a NULL offset, a set that covers no glyph
+ * @param {function(Error, string)} onPartError - see parseGDEFTable
+ * @returns {function(): Array<object|undefined>}
+ */
+function createMarkGlyphSetsParser(onPartError) {
+    return function() {
+        const markGlyphSetsStart = this.offset;
+        const format = this.parseUShort();
+        check.argument(format === 1, 'GDEF MarkGlyphSetsDef format must be 1.');
+        // the coverage offsets of the mark glyph sets are 32-bit
+        const coverageOffsets = this.parseULongList(this.parseUShort());
+        const parsePart = createSkippablePartParser(this.data, markGlyphSetsStart, onPartError);
+        return coverageOffsets.map((coverageOffset, markGlyphSetIndex) =>
+            parsePart('coverage of the mark glyph set ' + markGlyphSetIndex, coverageOffset, Parser.coverage));
+    };
+}
 
-function parseGDEFTable(data, start) {
+/**
+ * Parse a GDEF table. Like HarfBuzz neuters the offset of a part of the table that fails to sanitize, a part that fails
+ * to parse (its GlyphClassDef, AttachList, LigCaretList, MarkAttachClassDef, MarkGlyphSetsDef or ItemVariationStore
+ * table, or the coverage of a mark glyph set) is read as a NULL offset; a header that fails to parse throws an error.
+ * https://docs.microsoft.com/en-us/typography/opentype/spec/gdef
+ * @param {DataView} data
+ * @param {number} [start=0] - the offset of the table in the data
+ * @param {function(Error, string)} [onPartError] - called with the error and the name of each part that fails to
+ * parse, e.g. 'ItemVariationStore table'; the error is thrown if omitted
+ * @returns {object}
+ */
+function parseGDEFTable(data, start, onPartError = throwError) {
     start = start || 0;
     const p = new Parser(data, start);
     const tableVersion = p.parseVersion(1);
     check.argument(tableVersion === 1 || tableVersion === 1.2 || tableVersion === 1.3,
         'Unsupported GDEF table version.');
-    var gdef = {
+    const classDefOffset = p.parseOffset16();
+    const attachListOffset = p.parseOffset16();
+    const ligCaretListOffset = p.parseOffset16();
+    const markAttachClassDefOffset = p.parseOffset16();
+    const markGlyphSetsOffset = tableVersion >= 1.2 ? p.parseOffset16() : 0;
+    const itemVariationStoreOffset = tableVersion >= 1.3 ? p.parseOffset32() : 0;
+    const parsePart = createSkippablePartParser(data, start, onPartError);
+    const gdef = {
         version: tableVersion,
-        classDef: p.parsePointer(Parser.classDef),
-        attachList: p.parsePointer(attachList),
-        ligCaretList: p.parsePointer(ligCaretList),
-        markAttachClassDef: p.parsePointer(Parser.classDef)
+        classDef: parsePart('GlyphClassDef table', classDefOffset, Parser.classDef),
+        attachList: parsePart('AttachList table', attachListOffset, attachList),
+        ligCaretList: parsePart('LigCaretList table', ligCaretListOffset, ligCaretList),
+        markAttachClassDef: parsePart('MarkAttachClassDef table', markAttachClassDefOffset, Parser.classDef)
     };
     if (tableVersion >= 1.2) {
-        gdef.markGlyphSets = p.parsePointer(markGlyphSets);
+        gdef.markGlyphSets = parsePart('MarkGlyphSetsDef table', markGlyphSetsOffset, createMarkGlyphSetsParser(onPartError));
     }
     if (tableVersion >= 1.3) {
         // deltas referenced by the VariationIndex tables of GPOS value records
-        gdef.itemVarStore = p.parsePointer32(function() {
-            return this.parseItemVariationStore();
-        });
+        gdef.itemVarStore = parsePart('ItemVariationStore table', itemVariationStoreOffset, Parser.prototype.parseItemVariationStore);
     }
     return gdef;
 }

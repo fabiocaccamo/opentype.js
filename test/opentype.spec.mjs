@@ -1,7 +1,7 @@
 import assert from 'assert';
 import { Font, Path, Glyph, parse, removeTables } from '../src/opentype.mjs';
 import { parseWOFF2TableEntries } from '../src/woff2.mjs';
-import { readSfntFile, getSpecificationCheckSum } from './testutil.mjs';
+import { readSfntFile, getSpecificationCheckSum, getTableRecordOffset, formatShape } from './testutil.mjs';
 import { readFileSync } from 'fs';
 const loadSync = (url, opt) => parse(readFileSync(url), opt);
 
@@ -876,6 +876,569 @@ describe('opentype.mjs removeTables', function() {
             assert.throws(() => removeTables(input, ['COLRV']), /TypeError: Invalid table tag "COLRV"/);
             assert.throws(() => removeTables(input, ['SVG\u00A0']), /TypeError: Invalid table tag "SVG\u00A0"/);
             assert.throws(() => removeTables(input, [42]), /TypeError: Invalid table tag 42/);
+        });
+    });
+});
+
+describe('opentype.mjs tolerant loading', function() {
+    const FONTS_DIR = './test/fonts';
+    const readFontFile = path => new Uint8Array(readFileSync(FONTS_DIR + '/' + path));
+    // the tables parse reads that a font can be used without
+    const OPTIONAL_TABLE_TAGS = [
+        'name', 'post', 'OS/2', 'cvt ', 'fpgm', 'prep', 'COLR', 'CPAL', 'gasp', 'SVG ', 'meta', 'ltag', 'kern', 'GDEF',
+        'GPOS', 'GSUB', 'fvar', 'STAT', 'gvar', 'cvar', 'avar', 'HVAR', 'MVAR'
+    ];
+    const REQUIRED_TABLE_TAGS = ['head', 'hhea', 'maxp', 'hmtx', 'cmap'];
+    const TEXT = 'AVAWaTo fi ffi Hello, world! áḅ العربية';
+
+    // a copy of an sfnt file whose table of a tag starts at the end of the file, so that it fails to parse
+    function withTablePastEndOfFile(bytes, tag) {
+        const output = bytes.slice();
+        new DataView(output.buffer).setUint32(getTableRecordOffset(output, tag) + 8, output.length);
+        return output;
+    }
+
+    // a copy of an sfnt file whose table of a tag is copied to the end of the file, with a length that runs past the
+    // end of the file by extraLength bytes
+    function withTableLengthPastEndOfFile(bytes, tag, extraLength) {
+        const recordOffset = getTableRecordOffset(bytes, tag);
+        const view = new DataView(bytes.buffer, bytes.byteOffset);
+        const tableOffset = view.getUint32(recordOffset + 8);
+        const tableLength = view.getUint32(recordOffset + 12);
+        const output = new Uint8Array(bytes.length + tableLength);
+        output.set(bytes);
+        output.set(bytes.subarray(tableOffset, tableOffset + tableLength), bytes.length);
+        const outputView = new DataView(output.buffer);
+        outputView.setUint32(recordOffset + 8, bytes.length);
+        outputView.setUint32(recordOffset + 12, tableLength + extraLength);
+        return output;
+    }
+
+    // a copy of an sfnt file whose table record of a tag gives the table another length
+    function withTableLength(bytes, tag, getLength) {
+        const output = bytes.slice();
+        const view = new DataView(output.buffer);
+        const lengthOffset = getTableRecordOffset(output, tag) + 12;
+        view.setUint32(lengthOffset, getLength(view.getUint32(lengthOffset)));
+        return output;
+    }
+
+    // the warnings of a font without their errors
+    const getWarnings = font => font.warnings.map(({ table, message }) => ({ table, message }));
+
+    // what the layout of a font gives for TEXT: its glyph positions, advance and outline (not for a font with SVG
+    // images, whose drawing decodes them, which node cannot), and its outline at the maximum of the axes of fvar
+    function getLayoutOutput(font) {
+        const output = {
+            shape: font.shape(TEXT).map(glyphPosition => ({ ...glyphPosition, glyph: glyphPosition.glyph.index })),
+            advance: font.getAdvanceWidth(TEXT, 1000)
+        };
+        if (!font.tables.svg) {
+            output.path = font.getPath(TEXT, 0, 0, 1000).toPathData(3);
+        }
+        if (font.tables.fvar) {
+            const variation = Object.fromEntries(font.tables.fvar.axes.map(axis => [axis.tag, axis.maxValue]));
+            output.variedAdvance = font.getAdvanceWidth(TEXT, 1000, { variation });
+            output.variedPath = font.getPath(TEXT, 0, 0, 1000, { variation }).toPathData(3);
+        }
+        return output;
+    }
+
+    describe('skips an optional table that fails to parse, with a warning, and uses the font as without the table', function() {
+        // each font is parsed and laid out twice for each one of its optional tables
+        this.timeout(20000);
+        const fontFiles = [
+            'TestCVARGVAROne.ttf', 'GeistVariableItalic-subset.ttf', 'VARTest.ttf', 'TestTracking3.ttf',
+            'CFF1SingleLinePaintTypeTEST.otf', 'TestSVGgzip.otf', 'TestHVAROne.otf', 'OpenMojiCOLRv0-subset.otf',
+            'TestAVAR.ttf'
+        ];
+        for (const fontFile of fontFiles) {
+            it(fontFile, function() {
+                const bytes = readFontFile(fontFile);
+                const tags = parse(bytes.buffer.slice(0)).tableTags.filter(tag => OPTIONAL_TABLE_TAGS.includes(tag));
+                assert.ok(tags.length >= 3, tags.join());
+                for (const tag of tags) {
+                    const font = parse(withTablePastEndOfFile(bytes, tag).buffer);
+                    const fontWithoutTable = parse(removeTables(bytes, [tag]));
+                    const warnings = font.warnings.filter(warning => warning.table === tag);
+                    assert.strictEqual(warnings.length, 1, tag);
+                    assert.match(warnings[0].message, /^The table is skipped: /, tag);
+                    assert.ok(warnings[0].error instanceof Error, tag);
+                    assert.strictEqual(warnings[0].message, 'The table is skipped: ' + warnings[0].error.message, tag);
+                    // the warnings of the tables that need the skipped one (gvar, cvar and avar need fvar)
+                    assert.deepStrictEqual(getWarnings(font).filter(warning => warning.table !== tag), getWarnings(fontWithoutTable), tag);
+                    assert.deepStrictEqual(Object.keys(font.tables).sort(), Object.keys(fontWithoutTable.tables).sort(), tag);
+                    assert.deepStrictEqual(getLayoutOutput(font), getLayoutOutput(fontWithoutTable), tag);
+                }
+            });
+        }
+    });
+
+    it('skips the tables that need an fvar table in a font without one, or whose fvar table is skipped, with a warning', function() {
+        const getFvarWarnings = tables => tables.map(table => ({
+            table,
+            message: 'The table is skipped: This font provides the ' + table + ' table, but its fvar table, which is required for ' +
+                'variable fonts, is missing or was skipped.'
+        }));
+        // TestCVARGVAROne.ttf has fvar, gvar, cvar and HVAR tables; HVAR is parsed without fvar
+        const font = parse(removeTables(readFontFile('TestCVARGVAROne.ttf'), ['fvar']));
+        assert.deepStrictEqual(getWarnings(font), getFvarWarnings(['gvar', 'cvar']));
+        assert.strictEqual(font.tables.gvar, undefined);
+        assert.strictEqual(font.tables.cvar, undefined);
+        assert.ok(font.tables.hvar);
+        assert.strictEqual(font.variation, undefined);
+        // TestAVAR.ttf has fvar, gvar and avar tables
+        const avarFont = parse(removeTables(readFontFile('TestAVAR.ttf'), ['fvar']));
+        assert.deepStrictEqual(getWarnings(avarFont), getFvarWarnings(['gvar', 'avar']));
+        assert.strictEqual(avarFont.tables.avar, undefined);
+        // TestCVARGVAROne.ttf with the axisCount of its fvar table (at 8) set to 0xFFFF: the fvar table fails to parse
+        // and is skipped, and so are the tables that need it, after its warning
+        const bytes = readFontFile('TestCVARGVAROne.ttf');
+        const view = new DataView(bytes.buffer);
+        view.setUint16(view.getUint32(getTableRecordOffset(bytes, 'fvar') + 8) + 8, 0xFFFF);
+        const brokenFvarFont = parse(bytes.buffer);
+        assert.deepStrictEqual(getWarnings(brokenFvarFont), [
+            { table: 'fvar', message: 'The table is skipped: Offset is outside the bounds of the DataView' }
+        ].concat(getFvarWarnings(['gvar', 'cvar'])));
+        assert.strictEqual(brokenFvarFont.variation, undefined);
+    });
+
+    it('gives a font without warnings an empty array of warnings', function() {
+        assert.deepStrictEqual(parse(readFontFile('TestMarkAttachment.ttf').buffer).warnings, []);
+        assert.deepStrictEqual(new Font({ familyName: 'Test', styleName: 'Regular', unitsPerEm: 1000, ascender: 800, descender: -200 }).warnings, []);
+    });
+
+    it('parses a font without a name table (issue 458), whose names are empty', function() {
+        // hb-shape --no-glyph-names --cluster-level=1 TestMarkAttachment.ttf -u 0061,0301,0062, the same for the font
+        // without its name table: [2=0+450|10=1@-200,20+0|3=2+500]
+        const font = parse(removeTables(readFontFile('TestMarkAttachment.ttf'), ['name']));
+        assert.deepStrictEqual(font.warnings, []);
+        assert.strictEqual(font.tables.name, undefined);
+        assert.deepStrictEqual(font.names, {});
+        assert.strictEqual(font.getEnglishName('fontFamily'), undefined);
+        assert.deepStrictEqual(font.shape('áb').map(glyphPosition => [
+            glyphPosition.glyph.index, glyphPosition.start, glyphPosition.xOffset, glyphPosition.yOffset, glyphPosition.xAdvance
+        ]), [[2, 0, 0, 0, 450], [10, 1, -200, 20, 0], [3, 2, 0, 0, 500]]);
+        // the instances of fvar have no names either
+        assert.deepStrictEqual(font.tables.fvar.instances.map(instance => instance.name), font.tables.fvar.instances.map(() => undefined));
+    });
+
+    it('parses a TrueType font without a post table, whose glyphs have no names', function() {
+        // the same output of hb-shape as with the post table (see the test above)
+        const font = parse(removeTables(readFontFile('TestMarkAttachment.ttf'), ['post']));
+        assert.deepStrictEqual(font.warnings, []);
+        assert.strictEqual(font.tables.post, undefined);
+        assert.strictEqual(font.glyphs.get(2).name, undefined);
+        assert.strictEqual(font.glyphIndexToName(2), undefined);
+        assert.strictEqual(font.nameToGlyphIndex('a'), -1);
+        assert.deepStrictEqual(font.shape('áb').map(glyphPosition => glyphPosition.glyph.index), [2, 10, 3]);
+    });
+
+    it('throws an error for a font without a required table', function() {
+        const bytes = readFontFile('TestMarkAttachment.ttf');
+        for (const tag of REQUIRED_TABLE_TAGS) {
+            assert.throws(() => parse(removeTables(bytes, [tag])), new RegExp(`Font doesn't contain the required ${tag} table.`), tag);
+        }
+        for (const tags of [['glyf'], ['loca'], ['glyf', 'loca']]) {
+            assert.throws(() => parse(removeTables(bytes, tags)), /Font doesn't contain TrueType, CFF or CFF2 outlines./, tags.join());
+        }
+        assert.throws(() => parse(removeTables(readFontFile('CFF1SingleLinePaintTypeTEST.otf'), ['CFF '])),
+            /Font doesn't contain TrueType, CFF or CFF2 outlines./);
+    });
+
+    it('throws an error for a required table that fails to parse, when the glyphs of a glyf table are first read', function() {
+        for (const [fontFile, tags] of [['TestMarkAttachment.ttf', REQUIRED_TABLE_TAGS.concat(['loca'])], ['CFF1SingleLinePaintTypeTEST.otf', ['CFF ']]]) {
+            const bytes = readFontFile(fontFile);
+            for (const tag of tags) {
+                // the error of the parser of the table, which reads past the end of the file, not an error of a later
+                // step of a font parsed without the table
+                assert.throws(() => parse(withTablePastEndOfFile(bytes, tag).buffer),
+                    { name: 'RangeError', message: 'Offset is outside the bounds of the DataView' }, fontFile + ' ' + tag);
+            }
+        }
+        // the glyphs of a glyf table are parsed when they are first read, e.g. drawn
+        const font = parse(withTablePastEndOfFile(readFontFile('TestMarkAttachment.ttf'), 'glyf').buffer);
+        assert.deepStrictEqual(font.warnings, []);
+        assert.throws(() => font.getPath('a', 0, 0, 1000), RangeError);
+    });
+
+    it('throws an error for an optional WOFF table that fails to decompress', function() {
+        // the origLength of the compressed GSUB table one byte longer: fontTools rejects the file too
+        const input = readFontFile('TestGDEF-Blocklisted.woff');
+        const view = new DataView(input.buffer);
+        const numTables = view.getUint16(12);
+        for (let i = 0; i < numTables; i += 1) {
+            const entryOffset = 44 + i * 20;
+            if (String.fromCharCode(...input.subarray(entryOffset, entryOffset + 4)) === 'GSUB') {
+                assert.ok(view.getUint32(entryOffset + 8) < view.getUint32(entryOffset + 12), 'GSUB is compressed');
+                view.setUint32(entryOffset + 12, view.getUint32(entryOffset + 12) + 1);
+            }
+        }
+        assert.throws(() => parse(input.buffer), /Decompression error: GSUB decompressed length doesn't match recorded length/);
+    });
+
+    it('skips the GPOS and GSUB lookup subtables that fail to parse, with a warning for each one', function() {
+        // the fonts of test/generate-malformed-layout-fonts.py; the errors of the GPOS and GSUB tables give the
+        // offsets of the subtables in the table
+        const font = parse(readFontFile('TestContextualPositioning-Malformed.ttf').buffer);
+        assert.deepStrictEqual(getWarnings(font), [
+            // CHAIN_COVERAGES with an inputGlyphCount of 0, which reads its lookahead count from its first input coverage
+            [14, '0x431: Coverage format must be 1 or 2.'],
+            // the subtable that CONTEXT_IGNORE_MARKS, CONTEXT_WITH_MARKS, CONTEXT_MARK_FILTERING_SET and
+            // CONTEXT_MARK_ATTACHMENT_TYPE share, of format 4
+            [15, '0x666: GPOS lookup type 8 format must be 1, 2 or 3.'],
+            [16, '0x666: GPOS lookup type 8 format must be 1, 2 or 3.'],
+            [29, '0x636: GPOS lookup type 7 format must be 1, 2 or 3.'],
+            [30, '0x666: GPOS lookup type 8 format must be 1, 2 or 3.'],
+            [31, '0x666: GPOS lookup type 8 format must be 1, 2 or 3.']
+        ].map(([lookupIndex, message]) => ({ table: 'GPOS', message: `The subtable 0 of the lookup ${lookupIndex} is skipped: ${message}` })));
+        for (const lookupIndex of [14, 15, 16, 29, 30, 31]) {
+            assert.deepStrictEqual(font.tables.gpos.lookups[lookupIndex].subtables, [undefined], 'lookup ' + lookupIndex);
+        }
+        assert.ok(font.warnings.every(warning => warning.error instanceof Error));
+        const markFont = parse(readFontFile('TestMarkAttachment-Malformed.ttf').buffer);
+        assert.deepStrictEqual(getWarnings(markFont).filter(warning => warning.table === 'GSUB'), [
+            { table: 'GSUB', message: 'The subtable 0 of the lookup 1 is skipped: 0xda: Coverage format must be 1 or 2.' },
+            { table: 'GSUB', message: 'The subtable 0 of the lookup 6 is skipped: GSUB ligature table identifier-format must be 1' }
+        ]);
+        // NULL offsets are no errors
+        assert.deepStrictEqual(parse(readFontFile('TestMarkAttachment-NullOffsets.ttf').buffer).warnings, []);
+    });
+
+    it('skips the subtables of a GPOS or GSUB lookup of an unknown type, with a warning for each one', function() {
+        // the fonts of test/generate-malformed-layout-fonts.py
+        const markFont = parse(readFontFile('TestMarkAttachment-Malformed.ttf').buffer);
+        assert.deepStrictEqual(getWarnings(markFont).filter(warning => / of the lookup 7 /.test(warning.message)), [
+            { table: 'GPOS', message: 'The subtable 0 of the lookup 7 is skipped: GPOS/GSUB lookup type 10 unknown.' }
+        ]);
+        assert.strictEqual(markFont.tables.gpos.lookups[7].lookupType, 10);
+        const alternateFont = parse(readFontFile('TestAlternateSubstitution-Malformed.ttf').buffer);
+        assert.deepStrictEqual(getWarnings(alternateFont), [
+            [3, 'GPOS/GSUB lookup type 9 unknown.'],
+            [4, 'GSUB extension lookup type must be 1 to 6 or 8'],
+            [5, 'GSUB Alternate Substitution Subtable identifier-format must be 1'],
+            // the ChainedSequenceContext of format 3 with an inputGlyphCount of 0, which reads its lookahead count
+            // from its first input coverage offset
+            [8, '0x215: Coverage format must be 1 or 2.']
+        ].map(([lookupIndex, message]) => ({ table: 'GSUB', message: `The subtable 0 of the lookup ${lookupIndex} is skipped: ${message}` })));
+        assert.strictEqual(alternateFont.tables.gsub.lookups[3].lookupType, 9);
+    });
+
+    it('skips a GPOS table whose FeatureList fails to parse, with a warning', function() {
+        // TestMarkAttachment.ttf with the Feature offset of the first FeatureRecord past the end of the GPOS table.
+        // HarfBuzz reads such an offset as a NULL offset and keeps the other features: the whole table is skipped
+        // here instead (see Fonts with broken tables in README.md)
+        const bytes = readFontFile('TestMarkAttachment.ttf');
+        const view = new DataView(bytes.buffer);
+        const gposOffset = view.getUint32(getTableRecordOffset(bytes, 'GPOS') + 8);
+        const featureListOffset = gposOffset + view.getUint16(gposOffset + 6);
+        // featureCount, then the FeatureRecords: featureTag, featureOffset
+        view.setUint16(featureListOffset + 6, 0xFFF0);
+        const font = parse(bytes.buffer);
+        assert.deepStrictEqual(getWarnings(font), [
+            { table: 'GPOS', message: 'The table is skipped: Offset is outside the bounds of the DataView' }
+        ]);
+        assert.deepStrictEqual(getLayoutOutput(font), getLayoutOutput(parse(removeTables(readFontFile('TestMarkAttachment.ttf'), ['GPOS']))));
+    });
+
+    it('gives only the warning of a GPOS table skipped after a skipped subtable, not the warnings of its subtables', function() {
+        // TestMarkAttachment-Malformed.ttf, whose GPOS lookups 2, 3, 4, 7, 11, 12 and 14 to 19 have a skipped subtable,
+        // with the offset of its last lookup (19 of 20) in the LookupList set to 0xFFF0, past the end of the table: the
+        // warnings of the subtables of the lookups before it are not kept
+        const bytes = readFontFile('TestMarkAttachment-Malformed.ttf');
+        const view = new DataView(bytes.buffer);
+        const gposOffset = view.getUint32(getTableRecordOffset(bytes, 'GPOS') + 8);
+        const lookupListOffset = gposOffset + view.getUint16(gposOffset + 8);
+        const lookupCount = view.getUint16(lookupListOffset);
+        assert.strictEqual(lookupCount, 20);
+        assert.strictEqual(getWarnings(parse(bytes.buffer)).filter(warning => warning.table === 'GPOS').length, 12);
+        view.setUint16(lookupListOffset + 2 + 2 * (lookupCount - 1), 0xFFF0);
+        const font = parse(bytes.buffer);
+        assert.strictEqual(font.tables.gpos, undefined);
+        assert.deepStrictEqual(getWarnings(font).filter(warning => warning.table === 'GPOS'), [
+            { table: 'GPOS', message: 'The table is skipped: Offset is outside the bounds of the DataView' }
+        ]);
+        // the warnings of the subtables of the GSUB table, which is kept
+        assert.strictEqual(getWarnings(font).filter(warning => warning.table === 'GSUB').length, 2);
+    });
+
+    it('reads the last table record of a tag the font file has twice, like fontTools', function() {
+        // Roboto-Black.ttf with the tag of its prep table record (the last record) set to fpgm: fontTools reads the
+        // last record of a tag (SFNTReader), python -c "...; TTFont(file)['fpgm'].program.getBytecode()" gives the
+        // bytes of the prep table, and the font has no prep table
+        const bytes = readFontFile('Roboto-Black.ttf');
+        const view = new DataView(bytes.buffer);
+        const prepRecordOffset = getTableRecordOffset(bytes, 'prep');
+        const prepOffset = view.getUint32(prepRecordOffset + 8);
+        const prepBytes = Array.from(bytes.subarray(prepOffset, prepOffset + view.getUint32(prepRecordOffset + 12)));
+        assert.ok(getTableRecordOffset(bytes, 'fpgm') < prepRecordOffset);
+        bytes.set([...'fpgm'].map(character => character.charCodeAt(0)), prepRecordOffset);
+        const font = parse(bytes.buffer);
+        assert.deepStrictEqual(font.tables.fpgm, prepBytes);
+        assert.strictEqual(font.tables.prep, undefined);
+        assert.deepStrictEqual(font.warnings, []);
+    });
+
+    describe('the GDEF, GSUB and GPOS tables, read from the bytes of the table only', function() {
+        // TestMarkAttachment.ttf: hb-shape --no-glyph-names --cluster-level=1 TestMarkAttachment.ttf -u <code points>
+        const markAttachmentShapes = [
+            // GPOS kern
+            [[0x61, 0x62], '[2=0+450|3=1+500]'],
+            // GPOS curs
+            [[0x79, 0x7A], '[7=0+470|8=1@-20,-100+480]'],
+            // GPOS mark and mkmk, the GDEF glyph classes (the marks without advance)
+            [[0x61, 0x301, 0x301, 0x20, 0x61, 0x323, 0x300], '[2=0+500|10=1@-250,20+0|10=2@-250,270+0|1=3+250|2=4+500|12=5@-300,30+0|11=6@-250,20+0]'],
+            // GSUB liga
+            [[0x66, 0x69], '[9=0+550]']
+        ];
+        const assertMarkAttachmentShapes = (font, message) => {
+            for (const [codePoints, expectedShape] of markAttachmentShapes) {
+                assert.strictEqual(formatShape(font, codePoints), expectedShape, message);
+            }
+        };
+
+        it('reads a table whose length runs past the end of the font file up to the end of the file, like HarfBuzz', function() {
+            // TestMarkAttachment.ttf with the GDEF, GSUB or GPOS table copied to the end of the file and its length 8
+            // bytes longer: HarfBuzz cuts the blob of the table at the end of the file (hb_blob_create_sub_blob), the
+            // same output of hb-shape as TestMarkAttachment.ttf
+            for (const tag of ['GDEF', 'GSUB', 'GPOS']) {
+                const font = parse(withTableLengthPastEndOfFile(readFontFile('TestMarkAttachment.ttf'), tag, 8).buffer);
+                assert.deepStrictEqual(font.warnings, [], tag);
+                assertMarkAttachmentShapes(font, tag);
+            }
+        });
+
+        it('skips the parts of a GDEF table that end past the length of the table, and keeps the others', function() {
+            // TestMarkAttachment.ttf with the length of its GDEF table 2 bytes shorter, so that its ItemVariationStore at
+            // the end of the table ends past it: HarfBuzz reads its offset as a NULL offset, the same output of hb-shape
+            // as TestMarkAttachment.ttf
+            const font = parse(withTableLength(readFontFile('TestMarkAttachment.ttf'), 'GDEF', length => length - 2).buffer);
+            assert.deepStrictEqual(getWarnings(font), [
+                { table: 'GDEF', message: 'The ItemVariationStore table is skipped: Offset is outside the bounds of the DataView' }
+            ]);
+            assert.strictEqual(font.tables.gdef.itemVarStore, undefined);
+            assertMarkAttachmentShapes(font);
+        });
+
+        it('skips a GDEF table whose header ends past the length of the table, with a warning', function() {
+            // the GDEF table of version 1.3 of TestMarkAttachment.ttf with the length 12, the fields of the header of
+            // version 1.0 only
+            const font = parse(withTableLength(readFontFile('TestMarkAttachment.ttf'), 'GDEF', () => 12).buffer);
+            assert.deepStrictEqual(getWarnings(font), [
+                { table: 'GDEF', message: 'The table is skipped: Offset is outside the bounds of the DataView' }
+            ]);
+            assert.strictEqual(font.tables.gdef, undefined);
+            assert.deepStrictEqual(getLayoutOutput(font), getLayoutOutput(parse(removeTables(readFontFile('TestMarkAttachment.ttf'), ['GDEF']))));
+        });
+
+        it('skips the parts of a GDEF table that fail to parse, with a warning for each one, and keeps the glyph classes', function() {
+            // TestMarkAttachment-MalformedGDEF.ttf (see test/generate-malformed-layout-fonts.py): its AttachList and
+            // LigCaretList past the end of the table, the coverage of its mark glyph set of the format 3:
+            // hb-shape --no-glyph-names --cluster-level=1 TestMarkAttachment-MalformedGDEF.ttf -u <code points> [--features=<features>]
+            const font = parse(readFontFile('TestMarkAttachment-MalformedGDEF.ttf').buffer);
+            assert.deepStrictEqual(getWarnings(font), [
+                'The AttachList table is skipped: Offset is outside the bounds of the DataView',
+                'The LigCaretList table is skipped: Offset is outside the bounds of the DataView',
+                'The coverage of the mark glyph set 0 is skipped: 0x46: Coverage format must be 1 or 2.'
+            ].map(message => ({ table: 'GDEF', message })));
+            assert.deepStrictEqual(font.tables.gdef.markGlyphSets, [undefined]);
+            // -u 0061,0323,0301 [2=0+500|12=1@-300,30+0|10=2@-250,20+0]
+            assert.strictEqual(formatShape(font, [0x61, 0x323, 0x301]), '[2=0+500|12=1@-300,30+0|10=2@-250,20+0]');
+            // like HarfBuzz, the mark glyph set covers no glyph: MARK_TO_BASE_FILTERED, -u 0061,0301 --features=ss14,-mark
+            // [2=0+500|10=1+0], and MARK_TO_MARK_FILTERED, -u 0061,0301,0301 --features=ss02,-mkmk
+            // [2=0+500|10=1@-250,20+0|10=2@-250,20+0], skip the acute
+            assert.strictEqual(formatShape(font, [0x61, 0x301], { features: { ss14: true, mark: false } }), '[2=0+500|10=1+0]');
+            assert.strictEqual(formatShape(font, [0x61, 0x301, 0x301], { features: { ss02: true, mkmk: false } }),
+                '[2=0+500|10=1@-250,20+0|10=2@-250,20+0]');
+        });
+
+        it('reads the tables of a WOFF2 font file from the bytes of the table only', function() {
+            // TestMarkAttachment-Malformed.woff2, TestMarkAttachment-Malformed.ttf compressed by fontTools: the errors
+            // give the offsets of the subtables in their table, the same ones
+            const font = parse(readFontFile('TestMarkAttachment-Malformed.woff2').buffer);
+            const sfntFont = parse(readFontFile('TestMarkAttachment-Malformed.ttf').buffer);
+            assert.ok(font.warnings.length > 0);
+            assert.deepStrictEqual(getWarnings(font), getWarnings(sfntFont));
+            // hb-shape --no-glyph-names --cluster-level=1 TestMarkAttachment-Malformed.ttf -u 0069,0301
+            // [5=0+250|10=1@-250,-500+0]; -u 0061,0066,0069 --features=ss12 [2=0+500|9=1+550]
+            assert.strictEqual(formatShape(font, [0x69, 0x301]), '[5=0+250|10=1@-250,-500+0]');
+            assert.strictEqual(formatShape(font, [0x61, 0x66, 0x69], { features: { ss12: true } }), '[2=0+500|9=1+550]');
+        });
+    });
+
+    it('skips the same tables and subtables with the option lowMemory', function() {
+        const bytes = readFontFile('TestCVARGVAROne.ttf');
+        for (const tag of ['name', 'fvar', 'gvar', 'HVAR']) {
+            const brokenBytes = withTablePastEndOfFile(bytes, tag);
+            const font = parse(brokenBytes.buffer.slice(0), { lowMemory: true });
+            assert.deepStrictEqual(getWarnings(font), getWarnings(parse(brokenBytes.buffer.slice(0))), tag);
+            assert.deepStrictEqual(Object.keys(font.tables).sort(), Object.keys(parse(removeTables(bytes, [tag]), { lowMemory: true }).tables).sort(), tag);
+        }
+        for (const fontFile of ['TestMarkAttachment-Malformed.ttf', 'TestContextualPositioning-Malformed.ttf', 'TestAlternateSubstitution-Malformed.ttf']) {
+            const fontBytes = readFontFile(fontFile);
+            assert.deepStrictEqual(getWarnings(parse(fontBytes.buffer.slice(0), { lowMemory: true })), getWarnings(parse(fontBytes.buffer.slice(0))), fontFile);
+        }
+    });
+
+    it('cannot write a font whose GSUB table has a skipped subtable, or a NULL offset in a subtable', function() {
+        // see Fonts with broken tables in README.md
+        const font = parse(readFontFile('TestMarkAttachment-Malformed.ttf').buffer);
+        assert.ok(font.tables.gsub.lookups[1].subtables.includes(undefined));
+        assert.throws(() => font.toArrayBuffer(), /^TypeError: Cannot read properties of undefined \(reading 'substFormat'\)$/);
+        // TestMarkAttachment-NullOffsets.ttf, parsed without warnings: its NULL coverage, Sequence, LigatureSet and
+        // Ligature offsets (see test/generate-malformed-layout-fonts.py)
+        const nullOffsetsFont = parse(readFontFile('TestMarkAttachment-NullOffsets.ttf').buffer);
+        assert.deepStrictEqual(nullOffsetsFont.warnings, []);
+        assert.throws(() => nullOffsetsFont.toArrayBuffer(), /^TypeError: Cannot read properties of undefined \(reading 'ligGlyph'\)$/);
+    });
+
+    it('cannot write a font without English names, e.g. parsed without a name table', function() {
+        // see Fonts with broken tables in README.md
+        const font = parse(removeTables(readFontFile('TestMarkAttachment.ttf'), ['name']));
+        assert.throws(() => font.toArrayBuffer(), {
+            name: 'Error',
+            message: 'A font without the English postScriptName name, nor the fontFamily and fontSubfamily names to make it from (e.g. a parsed font without a name table), cannot be written.'
+        });
+        // the font with its name table is written
+        assert.ok(parse(readFontFile('TestMarkAttachment.ttf').buffer).toArrayBuffer().byteLength > 0);
+    });
+
+    it('cannot write a font without the English postScriptName name and with only one of the fontFamily and fontSubfamily names', function() {
+        const font = parse(readFontFile('TestMarkAttachment.ttf').buffer);
+        for (const names of [{ windows: { fontFamily: { en: 'My Family' } } }, { windows: { fontSubfamily: { en: 'Bold' } } }]) {
+            font.names = names;
+            assert.throws(() => font.toArrayBuffer(), {
+                name: 'Error',
+                message: 'A font without the English postScriptName name, nor the fontFamily and fontSubfamily names to make it from (e.g. a parsed font without a name table), cannot be written.'
+            }, JSON.stringify(names));
+        }
+        // with both, the postScriptName is made from them
+        font.names = { windows: { fontFamily: { en: 'My Family' }, fontSubfamily: { en: 'Bold' } } };
+        assert.strictEqual(parse(font.toArrayBuffer()).getEnglishName('postScriptName'), 'MyFamily-Bold');
+    });
+
+    describe('a font with a meta table', function() {
+        // a font written by opentype.js with these metas: fontTools reads them from its meta table,
+        // ttx -t meta <font>: <text tag="dlng">Latn</text> and <text tag="slng">Latn,Arab</text>
+        const metas = { dlng: 'Latn', slng: 'Latn,Arab' };
+        let bytes;
+
+        before(function() {
+            const notdef = new Glyph({ name: '.notdef', advanceWidth: 500, path: new Path() });
+            const font = new Font({ familyName: 'Test', styleName: 'Regular', unitsPerEm: 1000, ascender: 800, descender: -200, glyphs: [notdef] });
+            font.metas = metas;
+            bytes = new Uint8Array(font.toArrayBuffer());
+        });
+
+        it('gives the font the metas of its meta table', function() {
+            const font = parse(bytes.slice().buffer);
+            assert.deepStrictEqual(font.warnings, []);
+            assert.deepStrictEqual(font.metas, metas);
+            assert.deepStrictEqual(font.tables.meta, metas);
+        });
+
+        it('skips a meta table that fails to parse, with a warning, and gives the font no metas', function() {
+            const font = parse(withTablePastEndOfFile(bytes, 'meta').buffer);
+            assert.deepStrictEqual(getWarnings(font), [{ table: 'meta', message: 'The table is skipped: Offset is outside the bounds of the DataView' }]);
+            assert.strictEqual(font.metas, undefined);
+            assert.strictEqual(font.tables.meta, undefined);
+            assert.strictEqual(parse(removeTables(bytes, ['meta'])).metas, undefined);
+        });
+    });
+
+    describe('an HVAR table', function() {
+        // TestHVARTwo.ttf (an HVAR table of version 1.0, 130 bytes, the item variation store at 20):
+        // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=900 <font> -u 0041,0042
+        const getHvarFontBytes = (fieldOffset, fieldBytes) => {
+            const bytes = readFontFile('TestHVARTwo.ttf');
+            const hvarOffset = new DataView(bytes.buffer).getUint32(getTableRecordOffset(bytes, 'HVAR') + 8);
+            bytes.set(fieldBytes, hvarOffset + fieldOffset);
+            return bytes;
+        };
+
+        it('skips a table of another major version, like HarfBuzz', function() {
+            // the 130 bytes of the table set to 0, of the version 0.0: [2=0+806|1=1+806], the advances of the gvar
+            // phantom points, the same as TestHVARTwo.ttf and as the font without its HVAR table
+            const font = parse(getHvarFontBytes(0, new Uint8Array(130)).buffer);
+            assert.deepStrictEqual(getWarnings(font), [{ table: 'HVAR', message: 'The table is skipped: Unsupported HVAR table version 0.0' }]);
+            assert.strictEqual(font.tables.hvar, undefined);
+            assert.strictEqual(formatShape(font, [0x41, 0x42], { variation: { wght: 900 } }), '[2=0+806|1=1+806]');
+            assert.strictEqual(font.getAdvanceWidth('AB', 1000, { variation: { wght: 900 } }), 1612);
+            // the version 2.0: [2=0+806|1=1+806]
+            const versionFont = parse(getHvarFontBytes(0, [0, 2]).buffer);
+            assert.deepStrictEqual(getWarnings(versionFont), [{ table: 'HVAR', message: 'The table is skipped: Unsupported HVAR table version 2.0' }]);
+            assert.strictEqual(formatShape(versionFont, [0x41, 0x42], { variation: { wght: 900 } }), '[2=0+806|1=1+806]');
+        });
+
+        it('varies no advance width with a NULL item variation store offset, like HarfBuzz', function() {
+            // the item variation store offset set to 0: [2=0+450|1=1+450], the advances of the default instance
+            const font = parse(getHvarFontBytes(4, [0, 0, 0, 0]).buffer);
+            assert.deepStrictEqual(font.warnings, []);
+            assert.strictEqual(font.tables.hvar.itemVariationStore, undefined);
+            assert.strictEqual(formatShape(font, [0x41, 0x42], { variation: { wght: 900 } }), '[2=0+450|1=1+450]');
+            assert.strictEqual(font.getAdvanceWidth('AB', 1000, { variation: { wght: 900 } }), 900);
+        });
+
+        it('varies no advance width with an item variation store that fails to parse, with a warning, like HarfBuzz', function() {
+            // the item variation store offset set past the end of the file, then to 140, past the end of the table but
+            // inside the file: HarfBuzz neuters the offset (HVARVVAR::sanitize), [2=0+450|1=1+450] for both
+            for (const storeOffset of [0xFFFFFF00, 140]) {
+                const view = new DataView(new ArrayBuffer(4));
+                view.setUint32(0, storeOffset);
+                const font = parse(getHvarFontBytes(4, new Uint8Array(view.buffer)).buffer);
+                assert.deepStrictEqual(getWarnings(font), [{
+                    table: 'HVAR',
+                    message: 'The ItemVariationStore table is skipped: Offset is outside the bounds of the DataView'
+                }], String(storeOffset));
+                assert.strictEqual(font.tables.hvar.itemVariationStore, undefined);
+                assert.strictEqual(formatShape(font, [0x41, 0x42], { variation: { wght: 900 } }), '[2=0+450|1=1+450]', String(storeOffset));
+            }
+        });
+
+        it('maps a glyph to the item of its index with an advance width mapping that fails to parse, with a warning, like HarfBuzz', function() {
+            // the advance width mapping offset (at 8) set to 140, past the end of the table: HarfBuzz neuters it and
+            // varies a glyph by the item of its glyph index in the first item variation data, [2=0+450|1=1+806]
+            const font = parse(getHvarFontBytes(8, [0, 0, 0, 140]).buffer);
+            assert.deepStrictEqual(getWarnings(font), [{
+                table: 'HVAR',
+                message: 'The advance width DeltaSetIndexMap table is skipped: Offset is outside the bounds of the DataView'
+            }]);
+            assert.ok(font.tables.hvar.itemVariationStore);
+            assert.strictEqual(font.tables.hvar.advanceWidth, undefined);
+            assert.strictEqual(formatShape(font, [0x41, 0x42], { variation: { wght: 900 } }), '[2=0+450|1=1+806]');
+        });
+
+        it('maps a glyph to the item of its index with an advance width mapping without entries, like HarfBuzz', function() {
+            // the mapCount of the advance width mapping (at 126, the mapping at 124) set to 0, then its format (at 124)
+            // set to 255: HarfBuzz maps a glyph to itself (DeltaSetIndexMap::map), --variations=wght=500
+            // [2=0+450|1=1+628] and --variations=wght=1000 [2=0+450|1=1+850] for both
+            for (const [fieldOffset, fieldBytes] of [[126, [0, 0]], [124, [255]]]) {
+                const font = parse(getHvarFontBytes(fieldOffset, fieldBytes).buffer);
+                assert.deepStrictEqual(font.warnings, [], String(fieldOffset));
+                assert.deepStrictEqual(font.tables.hvar.advanceWidth.map, [], String(fieldOffset));
+                assert.strictEqual(formatShape(font, [0x41, 0x42], { variation: { wght: 500 } }), '[2=0+450|1=1+628]', String(fieldOffset));
+                assert.strictEqual(formatShape(font, [0x41, 0x42], { variation: { wght: 1000 } }), '[2=0+450|1=1+850]', String(fieldOffset));
+                assert.strictEqual(font.getAdvanceWidth('AB', 1000, { variation: { wght: 500 } }), 1078, String(fieldOffset));
+            }
+        });
+
+        it('gives no delta for a region index past the region list, like HarfBuzz', function() {
+            // the first region index of the item variation data (at 102) set to 200, past the 5 regions of the store:
+            // HarfBuzz gives that region the scalar 0 (VarRegionList::evaluate) and still applies the others,
+            // --variations=wght=500 [2=0+545|1=1+545], --variations=wght=1000 [2=0+450|1=1+450]
+            const font = parse(getHvarFontBytes(102, [0, 200]).buffer);
+            assert.deepStrictEqual(font.warnings, []);
+            assert.strictEqual(formatShape(font, [0x41, 0x42], { variation: { wght: 500 } }), '[2=0+545|1=1+545]');
+            assert.strictEqual(formatShape(font, [0x41, 0x42], { variation: { wght: 1000 } }), '[2=0+450|1=1+450]');
+            // the outline, varied by gvar: hb-shape --show-extents --variations=wght=500 <font> -u 0041 [2=0+545<0,450,628,-450>]
+            const box = font.getPath('A', 0, 0, 1000, { variation: { wght: 500 } }).getBoundingBox();
+            assert.deepStrictEqual([box.x1, -box.y1, box.x2 - box.x1, box.y1 - box.y2], [0, 450, 628, -450]);
+            // the VariationRegionList offset of the store (at 22, the store at 20) set to 0: the region list is read at
+            // the start of the store, with no region, [2=0+450|1=1+450] at wght 500
+            const regionListFont = parse(getHvarFontBytes(22, [0, 0, 0, 0]).buffer);
+            assert.deepStrictEqual(regionListFont.warnings, []);
+            assert.deepStrictEqual(regionListFont.tables.hvar.itemVariationStore.variationRegions, []);
+            assert.strictEqual(formatShape(regionListFont, [0x41, 0x42], { variation: { wght: 500 } }), '[2=0+450|1=1+450]');
         });
     });
 });

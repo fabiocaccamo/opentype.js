@@ -62,11 +62,14 @@ if(typeof Symbol !== 'undefined' && Symbol.iterator) {
 
 /**
  * @param  {number} index
- * @return {opentype.Glyph | undefined}
+ * @return {opentype.Glyph | undefined} undefined for a glyph index the font has not, with or without lowMemory
  */
 GlyphSet.prototype.get = function(index) {
     // this.glyphs[index] is 'undefined' when low memory mode is on. glyph is pushed on request only.
     if (this.font._push && this.glyphs[index] === undefined) {
+        if (index < 0 || index >= this.font.numGlyphs) {
+            return undefined;
+        }
         this.font._push(index);
         if (typeof this.glyphs[index] === 'function') {
             this.glyphs[index] = this.glyphs[index]();
@@ -157,6 +160,8 @@ function ttfGlyphLoader(font, index, parseGlyph, data, position, buildPath) {
  * @param  {Function} parseCFFCharstring
  * @param  {function(number): number[]} readCharstring - reads the charstring of a glyph index from the font data,
  * called once, when the outline of the glyph is first drawn
+ * @param  {number} version - the major version of the table: 1 for a CFF table, 2 for a CFF2 table, whose glyphs only
+ * have the getBlendPath of their varied outlines
  * @return {opentype.Glyph}
  */
 function cffGlyphLoader(font, index, parseCFFCharstring, readCharstring, version) {
@@ -170,11 +175,14 @@ function cffGlyphLoader(font, index, parseCFFCharstring, readCharstring, version
             path.unitsPerEm = font.unitsPerEm;
             return path;
         };
-        // the outline at variation coordinates, the current variation of the font if omitted (see getTransform)
-        glyph.getBlendPath = function(variationCoords) {
-            charstring = charstring || readCharstring(index);
-            return parseCFFCharstring(font, glyph, charstring, version, variationCoords);
-        };
+        // the outline at variation coordinates, the current variation of the font if omitted (see getTransform): a CFF1
+        // charstring has no blend operator, its outline does not vary
+        if (version > 1) {
+            glyph.getBlendPath = function(variationCoords) {
+                charstring = charstring || readCharstring(index);
+                return parseCFFCharstring(font, glyph, charstring, version, variationCoords);
+            };
+        }
 
         return glyph;
     };

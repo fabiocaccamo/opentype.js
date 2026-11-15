@@ -1,6 +1,6 @@
 import assert from 'assert';
 import { hex, unhex, enableMockCanvas } from '../testutil.mjs';
-import cpal, { parseColor } from '../../src/tables/cpal.mjs';
+import cpal, { parseColor, checkPaletteIndex, isPaletteColorDrawn } from '../../src/tables/cpal.mjs';
 import Font from '../../src/font.mjs';
 
 describe('tables/cpal.mjs', function() {
@@ -134,6 +134,30 @@ describe('tables/cpal.mjs', function() {
         ];
 
         assert.deepEqual(convertedColors, expectedConvertedColors);
+    });
+
+    it('tells the colors of a palette that a COLR layer is drawn with, like HarfBuzz', function() {
+        // the two palettes of two colors of the table above: the color index 0xFFFF (the color of the text) and the
+        // colors of a palette are drawn, a color index past its entries is not
+        assert.deepStrictEqual([0, 1, 2, 0xFFFF].map(index => isPaletteColorDrawn(obj, index, 0)), [true, true, false, true]);
+        assert.deepStrictEqual([0, 1, 2].map(index => isPaletteColorDrawn(obj, index, 1)), [true, true, false]);
+        assert.strictEqual(isPaletteColorDrawn(obj, 1), true);
+        // a palette whose first color record plus the color index is past the color records
+        assert.strictEqual(isPaletteColorDrawn({ numPaletteEntries: 2, colorRecords: [1, 2, 3], colorRecordIndices: [0, 2] }, 1, 1), false);
+        // a CPAL table without palettes: only the color of the text
+        const tableWithoutPalettes = { numPaletteEntries: 0, colorRecords: [], colorRecordIndices: [] };
+        assert.strictEqual(isPaletteColorDrawn(tableWithoutPalettes, 0), false);
+        assert.strictEqual(isPaletteColorDrawn(tableWithoutPalettes, 0xFFFF), true);
+    });
+
+    it('throws for a palette index the table has not', function() {
+        assert.doesNotThrow(() => checkPaletteIndex(obj, 0));
+        assert.doesNotThrow(() => checkPaletteIndex(obj, 1));
+        assert.doesNotThrow(() => checkPaletteIndex(obj));
+        for (const palette of [2, -1, 0.5]) {
+            assert.throws(() => checkPaletteIndex(obj, palette), { message: `Palette index out of range (colorRecordIndices.length: 2, index: ${palette})` });
+        }
+        assert.throws(() => cpal.getPaletteColor(font, 0, 2), { message: 'Palette index out of range (colorRecordIndices.length: 2, index: 2)' });
     });
 
     it('correctly formats color values', function() {

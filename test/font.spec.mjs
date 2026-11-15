@@ -2,7 +2,7 @@ import assert from 'assert';
 import { Font, Glyph, Path, parse } from '../src/opentype.mjs';
 import glyphset from '../src/glyphset.mjs';
 import { readFileSync } from 'fs';
-import { createMockObject, replaceTextGlyphs } from './testutil.mjs';
+import { createMockObject, replaceTextGlyphs, getTableRecordOffset } from './testutil.mjs';
 import { itFailsUntilFixed } from './regression/helpers.mjs';
 import {
     glyphIndexes,
@@ -125,6 +125,81 @@ describe('font.mjs', function() {
         it('tables definition shall be serialized', function() {
             const os2 = font.toTables().tables.find(table => table.tableName === 'OS/2');
             assert.equal(os2.achVendID, 'TEST');
+        });
+        it('has no warnings', function() {
+            assert.deepStrictEqual(font.warnings, []);
+        });
+    });
+
+    describe('variation', function() {
+        it('varies the HVAR advance widths of a font with an fvar table whose gvar table is skipped, like HarfBuzz', function() {
+            // TestHVARTwo.ttf with the majorVersion of its gvar table set to 2: HarfBuzz skips the table and keeps
+            // varying the advance widths with HVAR, the outlines unvaried:
+            // hb-shape --no-glyph-names --show-extents --variations=wght=1000 <font> -u 0041,0042
+            // [2=0+850<0,450,450,-450>|1=1+850<0,450,450,-450>], --variations=wght=500 [2=0+628<0,450,450,-450>|...]
+            const bytes = new Uint8Array(readFileSync('./test/fonts/TestHVARTwo.ttf'));
+            const view = new DataView(bytes.buffer);
+            view.setUint16(view.getUint32(getTableRecordOffset(bytes, 'gvar') + 8), 2);
+            const variableFont = parse(bytes.buffer);
+            assert.deepStrictEqual(variableFont.warnings.map(({ table, message }) => ({ table, message })), [
+                { table: 'gvar', message: 'The table is skipped: Unsupported gvar table version 2.0' }
+            ]);
+            assert.strictEqual(variableFont.tables.gvar, undefined);
+            assert.ok(variableFont.variation);
+            for (const [weight, advance] of [[1000, 850], [500, 628]]) {
+                const variation = { wght: weight };
+                assert.deepStrictEqual(variableFont.shape('AB', { variation }).map(glyphPosition =>
+                    [glyphPosition.glyph.index, glyphPosition.xAdvance]), [[2, advance], [1, advance]], String(weight));
+                assert.strictEqual(variableFont.getAdvanceWidth('A', 1000, { variation }), advance, String(weight));
+                const box = variableFont.getPath('A', 0, 0, 1000, { variation }).getBoundingBox();
+                assert.deepStrictEqual([box.x1, -box.y1, box.x2 - box.x1, box.y1 - box.y2], [0, 450, 450, -450], String(weight));
+            }
+            variableFont.variation.set({ wght: 1000 });
+            assert.strictEqual(variableFont.getAdvanceWidth('A', 1000), 850);
+        });
+
+        it('reads an fvar table without an instances array, assigned to a font built in code, as an fvar table without instances', function() {
+            const path = new Path();
+            path.moveTo(0, 0);
+            path.lineTo(10, 0);
+            path.lineTo(10, 10);
+            path.close();
+            const variableFont = new Font({
+                familyName: 'MyFont',
+                styleName: 'Regular',
+                unitsPerEm: 1000,
+                ascender: 800,
+                descender: -200,
+                glyphs: [
+                    new Glyph({ name: '.notdef', path: new Path(), advanceWidth: 500 }),
+                    new Glyph({ name: 'A', unicode: 0x41, path, advanceWidth: 650 })
+                ]
+            });
+            const defaultPathData = variableFont.getPath('A', 0, 0, 1000).toPathData();
+            variableFont.tables.fvar = { axes: [{ tag: 'wght', minValue: 100, defaultValue: 400, maxValue: 900, name: { en: 'Weight' } }] };
+            assert.ok(variableFont.variation);
+            assert.deepStrictEqual(variableFont.variation.get(), { wght: 400 });
+            assert.strictEqual(variableFont.variation.getInstance(0), undefined);
+            assert.strictEqual(variableFont.getAdvanceWidth('A', 1000), 650);
+            assert.strictEqual(variableFont.getPath('A', 0, 0, 1000).toPathData(), defaultPathData);
+        });
+    });
+
+    describe('getEnglishName', function() {
+        it('gives the English name in the first platform names the font has, Unicode, else Macintosh, else Windows', function() {
+            assert.strictEqual(font.getEnglishName('fontFamily'), 'MyFont');
+            font.names = { windows: { fontFamily: { en: 'Windows Family' } } };
+            assert.strictEqual(font.getEnglishName('fontFamily'), 'Windows Family');
+            assert.strictEqual(font.getEnglishName('designer'), undefined);
+            // the name is not looked for in the next platform names
+            font.names = { unicode: {}, windows: { fontFamily: { en: 'Windows Family' } } };
+            assert.strictEqual(font.getEnglishName('fontFamily'), undefined);
+        });
+
+        it('gives undefined for a font without names, like a font parsed without a name table', function() {
+            font.names = {};
+            assert.strictEqual(font.getEnglishName('fontFamily'), undefined);
+            assert.doesNotThrow(() => font.validate());
         });
     });
 

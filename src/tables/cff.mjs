@@ -623,7 +623,8 @@ function parseCFFCharstring(font, glyph, code, version, coords) {
     let blendVector;
     let callDepth = 0;
     const cffTable = font.tables.cff2 || font.tables.cff;
-    coords = coords || font.variation && font.variation.get();
+    // a CFF1 charstring has no blend operator: its outline does not vary and keeps its fractional values
+    coords = coords || version > 1 && font.variation && font.variation.get();
 
     if (font.isCIDFont || version > 1) {
         const fdIndex = cffTable.topDict._fdSelect ? cffTable.topDict._fdSelect[glyph.index] : 0;

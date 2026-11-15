@@ -29,6 +29,7 @@ import Layout, {
     getSubtablesFirstGlyphDigest,
     createLookupFirstGlyphFilter,
     getLookupFilterGlyphDigest,
+    getLookupTableSubtables,
     getOpenTypeScriptTags,
     isRightToLeftScript,
     selectScriptTag
@@ -208,6 +209,21 @@ describe('layout.mjs', function() {
             };
             assert.equal(layout.getFeatureTable('latn', 'dflt', 'kern'), kernFeature);
             assert.equal(layout.getFeatureTable('latn', 'dflt', 'mark'), undefined);
+        });
+    });
+
+    describe('getLookupTables', function() {
+        it('gives no lookup for a NULL lookup offset of the LookupList, like the Null lookup of HarfBuzz', function() {
+            // a NULL lookup offset is an undefined lookup (see parseLookupList in parse.mjs), here the lookup 0 of liga
+            const ligatureLookup = { lookupType: 4, lookupFlag: 0, subtables: [], markFilteringSet: undefined };
+            font.tables.gsub = {
+                version: 1,
+                scripts: [{ tag: 'latn', script: { defaultLangSys: { reserved: 0, reqFeatureIndex: 0xffff, featureIndexes: [0] }, langSysRecords: [] } }],
+                features: [{ tag: 'liga', feature: { params: 0, lookupListIndexes: [0, 1] } }],
+                lookups: [undefined, ligatureLookup]
+            };
+            assert.deepStrictEqual(layout.getLookupTables('latn', 'dflt', 'liga', 4), [ligatureLookup]);
+            assert.deepStrictEqual(layout.getLookupTables('latn', 'dflt', 'liga', 1), []);
         });
     });
 
@@ -547,6 +563,15 @@ describe('layout.mjs', function() {
             assert.equal(layout.getGlyphClass(classDef2, 0x4a), 0);
             assert.equal(layout.getGlyphClass(classDef2, 0xd4), 0);
         });
+
+        it('gives every glyph the class 0 for a NULL class definition offset, like HarfBuzz', function() {
+            assert.strictEqual(layout.getGlyphClass(undefined, 0x46), 0);
+        });
+
+        it('gives every glyph the class 0 for a class definition table of an unknown format, like HarfBuzz', function() {
+            // parseClassDef reads only the format of such a table (ClassDef::get_class of HarfBuzz returns 0)
+            assert.strictEqual(layout.getGlyphClass({ format: 3 }, 0x46), 0);
+        });
     });
 
     describe('getCoverageIndex', function() {
@@ -595,6 +620,11 @@ describe('layout.mjs', function() {
         it('finds no glyph in a coverage table of no valid format', function() {
             assert.strictEqual(layout.getCoverageIndex({ glyphs: [0x4f] }, 0x4f), -1);
             assert.strictEqual(layout.getCoverageIndex({ format: 3, glyphs: [0x4f] }, 0x4f), -1);
+        });
+
+        it('finds no glyph for a NULL coverage offset, an empty coverage like in HarfBuzz', function() {
+            assert.strictEqual(layout.getCoverageIndex(undefined, 0x4f), -1);
+            assert.deepStrictEqual(layout.expandCoverage(undefined), []);
         });
 
         describe('getCoveragesGlyphDigest and mayGlyphDigestHave', function() {
@@ -713,6 +743,16 @@ describe('layout.mjs', function() {
                 extensionLookupTable.subtables[0].extension = { substFormat: 1, coverage: cov2, deltaGlyphId: 1 };
                 assert.strictEqual(getLookupFilterGlyphDigest(firstGlyphFilter, getFirstGlyphSubtables(extensionLookupTable)), null);
             });
+        });
+    });
+
+    describe('getLookupTableSubtables', function() {
+        it('gives the subtables of a lookup but the undefined ones, the subtables array itself when it has none', function() {
+            const subtable = { substFormat: 1 };
+            const lookupTable = { lookupType: 1, lookupFlag: 0, subtables: [subtable, subtable] };
+            assert.strictEqual(getLookupTableSubtables(lookupTable), lookupTable.subtables);
+            assert.deepStrictEqual(getLookupTableSubtables({ ...lookupTable, subtables: [undefined, subtable, undefined] }), [subtable]);
+            assert.deepStrictEqual(getLookupTableSubtables({ ...lookupTable, subtables: [undefined] }), []);
         });
     });
 
@@ -946,6 +986,18 @@ describe('layout.mjs', function() {
             assert.deepStrictEqual(matchSequenceContext(gdef, ignoreMarks, subtable, 1, glyphs, 0), { inputPositions: [0, 2], lookupRecords: records(2) });
             assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 1, glyphs, 0), { inputPositions: [0], lookupRecords: records(3) });
             assert.strictEqual(matchSequenceContext(gdef, noFlag, subtable, 1, glyphs, 2), null);
+        });
+
+        it('matches a NULL rule (undefined) as a rule of no glyph that applies no lookup, and no rule after it, like HarfBuzz', function() {
+            // see position.spec.mjs for the reference from hb-shape (TestContextualPositioning-Malformed.ttf)
+            const subtable = {
+                coverage: coverage([glyphA]),
+                ruleSets: [[{ input: [glyphC], lookupRecords: records(1) }, undefined, { input: [glyphB], lookupRecords: records(2) }]]
+            };
+            assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 1, [glyphA, glyphC], 0), { inputPositions: [0, 1], lookupRecords: records(1) });
+            assert.deepStrictEqual(matchSequenceContext(gdef, noFlag, subtable, 1, [glyphA, glyphB], 0), { inputPositions: [0], lookupRecords: [] });
+            const chainedSubtable = { coverage: coverage([glyphA]), chainRuleSets: [[undefined]] };
+            assert.deepStrictEqual(matchChainedSequenceContext(gdef, noFlag, chainedSubtable, 1, [glyphA, glyphB], 0), { inputPositions: [0], lookupRecords: [] });
         });
 
         it('matches the rules of the class of the glyph (format 2), class 0 for the glyphs out of the class definition', function() {

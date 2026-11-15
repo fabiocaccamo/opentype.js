@@ -1564,6 +1564,19 @@ describe('featureQuery.mjs', function() {
             assert.deepStrictEqual(glyphsAt(), [4]);
         });
 
+        it('applies the feature variations of a font with an fvar table and no glyph variations, like HarfBuzz', function() {
+            // TestFvarOnly.ttf and TestFvarOnly-CFF.otf (test/generate-fvar-only-fonts.py): an fvar table without gvar,
+            // CFF2 nor HVAR table, rvrn substitutes A with B from the normalized wght 0.5 (650) up:
+            // hb-shape --no-glyph-names --cluster-level=1 --variations=wght=<650, 900> <font> -u 0041 [2=0+500],
+            // --variations=wght=<649, 400> [1=0+500]
+            for (const fontPath of ['./test/fonts/TestFvarOnly.ttf', './test/fonts/TestFvarOnly-CFF.otf']) {
+                const font = loadSync(fontPath);
+                const glyphsAt = wght => font.shape('A', { variation: { wght } }).map(({ glyph, xAdvance }) => [glyph.index, xAdvance]);
+                assert.deepStrictEqual([650, 900, 649, 400].map(glyphsAt), [[[2, 500]], [[2, 500]], [[1, 500]], [[1, 500]]], fontPath);
+                assert.deepStrictEqual(font.warnings, [], fontPath);
+            }
+        });
+
         it('gives the required feature with the alternate feature table of the variation, like HarfBuzz', function() {
             // TestVariationRequired.ttf: TestVariationPrecision.ttf with rvrn (feature 0: no lookups, lookup 0 sub period by
             // space; from wght 650.32 up) as the required feature of the DefaultLangSys of DFLT (ReqFeatureIndex 0, set with
@@ -1784,6 +1797,98 @@ describe('featureQuery.mjs', function() {
                 .stringToGlyphIndexes('\u{644}\u{200D}\u{627}', { features: { [featureTag]: true } });
             assert.deepStrictEqual(shapeInFeature('calt').sort((indexA, indexB) => indexA - indexB), [alef, lamInitial]);
             assert.deepStrictEqual(shapeInFeature('ss01'), [lamAlef]);
+        });
+    });
+
+    // the fonts of test/generate-malformed-layout-fonts.py, patched copies of TestMarkAttachment.ttf:
+    // hb-shape --no-glyph-names --cluster-level=1 <font> -u <code points> --features=<features>
+    describe('the malformed GSUB subtables, read like HarfBuzz', function() {
+        const shapeGlyphs = (font, text, features) => font.shape(text, { features }).map(glyphPosition => glyphPosition.glyph.index);
+
+        it('skips a subtable with a coverage table of an unknown format, like the fonts of Tabler Icons (issue 617)', function() {
+            // TestMarkAttachment-Malformed.ttf, LIGA_A_F_I: -u 0061,0066,0069 --features=ss12 [2=0+500|9=1+550], f i
+            // still a ligature of liga
+            const font = parse(readFileSync('./test/fonts/TestMarkAttachment-Malformed.ttf'));
+            assert.deepStrictEqual(shapeGlyphs(font, 'afi', { ss12: true }), [2, 9]);
+            assert.deepStrictEqual(font.tables.gsub.lookups[1].subtables, [undefined]);
+        });
+
+        it('skips a subtable of an unknown format', function() {
+            // LIGA_MARKS: -u 0061,0323,0300 --features=ss17,-mark,-mkmk [2=0+500|12=1+0|11=2+0]
+            const font = parse(readFileSync('./test/fonts/TestMarkAttachment-Malformed.ttf'));
+            assert.deepStrictEqual(shapeGlyphs(font, 'a\u0323\u0300', { ss17: true, mark: false, mkmk: false }), [2, 12, 11]);
+        });
+
+        it('reads a NULL coverage offset as an empty coverage', function() {
+            // TestMarkAttachment-NullOffsets.ttf, LIGA_F_I_A: -u 0066,0069,0061 --features=ss16 [9=0+550|2=2+500]
+            const font = parse(readFileSync('./test/fonts/TestMarkAttachment-NullOffsets.ttf'));
+            assert.deepStrictEqual(shapeGlyphs(font, 'fia', { ss16: true }), [9, 2]);
+            assert.deepStrictEqual(font.substitution.getLigatures('ss16'), []);
+        });
+
+        it('reads a NULL LigatureSet offset as an empty ligature set', function() {
+            // TestMarkAttachment-NullOffsets.ttf, LIGA_MARKS: -u 0061,0323,0300 --features=ss17,-mark,-mkmk
+            // [2=0+500|12=1+0|11=2+0] (TestMarkAttachment.ttf: [2=0+500|10=1+0])
+            const font = parse(readFileSync('./test/fonts/TestMarkAttachment-NullOffsets.ttf'));
+            assert.deepStrictEqual(shapeGlyphs(font, 'a\u0323\u0300', { ss17: true, mark: false, mkmk: false }), [2, 12, 11]);
+            assert.deepStrictEqual(font.substitution.getLigatures('ss17'), []);
+        });
+
+        it('reads a NULL Ligature offset as a ligature that matches nothing, and keeps the other ligatures of the set', function() {
+            // TestMarkAttachment-NullOffsets.ttf, LIGA_F_I without its first ligature f i i: -u 0066,0069 [9=0+550],
+            // -u 0066,0069,0069 [9=0+550|5=2+250] (TestMarkAttachment.ttf: [9=0+550])
+            const font = parse(readFileSync('./test/fonts/TestMarkAttachment-NullOffsets.ttf'));
+            assert.deepStrictEqual(shapeGlyphs(font, 'fi'), [9]);
+            assert.deepStrictEqual(shapeGlyphs(font, 'fii'), [9, 5]);
+            assert.deepStrictEqual(font.substitution.getLigatures('liga'), [{ sub: [4, 5], by: 9 }]);
+        });
+
+        it('reads a NULL Sequence offset as an empty sequence, which deletes the glyph', function() {
+            // TestMarkAttachment-NullOffsets.ttf, MULTIPLE_Z: -u 0061,007A --features=ss10 [2=0+500]
+            // (TestMarkAttachment.ttf: [2=0+500|2=1+500|6=1+500])
+            const font = parse(readFileSync('./test/fonts/TestMarkAttachment-NullOffsets.ttf'));
+            assert.deepStrictEqual(shapeGlyphs(font, 'az', { ss10: true }), [2]);
+            assert.deepStrictEqual(font.substitution.getMultiple('ss10'), []);
+        });
+
+        // TestAlternateSubstitution-Malformed.ttf (TestAlternateSubstitution.ttf for the glyphs of the unpatched font):
+        // hb-shape --no-glyph-names --cluster-level=1 TestAlternateSubstitution-Malformed.ttf -u <code points>
+        // --features=<features>
+        describe('of TestAlternateSubstitution-Malformed.ttf', function() {
+            let font;
+            before(function() {
+                font = parse(readFileSync('./test/fonts/TestAlternateSubstitution-Malformed.ttf'));
+            });
+
+            it('reads a NULL AlternateSet offset as an empty alternate set', function() {
+                // -u 006E --features=ss03 [56=0+500] (TestAlternateSubstitution.ttf: [57=0+500]), the same with ss04=2
+                assert.deepStrictEqual(shapeGlyphs(font, 'n', { ss03: true }), [56]);
+                assert.deepStrictEqual(shapeGlyphs(font, 'n', { ss04: 2 }), [56]);
+                assert.deepStrictEqual(font.substitution.getAlternates('ss03'), []);
+            });
+
+            it('applies the subtables of a lookup after its subtable that fails to parse', function() {
+                // the cv02 lookup, whose first subtable has an unknown format: -u 0062 --features=cv02=2 [8=0+500], the
+                // b.alt2 of its second subtable (TestAlternateSubstitution.ttf: the same), and with cv02 [7=0+500]
+                assert.deepStrictEqual(shapeGlyphs(font, 'b', { cv02: 2 }), [8]);
+                assert.deepStrictEqual(shapeGlyphs(font, 'b', { cv02: true }), [7]);
+            });
+
+            it('applies no subtable of a lookup of an unknown type, and the other lookups', function() {
+                // the salt lookup of type 9: -u 0062 --features=salt [6=0+500] (TestAlternateSubstitution.ttf: [7=0+500]);
+                // -u 0061 --features=aalt [3=0+500]
+                assert.deepStrictEqual(shapeGlyphs(font, 'b', { salt: true }), [6]);
+                assert.deepStrictEqual(shapeGlyphs(font, 'a', { aalt: true }), [3]);
+            });
+
+            it('skips a contextual subtable of format 3 with a glyph count of 0, like HarfBuzz', function() {
+                // the fina lookup of type 5 format 3, its glyphCount 0: -u 0644,0635,0635,0637 --features=fina
+                // [75=3+500|73=2+500|73=1+500|65=0+500] (TestAlternateSubstitution.ttf: [76=3+500|74=1+500|65=0+500]);
+                // the ss02 lookup of type 6 format 3, its inputGlyphCount 0: -u 0066,0067 --features=ss02
+                // [20=0+500|23=1+500] (TestAlternateSubstitution.ttf: [21=0+500|23=1+500])
+                assert.deepStrictEqual(shapeGlyphs(font, '\u0644\u0635\u0635\u0637', { fina: true }), [75, 73, 73, 65]);
+                assert.deepStrictEqual(shapeGlyphs(font, 'fg', { ss02: true }), [20, 23]);
+            });
         });
     });
 });

@@ -427,8 +427,9 @@ Parser.prototype.parseValueRecord = function(valueFormat, subtableStart) {
 
     // Device table (non-variable font) / VariationIndex table (variable font)
     // https://docs.microsoft.com/fr-fr/typography/opentype/spec/chapter2#devVarIdxTbls
+    // like HarfBuzz, a device that ends past the end of the data is read as a NULL offset (sanitize_value_devices)
     const parseDevice = (offset) => {
-        if (!offset || subtableStart === undefined) {
+        if (!offset || subtableStart === undefined || !isDeviceTableInData(this.data, subtableStart + offset)) {
             return undefined;
         }
         return new Parser(this.data, subtableStart + offset).parseDeviceTable();
@@ -455,6 +456,39 @@ Parser.prototype.parseDeviceTable = function() {
     }
     return { deltaFormat, startSize: first, endSize: second };
 };
+
+// the startSize (or deltaSetOuterIndex), endSize (or deltaSetInnerIndex) and deltaFormat fields of a Device or
+// VariationIndex table
+const DEVICE_TABLE_HEADER_SIZE = 6;
+
+/**
+ * The size in bytes of a Device or VariationIndex table, like HarfBuzz (HintingDevice::get_size): the deltas of a
+ * Device table of format 1, 2 or 3 after its header, the header only for the other formats
+ * @param {{deltaFormat: number, startSize: number, endSize: number}} device - see parseDeviceTable
+ * @returns {number}
+ */
+function getDeviceTableSize(device) {
+    const { deltaFormat, startSize, endSize } = device;
+    if (deltaFormat < 1 || deltaFormat > 3 || startSize > endSize) {
+        return DEVICE_TABLE_HEADER_SIZE;
+    }
+    return 2 * (4 + ((endSize - startSize) >> (4 - deltaFormat)));
+}
+
+/**
+ * Whether the Device or VariationIndex table at an offset of the data ends inside the data, which HarfBuzz checks when
+ * it sanitizes the table (Device::sanitize)
+ * @param {DataView} data - the data of the table that has the device, e.g. a GPOS table
+ * @param {number} offset - the offset of the device in the data
+ * @returns {boolean}
+ */
+function isDeviceTableInData(data, offset) {
+    if (offset + DEVICE_TABLE_HEADER_SIZE > data.byteLength) {
+        return false;
+    }
+    const device = new Parser(data, offset).parseDeviceTable();
+    return offset + getDeviceTableSize(device) <= data.byteLength;
+}
 
 /**
  * Parse a list of GPOS valueRecords
@@ -496,6 +530,7 @@ Parser.prototype.parsePointer32 = function(description) {
  * or a list of offsets to lists of offsets to any kind of items.
  * If itemCallback is not provided, a list of list of UShort is assumed.
  * If provided, itemCallback is called on each item and must parse the item.
+ * A NULL offset, to a list or to an item, is read as undefined.
  * See examples in tables/gsub.mjs
  */
 Parser.prototype.parseListOfLists = function(itemCallback) {
@@ -516,6 +551,10 @@ Parser.prototype.parseListOfLists = function(itemCallback) {
             const subOffsets = this.parseOffset16List();
             const subList = new Array(subOffsets.length);
             for (let j = 0; j < subOffsets.length; j++) {
+                if (subOffsets[j] === 0) {
+                    subList[j] = undefined;
+                    continue;
+                }
                 this.relativeOffset = start + subOffsets[j];
                 subList[j] = itemCallback.call(this);
             }
@@ -700,48 +739,180 @@ Parser.prototype.parseFeatureParams = function(tag) {
 Parser.prototype.parseFeatureList = function() {
     // the tag of the feature record being parsed, which tells how to parse its FeatureParams table
     let tag;
+    const parseFeature = function() {
+        // the FeatureParams offset is relative to the start of the Feature table
+        const featureStart = this.offset;
+        const feature = {
+            featureParams: this.parseOffset16(),
+            lookupListIndexes: this.parseUShortList()
+        };
+        if (feature.featureParams) {
+            let featureParamsTable;
+            try {
+                featureParamsTable = new Parser(this.data, featureStart + feature.featureParams).parseFeatureParams(tag);
+            } catch (error) {
+                // a malformed FeatureParams table only loses the UI names, not the feature
+                console.warn('Failed to parse the FeatureParams table of the ' + tag + ' feature, skipping: ' + error.message);
+            }
+            if (featureParamsTable) {
+                feature.featureParamsTable = featureParamsTable;
+            }
+        }
+        return feature;
+    };
     return this.parsePointer(Parser.recordList({
         tag: function() {
             tag = this.parseTag();
             return tag;
         },
-        feature: Parser.pointer(function() {
-            // the FeatureParams offset is relative to the start of the Feature table
-            const featureStart = this.offset;
-            const feature = {
-                featureParams: this.parseOffset16(),
-                lookupListIndexes: this.parseUShortList()
-            };
-            if (feature.featureParams) {
-                let featureParamsTable;
-                try {
-                    featureParamsTable = new Parser(this.data, featureStart + feature.featureParams).parseFeatureParams(tag);
-                } catch (error) {
-                    // a malformed FeatureParams table only loses the UI names, not the feature
-                    console.warn('Failed to parse the FeatureParams table of the ' + tag + ' feature, skipping: ' + error.message);
-                }
-                if (featureParamsTable) {
-                    feature.featureParamsTable = featureParamsTable;
-                }
-            }
-            return feature;
-        })
+        // like HarfBuzz (the Null Feature), a NULL Feature offset reads as a Feature table without lookups
+        feature: function() {
+            return this.parsePointer(parseFeature) || { featureParams: 0, lookupListIndexes: [] };
+        }
     })) || [];
 };
 
-Parser.prototype.parseLookupList = function(lookupTableParsers) {
-    return this.parsePointer(Parser.list(Parser.pointer(function() {
-        const lookupType = this.parseUShort();
-        check.argument(1 <= lookupType && lookupType <= 9, 'GPOS/GSUB lookup type ' + lookupType + ' unknown.');
-        const lookupFlag = this.parseUShort();
-        const useMarkFilteringSet = lookupFlag & 0x10;
-        return {
-            lookupType: lookupType,
-            lookupFlag: lookupFlag,
-            subtables: this.parseList(Parser.pointer(lookupTableParsers[lookupType])),
-            markFilteringSet: useMarkFilteringSet ? this.parseUShort() : undefined
-        };
-    }))) || [];
+/**
+ * Throw an error: what the parsers that take a callback for the errors of the parts of a table they can skip (e.g.
+ * parseLookupList) do when they are given no callback
+ * @param {Error} error
+ */
+function throwError(error) {
+    throw error;
+}
+
+/**
+ * Parse a part of a table (e.g. GDEF, GSUB, GPOS, HVAR, MVAR) at an offset of the data, like HarfBuzz neuters the
+ * offset of a part that fails to sanitize: a part that fails to parse (e.g. of an unknown format, or that ends past the
+ * end of the data) is read as a NULL offset, and its error is passed to onError
+ * @param {DataView} data
+ * @param {number} structStart - the offset of the part in the data
+ * @param {function(): object} description - the parser of the part, called on a Parser at its start
+ * @param {function(Error)} onError
+ * @returns {object|undefined} undefined for a part that fails to parse
+ */
+function parseSkippableStruct(data, structStart, description, onError) {
+    try {
+        return new Parser(data, structStart).parseStruct(description);
+    } catch (error) {
+        onError(error);
+        return undefined;
+    }
+}
+
+/**
+ * The parser of the parts of a table (e.g. GDEF, HVAR) at their offsets from the start of the table, like HarfBuzz
+ * neuters the offset of a part that fails to sanitize: parsePart(partName, partOffset, description) gives undefined for
+ * a NULL offset and for a part that fails to parse (see parseSkippableStruct), whose error is passed to onPartError
+ * with the name of the part
+ * @param {DataView} data
+ * @param {number} tableStart - the offset of the table, or of the part that holds the offsets, in the data
+ * @param {function(Error, string)} onPartError
+ * @returns {function(string, number, function(): object): (object|undefined)}
+ */
+function createSkippablePartParser(data, tableStart, onPartError) {
+    return (partName, partOffset, description) => partOffset ?
+        parseSkippableStruct(data, tableStart + partOffset, description, error => onPartError(error, partName)) : undefined;
+}
+
+/**
+ * Parse the LookupList of a GSUB or GPOS table: its lookups (undefined for a NULL lookup offset), each one with its
+ * subtables, undefined for a NULL subtable offset and for a subtable that fails to parse (see parseSkippableStruct)
+ * @param {Array<function(): object>} lookupTableParsers - the parser of the subtables of each lookup type
+ * @param {function(Error, number, number|undefined)} [onSubtableError] - called with the error, the lookup index and
+ * the subtable index of each subtable that fails to parse, and with an undefined subtable index for an extension lookup
+ * whose subtables are all skipped (see parseLookup); the error is thrown if omitted
+ * @param {number} [extensionLookupType] - the lookup type of the extension lookups of the table: 7 in GSUB, 9 in GPOS
+ * @returns {Array<object|undefined>}
+ */
+Parser.prototype.parseLookupList = function(lookupTableParsers, onSubtableError = throwError, extensionLookupType) {
+    return this.parsePointer(function() {
+        const lookupOffsets = this.parseOffset16List();
+        return lookupOffsets.map((lookupOffset, lookupIndex) => {
+            if (!lookupOffset) {
+                return undefined;
+            }
+            return new Parser(this.data, this.offset + lookupOffset).parseLookup(lookupTableParsers,
+                (error, subtableIndex) => onSubtableError(error, lookupIndex, subtableIndex), extensionLookupType);
+        });
+    }) || [];
+};
+
+/**
+ * The extensionLookupType of a subtable of an extension lookup (GSUB type 7, GPOS type 9), like HarfBuzz
+ * (Extension::get_type): 0 for a NULL subtable offset and a subtable of a format other than 1. A subtable that does not
+ * fit in the data has the type 0 too, so that only its lookup is skipped, where HarfBuzz rejects the whole GSUB or GPOS
+ * table for an extension lookup of two or more subtables (see Fonts with broken tables in README.md)
+ * @param {DataView} data
+ * @param {number} lookupStart - the offset of the lookup in the data
+ * @param {number} subtableOffset - the offset of the subtable from the start of the lookup
+ * @returns {number}
+ */
+function getExtensionSubtableLookupType(data, lookupStart, subtableOffset) {
+    // the format and the extensionLookupType of an Extension subtable
+    const extensionHeaderSize = 4;
+    const subtableStart = lookupStart + subtableOffset;
+    if (!subtableOffset || subtableStart + extensionHeaderSize > data.byteLength) {
+        return 0;
+    }
+    const parser = new Parser(data, subtableStart);
+    return parser.parseUShort() === 1 ? parser.parseUShort() : 0;
+}
+
+/**
+ * The parser of the subtables of a lookup type without a parser, which fails to parse each one
+ * @param {number} lookupType
+ * @returns {function(): object}
+ */
+function createUnknownLookupTypeParser(lookupType) {
+    return () => {
+        throw new Error('GPOS/GSUB lookup type ' + lookupType + ' unknown.');
+    };
+}
+
+/**
+ * Parse a Lookup table of a GSUB or GPOS table (see parseLookupList). Like HarfBuzz ignores a lookup of an unknown
+ * type (Lookup::dispatch), the subtables of a lookup type without a parser in lookupTableParsers fail to parse: the
+ * lookup keeps its type, its subtables are undefined. So are the subtables of an extension lookup whose subtables have
+ * not all the same extensionLookupType, which the specification requires: HarfBuzz drops such a lookup
+ * (Lookup::sanitize), its error is passed to onSubtableError with an undefined subtable index, and its subtables are
+ * not parsed.
+ * @param {Array<function(): object>} lookupTableParsers
+ * @param {function(Error, number|undefined)} onSubtableError - called with the error and the subtable index of each
+ * subtable that fails to parse, and with an undefined subtable index for an extension lookup whose subtables are all
+ * skipped
+ * @param {number} [extensionLookupType] - the lookup type of the extension lookups: 7 in GSUB, 9 in GPOS
+ * @returns {{lookupType: number, lookupFlag: number, subtables: Array<object|undefined>, markFilteringSet: number}}
+ */
+Parser.prototype.parseLookup = function(lookupTableParsers, onSubtableError, extensionLookupType) {
+    const lookupType = this.parseUShort();
+    const parseSubtable = lookupTableParsers[lookupType] || createUnknownLookupTypeParser(lookupType);
+    const lookupFlag = this.parseUShort();
+    const useMarkFilteringSet = lookupFlag & 0x10;
+    const subtableOffsets = this.parseOffset16List();
+    const lookup = {
+        lookupType: lookupType,
+        lookupFlag: lookupFlag,
+        subtables: subtableOffsets.map(() => undefined),
+        markFilteringSet: useMarkFilteringSet ? this.parseUShort() : undefined
+    };
+    if (lookupType === extensionLookupType) {
+        const extensionLookupTypes = subtableOffsets.map(subtableOffset =>
+            getExtensionSubtableLookupType(this.data, this.offset, subtableOffset));
+        if (extensionLookupTypes.some(subtableLookupType => subtableLookupType !== extensionLookupTypes[0])) {
+            onSubtableError(new Error('The subtables of an extension lookup must have the same extension lookup ' +
+                'type, not ' + extensionLookupTypes.join(', ')), undefined);
+            return lookup;
+        }
+    }
+    lookup.subtables = subtableOffsets.map((subtableOffset, subtableIndex) => {
+        if (!subtableOffset) {
+            return undefined;
+        }
+        return parseSkippableStruct(this.data, this.offset + subtableOffset, parseSubtable,
+            error => onSubtableError(error, subtableIndex));
+    });
+    return lookup;
 };
 
 // sequence context tables
@@ -1024,11 +1195,14 @@ Parser.prototype.parseDeltaSetIndexMap = function() {
             console.error(`unsupported DeltaSetIndexMap format ${format}`);
     }
 
+    // like HarfBuzz (DeltaSetIndexMap::map), a map without entries (a mapCount of 0, or an unknown format) maps each
+    // glyph to the item of its glyph index (see getVariableAdjustment)
     if(!mapCount) return {
         format,
-        entryFormat
+        entryFormat,
+        map
     };
-    
+
     const bitCount = (entryFormat & masks.INNER_INDEX_BIT_COUNT_MASK) + 1;
     const entrySize = ((entryFormat & masks.MAP_ENTRY_SIZE_MASK) >> 4) + 1;
 
@@ -1084,7 +1258,60 @@ Parser.prototype.parseDeltaSets = function(itemCount, wordDeltaCount, regionInde
     return deltas;
 };
 
-Parser.prototype.parseTupleVariationStoreList = function(axisCount, flavor, glyphs) {
+/**
+ * A view on the bytes of a table, or of a part of a table, only, like a sub-blob of HarfBuzz (hb_blob_create_sub_blob):
+ * for the parsers that read an offset past the end of the table as a NULL offset (see isDeviceTableInData), or fail to
+ * parse a part that ends past it, like HarfBuzz sanitizes the layout tables and reads the variation data of a glyph of a
+ * gvar table. A part that ends past the end of the data is cut there; a part that starts past it, or of a negative
+ * length, throws a RangeError.
+ * @param {DataView} data - the data of the table or of the part (e.g. the data of the font file)
+ * @param {number} start - the offset of the table or of the part in the data
+ * @param {number} length - the length of the table or of the part
+ * @return {DataView}
+ */
+function getTableView(data, start, length) {
+    return new DataView(data.buffer, data.byteOffset + start, Math.min(length, data.byteLength - start));
+}
+
+/**
+ * Parse the GlyphVariationData of a glyph of a gvar table (see parseTupleVariationStore) from its bytes only, like
+ * HarfBuzz (gvar::get_glyph_var_data_bytes): undefined, the glyph not varied, when its header or its shared point
+ * numbers fail to parse, the tuples from the first tuple variation header that fails to parse skipped, and the data of
+ * a tuple that fail to parse (e.g. that run past the end of the data of the glyph) null when they are first read, each
+ * error passed to onGlyphVariationsError
+ * @param {DataView} data - the data of the gvar table
+ * @param {number} start - the offset of the GlyphVariationData of the glyph in the data
+ * @param {number} length - its length, up to the offset of the GlyphVariationData of the next glyph
+ * @param {number} axisCount
+ * @param {string} flavor
+ * @param {Array} glyphs
+ * @param {number} glyphIndex
+ * @param {function(Error, number, number, boolean)} onGlyphVariationsError - see parseTupleVariationStoreList
+ * @returns {object|undefined}
+ */
+function parseGlyphVariations(data, start, length, axisCount, flavor, glyphs, glyphIndex, onGlyphVariationsError) {
+    try {
+        return new Parser(getTableView(data, start, length), 0).parseTupleVariationStore(0, axisCount, flavor, glyphs,
+            glyphIndex, (error, tupleIndex, isHeaderError) => onGlyphVariationsError(error, glyphIndex, tupleIndex, isHeaderError));
+    } catch (error) {
+        onGlyphVariationsError(error, glyphIndex);
+        return undefined;
+    }
+}
+
+/**
+ * Parse the GlyphVariationData offsets of a gvar table: the variation data of each glyph, read when it is first used
+ * @param {number} axisCount
+ * @param {string} flavor - 'gvar'
+ * @param {Array} glyphs
+ * @param {function(Error, number, number, boolean)} [onGlyphVariationsError] - called with the error and the glyph index
+ * of the variation data of a glyph that fails to parse when it is first read (see parseGlyphVariations), which is then
+ * undefined, with the error, the glyph index and the tuple index of the data of a tuple that fail to parse when they
+ * are first read, which are then null, and with true too for the first tuple variation header that fails to parse, the
+ * tuples from it skipped (see parseTupleVariationStore); the error is thrown if omitted
+ * @returns {Object<number, object|undefined>} the variation data by glyph index
+ */
+Parser.prototype.parseTupleVariationStoreList = function(axisCount, flavor, glyphs, onGlyphVariationsError = throwError) {
     const glyphCount = this.parseUShort();
     const flags = this.parseUShort();
     const offsetSizeIs32Bit = flags & 0x01;
@@ -1103,11 +1330,12 @@ Parser.prototype.parseTupleVariationStoreList = function(axisCount, flavor, glyp
         if (!offsetSizeIs32Bit) nextOffset *= 2;
         
         const length = nextOffset - currentOffset;
-        const tableOffset = glyphVariationDataArrayOffset + currentOffset;
+        const glyphVariationsStart = this.offset + glyphVariationDataArrayOffset + currentOffset;
 
         // the variation data of a glyph is parsed when it is first read, e.g. when its outline is first varied
         if (length) {
-            defineLazyProperty(glyphVariations, i, () => this.parseTupleVariationStore(tableOffset, axisCount, flavor, glyphs, i));
+            defineLazyProperty(glyphVariations, i, () => parseGlyphVariations(this.data, glyphVariationsStart, length,
+                axisCount, flavor, glyphs, i, onGlyphVariationsError));
         } else {
             glyphVariations[i] = undefined;
         }
@@ -1118,7 +1346,50 @@ Parser.prototype.parseTupleVariationStoreList = function(axisCount, flavor, glyp
     return glyphVariations;
 };
 
-Parser.prototype.parseTupleVariationStore = function(tableOffset, axisCount, flavor, glyphs, glyphIndex) {
+/**
+ * Parse the serialized data of a tuple of a tuple variation store from its bytes only, like HarfBuzz
+ * (gvar::apply_deltas_to_points): its private point numbers, when it has them, and its deltas, x and y for gvar
+ * @param {DataView} data
+ * @param {number} start - the offset of the serialized data of the tuple in the data
+ * @param {number} size - the variationDataSize of the tuple
+ * @param {boolean} hasPrivatePoints
+ * @param {function(Array<number>|undefined): number} getDeltaCount - the number of deltas of the tuple, from its private
+ * point numbers (undefined without them)
+ * @param {string} flavor - 'gvar' or 'cvar'
+ * @returns {{privatePoints: Array<number>|undefined, deltas: Array<number>, deltasY: Array<number>|undefined}}
+ */
+function parseTupleData(data, start, size, hasPrivatePoints, getDeltaCount, flavor) {
+    if (start + size > data.byteLength) {
+        throw new RangeError('The serialized data of the tuple end past the end of the data');
+    }
+    const parser = new Parser(getTableView(data, start, size), 0);
+    const privatePoints = hasPrivatePoints ? parser.parsePackedPointNumbers() : undefined;
+    const deltaCount = getDeltaCount(privatePoints);
+    const deltas = parser.parsePackedDeltas(deltaCount);
+    const deltasY = flavor === 'gvar' ? parser.parsePackedDeltas(deltaCount) : undefined;
+    return { privatePoints, deltas, deltasY };
+}
+
+/**
+ * Parse a tuple variation store of a gvar table (the GlyphVariationData of a glyph) or of a cvar table: the tuple
+ * variation headers and the shared point numbers, then the private point numbers and the deltas of each tuple, read
+ * when one of them is first used. Like HarfBuzz reads the data of a tuple only when it is active
+ * (gvar::apply_deltas_to_points), the data of a tuple that fail to parse (e.g. that end past the end of the store) fail
+ * when they are first read: its privatePoints, deltas and deltasY are then null. Like HarfBuzz (tuple_iterator_t), the
+ * tuples from the first tuple variation header that fails to parse (e.g. a tupleVariationCount larger than the headers
+ * the store has) are skipped, and the tuples before it are kept.
+ * @param {number} tableOffset - the offset of the store in the table
+ * @param {number} axisCount
+ * @param {string} flavor - 'gvar' or 'cvar'
+ * @param {Array} glyphs - the glyphs of the font for gvar, the cvt table for cvar
+ * @param {number} [glyphIndex] - the glyph of the store, for gvar
+ * @param {function(Error, number, boolean)} [onTupleError] - called with the error and the tuple index of the data of a
+ * tuple that fail to parse when they are first read, and with the error, the tuple index and true for the first header
+ * that fails to parse, the tuples from it skipped, once the shared point numbers are parsed (not for a store that
+ * fails to parse); the error is thrown if omitted
+ * @returns {{headers: object[], sharedPoints: number[]}}
+ */
+Parser.prototype.parseTupleVariationStore = function(tableOffset, axisCount, flavor, glyphs, glyphIndex, onTupleError = throwError) {
     const relativeOffset = this.relativeOffset;
     
     this.relativeOffset = tableOffset;
@@ -1134,12 +1405,23 @@ Parser.prototype.parseTupleVariationStore = function(tableOffset, axisCount, fla
     let dataOffset = this.parseOffset16();
     const headers = [];
     let sharedPoints = [];
-    
-    for(let h = 0; h < count; h++) {
-        const headerData = this.parseTupleVariationHeader(axisCount, flavor);
-        headers.push(headerData);
+    // the error of the first header that does not fit in the data, passed to onTupleError once the shared point
+    // numbers are parsed: a store whose shared point numbers fail to parse fails whole, with no header error
+    let headerError;
+
+    for (let i = 0; i < count; i++) {
+        let header;
+        try {
+            header = this.parseTupleVariationHeader(axisCount, flavor);
+        } catch (error) {
+            // like HarfBuzz (tuple_iterator_t), the tuples from the first header that does not fit in the data are
+            // skipped
+            headerError = { error, tupleIndex: i };
+            break;
+        }
+        headers.push(header);
     }
-    
+
     if (this.relativeOffset !== tableOffset + dataOffset) {
         console.warn(`Unexpected offset after parsing tuple variation headers! Expected ${tableOffset + dataOffset}, actually ${this.relativeOffset}`);
         this.relativeOffset = tableOffset + dataOffset;
@@ -1148,78 +1430,74 @@ Parser.prototype.parseTupleVariationStore = function(tableOffset, axisCount, fla
     if (hasSharedPoints) {
         sharedPoints = this.parsePackedPointNumbers();
     }
+    if (headerError) {
+        onTupleError(headerError.error, headerError.tupleIndex, true);
+    }
 
     let serializedDataOffset = this.relativeOffset;
 
-    for(let h = 0; h < count; h++) {
+    for(let h = 0; h < headers.length; h++) {
         const header = headers[h];
-        this.relativeOffset = serializedDataOffset;
-        
+
         if(flavor === 'cvar' && !header.peakTuple) {
             console.warn('An embedded peak tuple is required in TupleVariationHeaders for the cvar table.');
         }
 
-        if(header.flags.privatePointNumbers) {
-            header.privatePoints = this.parsePackedPointNumbers();
-        }
+        const hasPrivatePoints = header.flags.privatePointNumbers;
         delete header.flags; // we don't need to expose this
-        
-        const deltasOffset = this.offset;
-        const deltasRelativeOffset = this.relativeOffset;
 
-        const defineDeltas = (propertyName) => {
-            let _deltas = undefined;
-            let _deltasY = undefined;
+        // one delta per point number of the tuple, like fontTools (TupleVariation.decompileDeltas_)
+        const getDeltaCount = (privatePoints) => {
+            // if the tuple had private points flag, use that list length (even if empty = all points).
+            // if no flag, fall back to shared points length.
+            const pointCount = getTuplePointNumbers({ privatePoints }, sharedPoints).length;
+            if (pointCount) {
+                return pointCount;
+            }
+            if (flavor === 'cvar') {
+                return glyphs.length; // glyphs here is actually font.tables.cvt
+            }
+            // empty glyphs (eg. space) have no points but still have phantom points
+            // add 4 phantom points, see https://learn.microsoft.com/en-us/typography/opentype/spec/tt_instructing_glyphs#phantoms
+            // @TODO: actually generate these points from glyph.getBoundingBox() and glyph.getMetrics(),
+            // as they may be influenced by variation as well
+            return getGlyphVariationPointCount(glyphs.get(glyphIndex)) + 4;
+        };
+        const tupleDataStart = this.offset + serializedDataOffset;
+        const tupleDataSize = header.variationDataSize;
 
-            const parseDeltas = () => {
-                let pointsCount = 0;
-                if(flavor === 'gvar') {
-                    // if the tuple had private points flag, use that list length (even if empty = all points).
-                    // if no flag, fall back to shared points length.
-                    pointsCount = getTuplePointNumbers(header, sharedPoints).length;
-                    if(!pointsCount) {
-                        // empty glyphs (eg. space) have no points but still have phantom points
-                        pointsCount = getGlyphVariationPointCount(glyphs.get(glyphIndex));
-                        // add 4 phantom points, see https://learn.microsoft.com/en-us/typography/opentype/spec/tt_instructing_glyphs#phantoms
-                        // @TODO: actually generate these points from glyph.getBoundingBox() and glyph.getMetrics(),
-                        // as they may be influenced by variation as well
-                        pointsCount+= 4;
-                    }
-                } else if (flavor === 'cvar') {
-                    pointsCount = glyphs.length; // glyphs here is actually font.tables.cvt
+        // the private point numbers and the deltas of the tuple, all parsed when one of them is first read, null when
+        // they fail to parse
+        let tupleData = undefined;
+        const getTupleData = () => {
+            if (tupleData === undefined) {
+                try {
+                    tupleData = parseTupleData(this.data, tupleDataStart, tupleDataSize, hasPrivatePoints,
+                        getDeltaCount, flavor);
+                } catch (error) {
+                    onTupleError(error, h);
+                    tupleData = null;
                 }
-                
-                this.offset = deltasOffset;
-                this.relativeOffset = deltasRelativeOffset;
-                _deltas = this.parsePackedDeltas(pointsCount);
-                
-                if(flavor === 'gvar') {
-                    _deltasY = this.parsePackedDeltas(pointsCount);
-                }
-            };
-
-            return {
+            }
+            return tupleData;
+        };
+        const defineTupleDataProperty = (propertyName, enumerable) => {
+            Object.defineProperty(header, propertyName, {
                 configurable: true,
-        
-                get: function() {
-                    if(_deltas === undefined) parseDeltas();
-                    return propertyName === 'deltasY' ? _deltasY : _deltas;
-                },
-        
-                set: function(deltas) {
-                    if(_deltas === undefined) parseDeltas();
-                    if(propertyName === 'deltasY') {
-                        _deltasY = deltas;
-                    } else {
-                        _deltas = deltas;
-                    }
+                enumerable,
+                get: () => getTupleData() && tupleData[propertyName],
+                set: (value) => {
+                    tupleData = Object.assign({}, getTupleData(), { [propertyName]: value });
                 }
-            };
+            });
         };
 
-        Object.defineProperty(header, 'deltas', defineDeltas.call(this, 'deltas'));
+        if (hasPrivatePoints) {
+            defineTupleDataProperty('privatePoints', true);
+        }
+        defineTupleDataProperty('deltas', false);
         if(flavor === 'gvar') {
-            Object.defineProperty(header, 'deltasY', defineDeltas.call(this, 'deltasY'));
+            defineTupleDataProperty('deltasY', false);
         }
 
         serializedDataOffset += header.variationDataSize;
@@ -1344,4 +1622,4 @@ export default {
     Parser,
 };
 
-export { Parser };
+export { Parser, createSkippablePartParser, getTableView, isDeviceTableInData, parseSkippableStruct, throwError };

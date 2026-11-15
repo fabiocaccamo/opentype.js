@@ -3,7 +3,7 @@
 import check from './check.mjs';
 import draw from './draw.mjs';
 import Path from './path.mjs';
-import { getPaletteColor, formatColor } from './tables/cpal.mjs';
+import { getPaletteColor, checkPaletteIndex, isPaletteColorDrawn, formatColor } from './tables/cpal.mjs';
 // import glyf from './tables/glyf' Can't be imported here, because it's a circular dependency
 
 function getPathDefinition(glyph, path) {
@@ -213,9 +213,20 @@ Glyph.prototype.getPath = function(x, y, fontSize, options, font) {
     if ( options.drawLayers ) {
         const layers = this.getLayers(font);
         if ( layers && layers.length ) {
+            // the layers of a COLR glyph come with a CPAL table (see LayerManager.get): a palette it has not is an
+            // error of the caller, a CPAL table without palettes one of the font
+            const cpalTable = font.tables.cpal;
+            if (cpalTable.colorRecordIndices.length) {
+                checkPaletteIndex(cpalTable, options.usePalette);
+            }
             p._layers = [];
             for ( let i = 0; i < layers.length; i += 1 ) {
                 const layer = layers[i];
+                // like HarfBuzz, a layer of a glyph id the font has not, or of a color the palette has not (e.g. of a
+                // CPAL table without palettes), draws nothing
+                if (!layer.glyph || !isPaletteColorDrawn(cpalTable, layer.paletteIndex, options.usePalette)) {
+                    continue;
+                }
                 let color = getPaletteColor(font, layer.paletteIndex, options.usePalette);
                 
                 if ( color === 'currentColor' ) {
@@ -394,8 +405,8 @@ Glyph.prototype.drawPoints = function(ctx, x, y, fontSize, options, font) {
         const layers = this.getLayers(font);
         if ( layers && layers.length ) {
             for ( let l = 0; l < layers.length; l += 1 ) {
-                // prevent endless loop: ignore layers with own glyph id
-                if(layers[l].glyph.index !== this.index) {
+                // prevent endless loop: ignore layers with own glyph id, and the layers of a glyph id the font has not
+                if(layers[l].glyph && layers[l].glyph.index !== this.index) {
                     this.drawPoints.call(layers[l].glyph, ctx, x, y, fontSize);
                 }
             }

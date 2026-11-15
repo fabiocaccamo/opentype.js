@@ -7,6 +7,7 @@ import table from '../table.mjs';
 import { getNameByID } from './name.mjs';
 
 const subtableParsers = new Array(9);         // subtableParsers[0] is unused
+const EXTENSION_LOOKUP_TYPE = 7;
 
 // https://www.microsoft.com/typography/OTSPEC/GSUB.htm#SS
 subtableParsers[1] = function parseLookup1() {
@@ -82,6 +83,8 @@ subtableParsers[7] = function parseLookup7() {
     const substFormat = this.parseUShort();
     check.argument(substFormat === 1, 'GSUB Extension Substitution subtable identifier-format must be 1');
     const extensionLookupType = this.parseUShort();
+    check.argument(extensionLookupType >= 1 && extensionLookupType <= 8 && extensionLookupType !== 7,
+        'GSUB extension lookup type must be 1 to 6 or 8');
     const extensionParser = new Parser(this.data, this.offset + this.parseULong());
     return {
         substFormat: 1,
@@ -130,28 +133,31 @@ function resolveFeatureParamsNames(features, names) {
     }
 }
 
-// https://www.microsoft.com/typography/OTSPEC/gsub.htm
-function parseGsubTable(data, start, names) {
+/**
+ * Parse a GSUB table
+ * https://www.microsoft.com/typography/OTSPEC/gsub.htm
+ * @param {DataView} data
+ * @param {number} [start=0] - the offset of the table in the data
+ * @param {Object} [names] - the names of the font, for the UI names of the FeatureParams tables
+ * @param {function(Error, number, number|undefined)} [onSubtableError] - called with the error, the lookup index and the
+ * subtable index of each lookup subtable that fails to parse, which is then undefined in its lookup, and with an
+ * undefined subtable index for an extension lookup whose subtables are all skipped (see parseLookupList in parse.mjs);
+ * the error is thrown if omitted
+ * @returns {object}
+ */
+function parseGsubTable(data, start, names, onSubtableError) {
     start = start || 0;
     const p = new Parser(data, start);
     const tableVersion = p.parseVersion(1);
     check.argument(tableVersion === 1 || tableVersion === 1.1, 'Unsupported GSUB table version.');
-    let gsub;
-    if (tableVersion === 1) {
-        gsub = {
-            version: tableVersion,
-            scripts: p.parseScriptList(),
-            features: p.parseFeatureList(),
-            lookups: p.parseLookupList(subtableParsers)
-        };
-    } else {
-        gsub = {
-            version: tableVersion,
-            scripts: p.parseScriptList(),
-            features: p.parseFeatureList(),
-            lookups: p.parseLookupList(subtableParsers),
-            variations: p.parseFeatureVariationsList()
-        };
+    const gsub = {
+        version: tableVersion,
+        scripts: p.parseScriptList(),
+        features: p.parseFeatureList(),
+        lookups: p.parseLookupList(subtableParsers, onSubtableError, EXTENSION_LOOKUP_TYPE)
+    };
+    if (tableVersion === 1.1) {
+        gsub.variations = p.parseFeatureVariationsList();
     }
     if (names) {
         resolveFeatureParamsNames(gsub.features, names);

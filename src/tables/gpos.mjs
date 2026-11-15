@@ -2,10 +2,11 @@
 // https://docs.microsoft.com/en-us/typography/opentype/spec/gpos
 
 import check from '../check.mjs';
-import { Parser } from '../parse.mjs';
+import { Parser, isDeviceTableInData } from '../parse.mjs';
 import table from '../table.mjs';
 
 const subtableParsers = new Array(10);         // subtableParsers[0] is unused
+const EXTENSION_LOOKUP_TYPE = 9;
 
 // https://docs.microsoft.com/en-us/typography/opentype/spec/gpos#lookup-type-1-single-adjustment-positioning-subtable
 // this = Parser instance
@@ -85,10 +86,14 @@ subtableParsers[2] = function parseLookup2() {
 // https://learn.microsoft.com/en-us/typography/opentype/spec/gpos#anchor-tables
 // this = Parser instance at the start of the Anchor table, which the offsets of its Device tables are relative to.
 // The contour point of format 2 is read but, like HarfBuzz without hinting, not used: the anchor is its coordinates.
+// Like HarfBuzz, an anchor of an unknown format is the anchor 0 0, and an anchor of format 3 with a Device table that
+// ends past the end of the data is read as a NULL anchor offset (undefined).
 function parseAnchor() {
     const start = this.offset + this.relativeOffset;
     const anchorFormat = this.parseUShort();
-    check.assert(anchorFormat >= 1 && anchorFormat <= 3, '0x' + start.toString(16) + ': GPOS anchor format must be 1, 2 or 3.');
+    if (anchorFormat < 1 || anchorFormat > 3) {
+        return { anchorFormat, xCoordinate: 0, yCoordinate: 0 };
+    }
     const anchor = {
         anchorFormat,
         xCoordinate: this.parseShort(),
@@ -97,10 +102,26 @@ function parseAnchor() {
     if (anchorFormat === 2) {
         anchor.anchorPoint = this.parseUShort();
     } else if (anchorFormat === 3) {
-        anchor.xDevice = this.parsePointer(Parser.prototype.parseDeviceTable);
-        anchor.yDevice = this.parsePointer(Parser.prototype.parseDeviceTable);
+        const xDeviceOffset = this.parseOffset16();
+        const yDeviceOffset = this.parseOffset16();
+        if (!isAnchorDeviceInData(this.data, start, xDeviceOffset) || !isAnchorDeviceInData(this.data, start, yDeviceOffset)) {
+            return undefined;
+        }
+        anchor.xDevice = xDeviceOffset ? new Parser(this.data, start + xDeviceOffset).parseDeviceTable() : undefined;
+        anchor.yDevice = yDeviceOffset ? new Parser(this.data, start + yDeviceOffset).parseDeviceTable() : undefined;
     }
     return anchor;
+}
+
+/**
+ * Whether the Device table of an anchor of format 3 is a NULL offset or ends inside the data
+ * @param {DataView} data
+ * @param {number} anchorStart - the offset of the anchor in the data
+ * @param {number} deviceOffset - the offset of the Device table from the anchor
+ * @returns {boolean}
+ */
+function isAnchorDeviceInData(data, anchorStart, deviceOffset) {
+    return !deviceOffset || isDeviceTableInData(data, anchorStart + deviceOffset);
 }
 
 // https://learn.microsoft.com/en-us/typography/opentype/spec/gpos#mark-array-table
@@ -209,13 +230,9 @@ subtableParsers[9] = function parseLookup9() {
     const start = this.offset + this.relativeOffset;
     const posFormat = this.parseUShort();
     const extensionLookupType = this.parseUShort();
-    // a malformed extension subtable is skipped (see getLookupSubtables in position.mjs), without failing the parsing
-    if (posFormat !== 1) {
-        return { error: '0x' + start.toString(16) + ': GPOS lookup type 9 format must be 1.' };
-    }
-    if (extensionLookupType < 1 || extensionLookupType > 8) {
-        return { error: '0x' + start.toString(16) + ': GPOS extension lookup type must be 1 to 8.' };
-    }
+    check.assert(posFormat === 1, '0x' + start.toString(16) + ': GPOS lookup type 9 format must be 1.');
+    check.assert(extensionLookupType >= 1 && extensionLookupType <= 8,
+        '0x' + start.toString(16) + ': GPOS extension lookup type must be 1 to 8.');
     // the offset is relative to the start of this Extension Positioning subtable
     const extensionParser = new Parser(this.data, start + this.parseOffset32());
     return {
@@ -225,30 +242,32 @@ subtableParsers[9] = function parseLookup9() {
     };
 };
 
-// https://docs.microsoft.com/en-us/typography/opentype/spec/gpos
-function parseGposTable(data, start) {
+/**
+ * Parse a GPOS table
+ * https://docs.microsoft.com/en-us/typography/opentype/spec/gpos
+ * @param {DataView} data
+ * @param {number} [start=0] - the offset of the table in the data
+ * @param {function(Error, number, number|undefined)} [onSubtableError] - called with the error, the lookup index and the
+ * subtable index of each lookup subtable that fails to parse, which is then undefined in its lookup, and with an
+ * undefined subtable index for an extension lookup whose subtables are all skipped (see parseLookupList in parse.mjs);
+ * the error is thrown if omitted
+ * @returns {object}
+ */
+function parseGposTable(data, start, onSubtableError) {
     start = start || 0;
     const p = new Parser(data, start);
     const tableVersion = p.parseVersion(1);
     check.argument(tableVersion === 1 || tableVersion === 1.1, 'Unsupported GPOS table version ' + tableVersion);
-
-    if (tableVersion === 1) {
-        return {
-            version: tableVersion,
-            scripts: p.parseScriptList(),
-            features: p.parseFeatureList(),
-            lookups: p.parseLookupList(subtableParsers)
-        };
-    } else {
-        return {
-            version: tableVersion,
-            scripts: p.parseScriptList(),
-            features: p.parseFeatureList(),
-            lookups: p.parseLookupList(subtableParsers),
-            variations: p.parseFeatureVariationsList()
-        };
+    const gpos = {
+        version: tableVersion,
+        scripts: p.parseScriptList(),
+        features: p.parseFeatureList(),
+        lookups: p.parseLookupList(subtableParsers, onSubtableError, EXTENSION_LOOKUP_TYPE)
+    };
+    if (tableVersion === 1.1) {
+        gpos.variations = p.parseFeatureVariationsList();
     }
-
+    return gpos;
 }
 
 // GPOS Writing //////////////////////////////////////////////

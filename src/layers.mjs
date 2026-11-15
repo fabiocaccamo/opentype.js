@@ -28,7 +28,9 @@ export class LayerManager {
     /**
      * Gets the layers for a specific glyph
      * @param {integer} glyphIndex
-     * @returns {Array<Object>} array of layer objects {glyph, paletteIndex}
+     * @returns {Array<Object>} array of layer objects {glyph, paletteIndex}, the glyph undefined for a layer of a glyph
+     * id the font has not (which Glyph.getPath draws as nothing, like HarfBuzz), without the layers of the glyph past
+     * the layer records of the COLR table
      */
     get(glyphIndex) {
         const font = this.font;
@@ -49,17 +51,12 @@ export class LayerManager {
         }
         
         const firstIndex = baseGlyph.firstLayerIndex;
-        const numLayers = baseGlyph.numLayers;
-    
-        for( let l = 0; l < numLayers; l++ ) {
-            const layer = colr.layerRecords[firstIndex + l];
-            layers.push({
-                glyph: font.glyphs.get(layer.glyphID),
-                paletteIndex: layer.paletteIndex,
-            });
-        }
-    
-        return layers;
+        // like HarfBuzz (COLR::get_glyph_layers), the layers past the layer records are left out
+        const layerRecords = colr.layerRecords.slice(firstIndex, firstIndex + baseGlyph.numLayers);
+        return layerRecords.map(layer => ({
+            glyph: font.glyphs.get(layer.glyphID),
+            paletteIndex: layer.paletteIndex,
+        }));
     }
 
     /**

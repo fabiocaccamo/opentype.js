@@ -158,12 +158,17 @@ function Font(options) {
     // whether the layout caches the lookups of the GSUB and GPOS tables (see getCachedLayoutValue in layout.mjs),
     // set by parse with its layoutCache option
     this.isLayoutCacheEnabled = true;
+    // the optional tables, or parts of them, that failed to parse and were skipped, added by parse and when the
+    // variation data of a gvar or cvar table are first read (see FontWarning in opentype.mjs)
+    this.warnings = [];
     this.tables = this.tables || {};
 
     this.tables = new Proxy(this.tables, {
         set: (tables, tableName, tableData) => {
             tables[tableName] = tableData;
-            if (tables.fvar && (tables.gvar || tables.cff2) && !this.variation) {
+            // like HarfBuzz, a font with an fvar table varies its HVAR, MVAR, GDEF and GPOS data even without a gvar
+            // or CFF2 table (e.g. a gvar table that failed to parse and was skipped)
+            if (tables.fvar && !this.variation) {
                 this.variation = new VariationManager(this);
             }
             return true;
@@ -885,7 +890,7 @@ function getPositioningFeatureTags(font, options, scriptTags, shaper) {
  *                                                    the glyph of U+0020 SPACE and an advance of 0 (see stringToGlyphs and
  *                                                    Font.shape)
  * @property {boolean} [hinting=false] - whether to apply font hinting to the outlines
- * @property {integer} [usePalette=0] For COLR/CPAL fonts, the zero-based index of the color palette to use. (Use `Font.palettes.get()` to get the available palettes)
+ * @property {integer} [usePalette=0] For COLR/CPAL fonts, the zero-based index of the color palette to use. (Use `Font.palettes.get()` to get the available palettes); a palette that a CPAL table with palettes has not throws an Error when a COLR glyph is drawn with its layers
  * @property {boolean} [drawLayers=true] For COLR/CPAL fonts, this can be turned to false in order to draw the fallback glyphs instead
  * @property {boolean} [drawSVG=true] For SVG fonts, this can be turned to false in order to draw the fallback glyphs instead
  */
@@ -1223,11 +1228,15 @@ Font.prototype.drawMetrics = function(ctx, text, x, y, fontSize, options) {
 };
 
 /**
+ * The English name of a name ID (e.g. 'fontFamily') in the first platform names the font has (Unicode, else Macintosh,
+ * else Windows); undefined when that platform does not have it or the font has no names, e.g. a parsed font without a
+ * name table
  * @param  {string}
- * @return {string}
+ * @return {string|undefined}
  */
 Font.prototype.getEnglishName = function(name) {
-    const translations = (this.names.unicode || this.names.macintosh || this.names.windows)[name];
+    const platformNames = this.names.unicode || this.names.macintosh || this.names.windows;
+    const translations = platformNames && platformNames[name];
     if (translations) {
         return translations.en;
     }
@@ -1295,7 +1304,8 @@ Font.prototype.toBuffer = function() {
     return this.toArrayBuffer();
 };
 /**
- * Converts a `opentype.Font` into an `ArrayBuffer`
+ * Converts a `opentype.Font` into an `ArrayBuffer`. Throws an Error for a font without the English postScriptName name,
+ * nor the fontFamily and fontSubfamily names to make it from, e.g. a parsed font without a name table.
  * @return {ArrayBuffer}
  */
 Font.prototype.toArrayBuffer = function() {

@@ -18,12 +18,20 @@ describe('glyphset.mjs', function() {
                 readGlyphIndexes.push(glyphIndex);
                 return [139, 14];
             };
-            const glyph = glyphset.cffGlyphLoader(font, 1, parseCharstring, readCharstring, 1)();
+            // a glyph of a CFF2 table, the only one with the getBlendPath of its varied outline
+            const glyph = glyphset.cffGlyphLoader(font, 1, parseCharstring, readCharstring, 2)();
             assert.deepStrictEqual(readGlyphIndexes, []);
             assert.strictEqual(glyph.path.unitsPerEm, font.unitsPerEm);
             glyph.getBlendPath({ wght: 700 });
             assert.deepStrictEqual(readGlyphIndexes, [1]);
-            assert.deepStrictEqual(charstrings, [[[139, 14], 1, undefined], [[139, 14], 1, { wght: 700 }]]);
+            assert.deepStrictEqual(charstrings, [[[139, 14], 2, undefined], [[139, 14], 2, { wght: 700 }]]);
+        });
+
+        it('gives no getBlendPath to a glyph of a CFF1 table, whose charstring has no blend operator', function() {
+            const font = parse(readFileSync('./test/fonts/SourceSansPro-Regular.otf'));
+            const glyph = glyphset.cffGlyphLoader(font, 1, () => font.glyphs.get(1).path, () => [139, 14], 1)();
+            assert.strictEqual(glyph.getBlendPath, undefined);
+            assert.strictEqual(font.glyphs.get(1).getBlendPath, undefined);
         });
 
         it('gives the outlines of the charstrings of the glyphs, with or without lowMemory, like fontTools', function() {
@@ -60,6 +68,23 @@ describe('glyphset.mjs', function() {
                 const font = parse(buffer, options);
                 for (const [glyphIndex, expectedOutline] of Object.entries(expectedOutlines)) {
                     assert.deepStrictEqual(getOutline(font.glyphs.get(Number(glyphIndex))), expectedOutline, `${glyphIndex} ${JSON.stringify(options)}`);
+                }
+            }
+        });
+    });
+
+    describe('get', function() {
+        it('gives undefined for a glyph index the font has not, with or without lowMemory', function() {
+            // the numGlyphs of the maxp tables: Roboto-Black.ttf 1294 (glyf), SourceSansPro-Regular.otf 1113 (CFF)
+            for (const [fontPath, glyphCount] of [['./test/fonts/Roboto-Black.ttf', 1294], ['./test/fonts/SourceSansPro-Regular.otf', 1113]]) {
+                for (const options of [{}, { lowMemory: true }]) {
+                    const optionsName = `${fontPath} ${JSON.stringify(options)}`;
+                    const font = parse(readFileSync(fontPath), options);
+                    assert.strictEqual(font.numGlyphs, glyphCount, optionsName);
+                    assert.strictEqual(font.glyphs.get(glyphCount - 1).index, glyphCount - 1, optionsName);
+                    for (const glyphIndex of [glyphCount, 0xFFFF, -1]) {
+                        assert.strictEqual(font.glyphs.get(glyphIndex), undefined, `${optionsName} ${glyphIndex}`);
+                    }
                 }
             }
         });
